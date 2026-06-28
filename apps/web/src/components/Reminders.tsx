@@ -16,10 +16,15 @@ import {
   stopLocalReminders,
 } from '@/lib/localReminders';
 import { startGeofencing, stopGeofencing, geofencePref, geofencingSupported } from '@/lib/geo';
+import { requestNativePermission } from '@/lib/nativeReminders';
+import { isCapacitor } from '@/lib/platform';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
 
+// Ensure an OS-level notification permission for foreground geofence alerts: the
+// native channel on Capacitor, else the browser Notification API.
 async function ensureNotificationPermission(): Promise<boolean> {
+  if (isCapacitor) return requestNativePermission();
   if (!('Notification' in window)) return false;
   if (Notification.permission === 'granted') return true;
   return (await Notification.requestPermission()) === 'granted';
@@ -60,13 +65,21 @@ export function Reminders() {
       setLocalOn(false);
       setMsg('Reminders off');
     } else {
-      if (!(await ensureNotificationPermission())) {
+      // On Capacitor startLocalReminders requests the native permission itself; on
+      // web we need the Notification permission before scanning.
+      if (!isCapacitor && !(await ensureNotificationPermission())) {
         setMsg('Notification permission denied');
         return;
       }
-      startLocalReminders();
-      setLocalOn(true);
-      setMsg('Reminders on (this device, while the app is open)');
+      const ok = await startLocalReminders();
+      setLocalOn(ok);
+      setMsg(
+        !ok
+          ? 'Notification permission denied'
+          : isCapacitor
+            ? 'Reminders on — they fire even when the app is closed'
+            : 'Reminders on (this device, while the app is open)',
+      );
     }
   }
 
@@ -76,7 +89,7 @@ export function Reminders() {
       setGeoOn(false);
     } else {
       await ensureNotificationPermission(); // so alerts can actually show
-      setGeoOn(startGeofencing());
+      setGeoOn(await startGeofencing());
     }
   }
 

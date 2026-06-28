@@ -58,6 +58,8 @@ import {
   resolveUserByHaPerson,
   saveGps,
   getGps,
+  saveZone,
+  getUserLocation,
   startGpsScheduler,
   type AuthVars,
 } from './auth';
@@ -100,6 +102,7 @@ import {
   setTenantExpiry,
   setTenantLock,
   setTenantBlobQuota,
+  setTenantAdminEmail,
   deleteTenant,
   provisionTenant,
   validateSubdomain,
@@ -112,13 +115,36 @@ import {
   type TenantRecord,
 } from './control';
 import { sendOtcCode, sendBillingReceipt } from './email';
-import { listPlans, getPlan, extendExpiry, getSubscription } from './billing';
+// Version is single-sourced from the repo-root package.json. esbuild inlines this JSON
+// into the bundle at build time; tsx resolves it directly in dev.
+import rootPkg from '../../../package.json';
+import {
+  listPlans,
+  getPlan,
+  getSubscription,
+  recordPaidPeriod,
+  upsertSubscription,
+  setSubscriptionStatus,
+  markBillingEvent,
+} from './billing';
+import {
+  isSquareConfigured,
+  squareClientConfig,
+  createCustomer,
+  updateCustomer,
+  createCard,
+  createSubscription,
+  cancelSubscription,
+  retrieveSubscription,
+  verifyWebhookSignature,
+  planForVariation,
+} from './square';
 
 const PORT = Number(process.env.PORT ?? 3069);
 const DB_PATH = resolve(process.env.DATABASE_PATH ?? './data/carbon.db');
 const BLOBS_DIR = resolve(process.env.BLOBS_DIR ?? join(dirname(DB_PATH), 'blobs'));
 const STATIC_DIR = process.env.STATIC_DIR ?? '../web/dist';
-const VERSION = '0.1.0';
+const VERSION = rootPkg.version;
 // Apex domain that enables subdomain-per-tenant routing (e.g. "carbon.etx.sx").
 // Unset => pure single-tenant self-host: every request hits the default tenant.
 // Normalised defensively: a scheme/path/port is stripped so BASE_DOMAIN=
@@ -877,7 +903,16 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     const userId =
       (body.person ? resolveUserByHaPerson(db, body.person) : null) ?? c.get('userId');
     if (userId === 'local') return c.json({ error: 'no user' }, 400);
-    if ((body.event ?? 'enter') !== 'enter') return c.json({ ok: true, matched: 0 });
+
+    const isEnter = (body.event ?? 'enter') === 'enter';
+    // Persist the user's current location so GET /where (and the Nearby view) can
+    // read it. Entering a named zone sets it; leaving clears it. Any coords given
+    // refresh the latest GPS fix too.
+    if (body.zone != null) saveZone(db, userId, isEnter ? body.zone : null);
+    if (typeof body.lat === 'number' && typeof body.lng === 'number') {
+      saveGps(db, userId, body.lat, body.lng);
+    }
+    if (!isEnter) return c.json({ ok: true, matched: 0 });
 
     const visible = visibleItemIds(db, userId);
     const items = allItems(db).filter((i) => visible.has(i.id));
@@ -898,37 +933,147 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return c.json({ ok: true, matched: matched.length });
   });
 
-  // ----- billing (subscription / renew) ---------------------------------------
+  // The user's current location (latest HA zone + latest GPS fix), for the Nearby
+  // view. Either field may be null; both null means we don't know where they are.
+  api.get('/where', requireScope('tasks:read'), (c) => {
+    const userId = c.get('userId');
+    if (userId === 'local') return c.json({ zone: null, lat: null, lng: null, updatedAt: null });
+    return c.json(getUserLocation(db, userId));
+  });
+
+  // ----- billing (auto-renewing subscriptions) --------------------------------
   // Tenant-admin actions. Reachable even when the workspace is locked (the dispatcher
   // allowlists /api/billing*) so an admin can self-serve a renewal from the gate.
+  // Provider: 'square' when SQUARE_* is configured (real card-on-file auto-renew), else
+  // 'simulate' (local pending→paid→renew→cancel lifecycle, no external charge).
   // The default/self-host tenant (id 'default') has no control-plane row → no billing.
+  const billingProvider = () => (isSquareConfigured() ? 'square' : 'simulate');
+
   api.get('/billing', requireAdmin, (c) => {
     const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
+    const provider = billingProvider();
     return c.json({
+      provider,
       plans: listPlans(),
       expiresAt: rec?.expires_at ?? null,
       locked: rec ? tenantLockState(rec) === 'locked' : false,
       subscription: rec ? getSubscription(controlDb, ctx.id) : null,
+      billingEmail: rec?.admin_email ?? null,
+      square: provider === 'square' ? squareClientConfig() : null,
     });
   });
 
-  api.post('/billing/checkout', requireAdmin, async (c) => {
+  // Start (or renew) a subscription. Square: needs a Web Payments SDK card token →
+  // customer + card-on-file + subscription (auto-renews; expiry set by the webhook).
+  // Simulate: records a pending subscription the client then "pays" via /billing/simulate.
+  api.post('/billing/subscribe', requireAdmin, async (c) => {
     const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
     if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
-    const b = (await c.req.json().catch(() => ({}))) as { planId?: string };
+    const b = (await c.req.json().catch(() => ({}))) as {
+      planId?: string;
+      cardToken?: string;
+      email?: string;
+    };
     const plan = b.planId ? getPlan(b.planId) : undefined;
     if (!plan) return c.json({ error: 'unknown plan' }, 400);
-    // Dummy provider: treat as an immediate success (no external redirect). A real
-    // provider (Square) replaces this with a checkout redirect + a webhook that calls
-    // the same extendExpiry() once payment confirms.
-    const externalId = `dummy_${randomUUID()}`;
-    const newExpiry = extendExpiry(controlDb, ctx.id, plan, { provider: 'dummy', externalId });
+
+    if (billingProvider() === 'square') {
+      if (!b.cardToken) return c.json({ error: 'card token required' }, 400);
+      // Square requires the customer to have an email (it emails invoices/receipts).
+      // Use the workspace email if set, else the one supplied at subscribe time.
+      const email = (rec.admin_email || b.email?.trim() || '').toLowerCase();
+      if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        return c.json({ error: 'a billing email address is required' }, 400);
+      }
+      try {
+        const existing = getSubscription(controlDb, ctx.id);
+        let customerId = existing?.square_customer_id ?? null;
+        if (customerId) {
+          // Reused customer may predate having an email — make sure it has one now.
+          await updateCustomer(customerId, { email, name: rec.display_name });
+        } else {
+          customerId = await createCustomer({ tenantId: ctx.id, email, name: rec.display_name });
+        }
+        // Remember the email on the workspace for future receipts/renewals.
+        if (!rec.admin_email) setTenantAdminEmail(controlDb, ctx.id, email);
+        const cardId = await createCard(customerId, b.cardToken);
+        const sub = await createSubscription({ customerId, cardId, planId: plan.id });
+        upsertSubscription(controlDb, ctx.id, {
+          provider: 'square',
+          status: sub.status === 'ACTIVE' ? 'active' : 'pending',
+          plan_id: plan.id,
+          external_id: sub.id,
+          square_customer_id: customerId,
+          square_subscription_id: sub.id,
+          canceled_at: null,
+        });
+        // If Square already billed (charged_through_date present), reflect it now; else
+        // the invoice.payment_made webhook will extend expiry shortly.
+        if (sub.chargedThrough) {
+          recordPaidPeriod(controlDb, ctx.id, plan, {
+            provider: 'square',
+            externalId: sub.id,
+            chargedThrough: sub.chargedThrough,
+            squareCustomerId: customerId,
+            squareSubscriptionId: sub.id,
+          });
+        }
+        return c.json({ ok: true, provider: 'square', status: sub.status, subscriptionId: sub.id }, 201);
+      } catch (e) {
+        return c.json({ error: (e as Error).message }, 400);
+      }
+    }
+
+    // Simulate provider: stage a pending subscription; the client confirms via /simulate.
+    const externalId = `sim_${randomUUID()}`;
+    upsertSubscription(controlDb, ctx.id, {
+      provider: 'simulate',
+      status: 'pending',
+      plan_id: plan.id,
+      external_id: externalId,
+      canceled_at: null,
+    });
+    return c.json({ ok: true, provider: 'simulate', status: 'pending', subscriptionId: externalId }, 201);
+  });
+
+  // Dev/local only: stand in for the Square "invoice.payment_made" webhook so the
+  // simulate provider's full pending→paid→renew flow is testable without Square.
+  api.post('/billing/simulate', requireAdmin, async (c) => {
+    if (billingProvider() !== 'simulate') {
+      return c.json({ error: 'simulate is unavailable when a real payment provider is configured' }, 400);
+    }
+    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
+    if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
+    const sub = getSubscription(controlDb, ctx.id);
+    const plan = sub?.plan_id ? getPlan(sub.plan_id) : undefined;
+    if (!sub || !plan) return c.json({ error: 'no subscription to charge — subscribe first' }, 400);
+    const newExpiry = recordPaidPeriod(controlDb, ctx.id, plan, {
+      provider: 'simulate',
+      externalId: sub.external_id ?? `sim_${randomUUID()}`,
+    });
     if (rec.admin_email) {
       void sendBillingReceipt(rec.admin_email, plan.label, newExpiry).catch((e) =>
         console.error('[carbon] billing receipt failed:', e),
       );
     }
-    return c.json({ ok: true, expiresAt: newExpiry, plan: plan.id }, 201);
+    return c.json({ ok: true, expiresAt: newExpiry }, 201);
+  });
+
+  // Cancel: stop auto-renewal. Access remains until the current period end (expiry).
+  api.post('/billing/cancel', requireAdmin, async (c) => {
+    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
+    if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
+    const sub = getSubscription(controlDb, ctx.id);
+    if (!sub) return c.json({ error: 'no active subscription' }, 400);
+    try {
+      if (billingProvider() === 'square' && sub.square_subscription_id) {
+        await cancelSubscription(sub.square_subscription_id);
+      }
+      setSubscriptionStatus(controlDb, ctx.id, 'canceled', { canceledAt: new Date().toISOString() });
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
   });
 
   const tenantApp = new Hono<Env>();
@@ -1091,6 +1236,90 @@ function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boole
 }
 
 const host = new Hono<{ Variables: HostVars }>();
+
+// ----- Square webhooks (public, HMAC-verified) ------------------------------
+// One global endpoint for all tenants; the tenant is resolved from the subscription
+// id carried by the event. Must be reachable at exactly SQUARE_WEBHOOK_URL (the URL is
+// part of the HMAC). Not behind host-admin auth — Square authenticates via the signature.
+
+function tenantBySquareSub(subscriptionId: string): string | null {
+  return (
+    controlDb.get<{ tenant_id: string }>(
+      'SELECT tenant_id FROM subscriptions WHERE square_subscription_id = ?',
+      [subscriptionId],
+    )?.tenant_id ?? null
+  );
+}
+
+async function applySquareInvoicePaid(subscriptionId: string): Promise<void> {
+  const tenantId = tenantBySquareSub(subscriptionId);
+  if (!tenantId) return; // unknown subscription — ignore
+  const sub = await retrieveSubscription(subscriptionId);
+  const planId = (sub.planVariationId && planForVariation(sub.planVariationId)) ||
+    getSubscription(controlDb, tenantId)?.plan_id ||
+    '';
+  const plan = getPlan(planId);
+  if (!plan) {
+    console.error(`[carbon] webhook: no plan for subscription ${subscriptionId} (variation ${sub.planVariationId})`);
+    return;
+  }
+  // chargedThrough makes this idempotent: re-processing sets expiry to the same date.
+  const newExpiry = recordPaidPeriod(controlDb, tenantId, plan, {
+    provider: 'square',
+    externalId: subscriptionId,
+    chargedThrough: sub.chargedThrough,
+    squareSubscriptionId: subscriptionId,
+  });
+  const rec = getTenantById(controlDb, tenantId);
+  if (rec?.admin_email) {
+    void sendBillingReceipt(rec.admin_email, plan.label, newExpiry).catch((e) =>
+      console.error('[carbon] billing receipt failed:', e),
+    );
+  }
+}
+
+host.post('/billing/webhook', async (c) => {
+  const raw = await c.req.text();
+  const sig = c.req.header('x-square-hmacsha256-signature');
+  if (!verifyWebhookSignature(raw, sig)) return c.json({ error: 'bad signature' }, 401);
+  let event: {
+    event_id?: string;
+    type?: string;
+    data?: { object?: { invoice?: { subscription_id?: string }; subscription?: { id?: string; status?: string } } };
+  };
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    return c.json({ error: 'bad json' }, 400);
+  }
+  const eventId = event.event_id;
+  const type = event.type ?? '';
+  if (!eventId) return c.json({ error: 'no event id' }, 400);
+  const obj = event.data?.object ?? {};
+  try {
+    if (type === 'invoice.payment_made') {
+      const subId = obj.invoice?.subscription_id;
+      if (subId) await applySquareInvoicePaid(subId);
+    } else if (type === 'invoice.payment_failed') {
+      const tId = obj.invoice?.subscription_id ? tenantBySquareSub(obj.invoice.subscription_id) : null;
+      if (tId) setSubscriptionStatus(controlDb, tId, 'past_due');
+    } else if (type === 'subscription.updated') {
+      const s = obj.subscription;
+      if (s?.id && (s.status === 'CANCELED' || s.status === 'DEACTIVATED')) {
+        const tId = tenantBySquareSub(s.id);
+        if (tId) setSubscriptionStatus(controlDb, tId, 'canceled', { canceledAt: new Date().toISOString() });
+      }
+    }
+    // Mark only after successful handling so a transient failure lets Square retry the
+    // same event_id. recordPaidPeriod is idempotent (absolute expiry), so a rare
+    // double-process is harmless.
+    markBillingEvent(controlDb, eventId, type);
+  } catch (e) {
+    console.error('[carbon] webhook handling failed:', e);
+    return c.json({ error: 'handling failed' }, 500); // 5xx → Square retries
+  }
+  return c.json({ ok: true });
+});
 
 // Self-service signup, step 1: stage the workspace + email a one-time code. The tenant
 // is NOT created yet — only on /signup/verify once the email is proven.

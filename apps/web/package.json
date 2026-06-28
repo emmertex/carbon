@@ -1,6 +1,5 @@
 {
   "name": "@carbon/web",
-  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +11,8 @@
   },
   "dependencies": {
     "@capacitor/core": "^6.2.1",
+    "@capacitor/geolocation": "^6.1.0",
+    "@capacitor/local-notifications": "^6.1.2",
     "@capacitor/push-notifications": "^6.0.5",
     "@carbon/core": "*",
     "@dnd-kit/core": "^6.3.1",

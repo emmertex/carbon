@@ -102,6 +102,47 @@
   --prio-3-fill: #ff8a8a;
 }
 
+/* Gruvbox Light Hard. Light theme — inherits the bright-ring/dark-fill prio
+   vars from :root. */
+[data-theme="gruvboxlight"] {
+  --bg: #fbf1c7;
+  --surface: #f9f5d7;
+  --surface-2: #ebdbb2;
+  --border: #d5c4a1;
+  --border-strong: #bdae93;
+  --text: #3c3836;
+  --text-muted: #665c54;
+  --text-faint: #7c6f64;
+  --danger: #9d0006;
+  --warning: #b57614;
+  --success: #79740e;
+}
+
+/* Ayu Dark. */
+[data-theme="ayu"] {
+  --bg: #0b0e14;
+  --surface: #0f131a;
+  --surface-2: #1c212b;
+  --border: #273747;
+  --border-strong: #36465a;
+  --text: #bfbdb6;
+  --text-muted: #9199a3;
+  --text-faint: #5c6773;
+  --danger: #f07178;
+  --warning: #ffb454;
+  --success: #aad94c;
+
+  /* Dark theme: dim ring, bright fill. */
+  --prio-0-ring: #404040;
+  --prio-0-fill: #a0a0a0;
+  --prio-1-ring: #0060ff;
+  --prio-1-fill: #70b0ff;
+  --prio-2-ring: #ffd000;
+  --prio-2-fill: #ffd070;
+  --prio-3-ring: #ff0000;
+  --prio-3-fill: #ff8a8a;
+}
+
 /* Accents (override --accent only; hover/soft derive). After themes so they win.
    Light accents (amber/green/orange) carry near-black --accent-fg for legible button
    text; the rest keep the default white. */

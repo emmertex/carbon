@@ -14,7 +14,6 @@ import {
   arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical } from 'lucide-react';
 import { reorderItem, getChildren } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { enrichItems } from '@/lib/enrich';
@@ -122,38 +121,28 @@ function SortableRow({
 }) {
   const expanded = useStore((s) => s.expanded.has(data.item.id));
   const toggleExpanded = useStore((s) => s.toggleExpanded);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: data.item.id,
   });
   const reveal = nestSubtasks && data.hasChildren;
 
+  // Whole-row press-and-hold drag (see `sensors` below): no visible handle —
+  // holding ~200ms lifts the row, a quick tap still selects it.
   return (
     <div
       ref={setNodeRef}
+      {...listeners}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`group/sortable ${isDragging ? 'z-10 opacity-80' : ''}`}
+      className={`select-none group/sortable ${isDragging ? 'z-10 opacity-80' : ''}`}
     >
-      {/* Handle is positioned relative to the top row only, so it stays put when
-          the subtree is expanded below. */}
-      <div className="relative">
-        <button
-          {...attributes}
-          {...listeners}
-          className="absolute left-0 top-1/2 z-10 -translate-y-1/2 cursor-grab p-0.5 text-text-faint opacity-0 group-hover/sortable:opacity-100"
-          aria-label="Drag to reorder"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <GripVertical size={14} />
-        </button>
-        <SwipeableRow item={data.item}>
-          <TaskRow
-            {...data}
-            showProject={showProject}
-            collapsed={reveal ? !expanded : undefined}
-            onToggleCollapse={reveal ? () => toggleExpanded(data.item.id) : undefined}
-          />
-        </SwipeableRow>
-      </div>
+      <SwipeableRow item={data.item}>
+        <TaskRow
+          {...data}
+          showProject={showProject}
+          collapsed={reveal ? !expanded : undefined}
+          onToggleCollapse={reveal ? () => toggleExpanded(data.item.id) : undefined}
+        />
+      </SwipeableRow>
       {reveal && expanded && (
         <SubtaskRows parentId={data.item.id} depth={1} showProject={showProject} />
       )}
@@ -174,8 +163,10 @@ export function TaskList({
    *  the perspective list views; off for already-flattened lists. */
   nestSubtasks?: boolean;
 }) {
+  // Press-and-hold to drag: hold ~200ms to lift a row; moving >5px before then
+  // is treated as a tap/scroll, not a drag. Lets the whole row be the handle.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );
 
   function onDragEnd(e: DragEndEvent) {

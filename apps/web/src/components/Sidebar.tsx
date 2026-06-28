@@ -15,6 +15,7 @@ import {
   Bookmark,
   Users,
   CalendarRange,
+  MapPin,
   Target,
   Clock,
   GripVertical,
@@ -54,10 +55,12 @@ import {
   subtaskProgress,
   isOverdue,
   sharedRoots,
+  tasksNearLocation,
   type Item,
   type OrderMode,
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
+import { useWhere } from '@/hooks/useWhere';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { mutate } from '@/lib/mutate';
 import { cn } from '@/lib/cn';
@@ -477,6 +480,7 @@ export function Sidebar() {
     if (location.pathname === `/view/${id}`) navigate('/today');
   }
 
+  const where = useWhere();
   const countScope = useStore((s) => s.uiPrefs.countScope);
   const data = useQuery(
     (db) => {
@@ -493,6 +497,10 @@ export function Sidebar() {
         inboxCount: inbox(items).length,
         flaggedCount: flagged(items).length,
         overdueCount: items.filter((i) => i.type === 'task' && isOverdue(i)).length,
+        nearbyCount:
+          where.hasLocation
+            ? tasksNearLocation(db, { zone: where.zone, point: where.point }).length
+            : 0,
         reviewCount: projects.filter((p) => needsReview(p)).length,
         shared: (me ? sharedRoots(db, me) : []).map((it) => ({
           item: it,
@@ -500,7 +508,7 @@ export function Sidebar() {
         })),
       };
     },
-    [countScope],
+    [countScope, where.hasLocation, where.zone, where.point?.lat, where.point?.lng],
   );
 
   const close = () => setSidebarOpen(false);
@@ -546,6 +554,15 @@ export function Sidebar() {
           count={data?.overdueCount}
           onClick={close}
         />
+        {where.hasLocation && (
+          <NavItem
+            to="/nearby"
+            icon={<MapPin size={17} />}
+            label="Nearby"
+            count={data?.nearbyCount}
+            onClick={close}
+          />
+        )}
         <NavItem to="/plan" icon={<Target size={17} />} label="Plan" onClick={close} />
         <NavItem
           to="/review"

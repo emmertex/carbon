@@ -1,5 +1,17 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Flag, Check, ChevronRight, Pencil, MessageSquare, Users2, Target, Ban } from 'lucide-react';
+import {
+  Flag,
+  Check,
+  ChevronRight,
+  Pencil,
+  MessageSquare,
+  Users2,
+  Target,
+  Ban,
+  Eye,
+  MoreHorizontal,
+} from 'lucide-react';
 import {
   subtaskProgress,
   inheritedPriority,
@@ -12,15 +24,28 @@ import {
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { useCompact } from '@/hooks/useCompact';
+import { useFocusItem } from '@/hooks/useFocusItem';
 import { TagMark } from './TagMark';
 import { abbreviateTagPath } from '@/lib/tagLabel';
 import { ProgressRing } from './ProgressRing';
 import { Avatar } from './Avatar';
-import { RowQuickMenu } from './RowQuickMenu';
+import { RowQuickMenu, type MenuPos } from './RowQuickMenu';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { cn } from '@/lib/cn';
 import { formatDue } from '@/lib/date';
 import { toggleTaskCompletion, flagTask, togglePlan } from '@/lib/taskActions';
+
+/** Shared classes for the right-hand row action buttons (focus/flag/plan/menu):
+ *  faint until row hover, lit when in their active state. `expanded` keeps them
+ *  visible on the expanded mobile card where there's no hover. */
+function actionCls(active: boolean, activeClass: string, expanded: boolean) {
+  return cn(
+    'mt-0.5 shrink-0 rounded p-0.5 transition-opacity',
+    active
+      ? activeClass
+      : cn('text-text-faint hover:text-text', expanded ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'),
+  );
+}
 
 export interface TaskRowData {
   item: Item;
@@ -93,12 +118,14 @@ export function TaskRow({
   const select = useStore((s) => s.select);
   const openDetail = useStore((s) => s.openDetail);
   const countScope = useStore((s) => s.uiPrefs.countScope);
-  // When the left-swipe shortcut is already Flag, the row's right-hand action becomes
-  // a Plan toggle instead (flag is reachable by swipe, so the button isn't redundant).
-  const swipeLeftAction = useStore((s) => s.uiPrefs.swipeLeftAction);
-  const planAction = swipeLeftAction === 'flag';
+  // Per-row iconography is a global view preference (the View row). Flag and Plan
+  // are independent toggles here — no auto-swap based on the swipe action.
+  const rowIcons = useStore((s) => s.uiPrefs.rowIcons);
   const compact = useCompact();
   const navigate = useNavigate();
+  const focus = useFocusItem();
+  // Quick menu anchor: set by the "⋯" button or a desktop right-click; null = closed.
+  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const selected = selectedId === item.id;
   const done = item.status === 'done';
   const overdue = isOverdue(item);
@@ -124,11 +151,11 @@ export function TaskRow({
   const ringColor = `var(--prio-${prio}-ring)`;
   const fillColor = `var(--prio-${prio}-fill)`;
 
-  // Plan membership — only queried when the right-hand action is the Plan toggle.
+  // Plan membership — only queried when the Plan toggle is shown.
   const inPlan =
     useQuery(
-      (db) => (planAction ? isInPlan(db, getCurrentUserId(), item.id) : false),
-      [item.id, planAction],
+      (db) => (rowIcons.plan ? isInPlan(db, getCurrentUserId(), item.id) : false),
+      [item.id, rowIcons.plan],
     ) ?? false;
 
   // Compact rows collapse to a lean summary and expand into a full card when
@@ -150,6 +177,23 @@ export function TaskRow({
     flagTask(item);
   }
 
+  /** Desktop right-click opens the quick menu at the cursor (clamped to stay on
+   *  screen). Touch devices keep the explicit "⋯" button instead. */
+  function openContextMenu(e: React.MouseEvent) {
+    if (compact) return;
+    e.preventDefault();
+    const MENU_W = 208; // w-52
+    setMenuPos({ top: e.clientY, left: Math.min(e.clientX, window.innerWidth - MENU_W - 8) });
+  }
+
+  /** "⋯" button: toggle the menu anchored just below it, right-aligned. */
+  function toggleMenu(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (menuPos) return setMenuPos(null);
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenuPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+  }
+
   const step = compact ? STEP_COMPACT_REM : STEP_ROOMY_REM;
   const padLeft = indent ? `${Math.min(indent, MAX_DEPTH) * step + INDENT_BASE_REM}rem` : undefined;
 
@@ -161,6 +205,7 @@ export function TaskRow({
         if (selected && compact) openDetail();
         else select(item.id);
       }}
+      onContextMenu={openContextMenu}
       style={padLeft ? { paddingLeft: padLeft } : undefined}
       className={cn(
         'group flex cursor-pointer items-start gap-2.5 rounded-lg px-3 transition-colors',
@@ -194,7 +239,7 @@ export function TaskRow({
         {item.flagged && !done && (
           // Flag → amber dot in the centre of the ring.
           <span
-            className="pointer-events-none absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
+            className="pointer-events-none absolute inset-0 m-auto h-[6px] w-[6px] rounded-full"
             style={{ background: 'var(--warning)' }}
           />
         )}
@@ -281,16 +326,7 @@ export function TaskRow({
         )}
       </div>
 
-      {/* Share indicator — shown even in the lean collapsed row. */}
-      {shared && (
-        <Users2
-          size={14}
-          className="mt-1 shrink-0 text-text-faint"
-          aria-label="Shared"
-        />
-      )}
-
-      {showMeta && assignees.length > 0 && (
+      {showMeta && rowIcons.assigned && assignees.length > 0 && (
         <div className="mt-0.5 flex shrink-0 items-center -space-x-1">
           {assignees.slice(0, 3).map((u) => (
             <Avatar key={u.id} user={u} size="sm" className="ring-1 ring-bg" />
@@ -303,7 +339,8 @@ export function TaskRow({
         </div>
       )}
 
-      {tags.length > 0 &&
+      {rowIcons.tags &&
+        tags.length > 0 &&
         (lean ? (
           <TagDots tags={tags} />
         ) : (
@@ -332,45 +369,59 @@ export function TaskRow({
           </div>
         ))}
 
-      {showActions &&
-        (planAction ? (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              togglePlan(item);
-            }}
-            className={cn(
-              'mt-0.5 shrink-0 rounded p-0.5 transition-opacity',
-              inPlan
-                ? 'text-accent'
-                : cn(
-                    'text-text-faint hover:text-text',
-                    expanded ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-                  ),
-            )}
-            aria-label={inPlan ? 'Remove from Plan' : 'Add to Plan'}
-          >
-            <Target size={15} />
-          </button>
-        ) : (
-          <button
-            onClick={toggleFlag}
-            className={cn(
-              'mt-0.5 shrink-0 rounded p-0.5 transition-opacity',
-              item.flagged
-                ? 'text-warning'
-                : cn(
-                    'text-text-faint hover:text-text',
-                    expanded ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-                  ),
-            )}
-            aria-label={item.flagged ? 'Unflag' : 'Flag'}
-          >
-            <Flag size={15} fill={item.flagged ? 'currentColor' : 'none'} />
-          </button>
-        ))}
+      {/* Share indicator — last of the indicators so it right-aligns into a
+          consistent column across rows (shown even in the lean collapsed row). */}
+      {rowIcons.shared && shared && (
+        <Users2 size={14} className="mt-0.5 shrink-0 text-text-faint" aria-label="Shared" />
+      )}
 
-      {showActions && <RowQuickMenu itemId={item.id} forceVisible={expanded} />}
+      {showActions && (
+        <>
+          {rowIcons.focus && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                focus(item);
+              }}
+              className={actionCls(false, '', expanded)}
+              aria-label="Focus on this task"
+              title="Focus on this task"
+            >
+              <Eye size={15} />
+            </button>
+          )}
+          {rowIcons.flag && (
+            <button
+              onClick={toggleFlag}
+              className={actionCls(item.flagged, 'text-warning', expanded)}
+              aria-label={item.flagged ? 'Unflag' : 'Flag'}
+            >
+              <Flag size={15} fill={item.flagged ? 'currentColor' : 'none'} />
+            </button>
+          )}
+          {rowIcons.plan && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                togglePlan(item);
+              }}
+              className={actionCls(inPlan, 'text-accent', expanded)}
+              aria-label={inPlan ? 'Remove from Plan' : 'Add to Plan'}
+            >
+              <Target size={15} />
+            </button>
+          )}
+          <button
+            onClick={toggleMenu}
+            className={actionCls(menuPos !== null, 'text-text', expanded)}
+            aria-label="More actions"
+          >
+            <MoreHorizontal size={15} />
+          </button>
+        </>
+      )}
+
+      {menuPos && <RowQuickMenu item={item} pos={menuPos} onClose={() => setMenuPos(null)} />}
     </div>
   );
 }

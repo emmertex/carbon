@@ -1,7 +1,8 @@
 import { useStore } from '@/lib/store';
 import type { SwipeLeftAction, EdgeGestureAction, CountScope } from '@/lib/config';
+import { LINKS } from '@/lib/links';
 import { SettingsSection } from './SettingsSection';
-import { ThemeChip, SettingsToggle } from './controls';
+import { ThemeChip, SettingsToggle, DocLink } from './controls';
 
 const SWIPE_LEFT_ACTIONS: { id: SwipeLeftAction; label: string }[] = [
   { id: 'plan', label: 'Add to Plan' },
@@ -72,6 +73,10 @@ export function GesturesSection() {
       <p className="mt-1 text-xs text-text-faint">
         Drives the parent-task progress ring and the “tasks left” counts.
       </p>
+
+      <div className="mt-4 border-t border-border pt-3">
+        <DocLink href={LINKS.usage}>Usage, keyboard shortcuts &amp; terminology</DocLink>
+      </div>
     </SettingsSection>
   );
 }

@@ -62,6 +62,11 @@ export function flagTask(item: Item): void {
   mutate((db, dev) => updateItem(db, dev, item.id, { flagged: !item.flagged }));
 }
 
+/** Set a task's explicit priority (0 None · 1 Low · 2 Medium · 3 High). */
+export function setPriority(item: Item, priority: number): void {
+  mutate((db, dev) => updateItem(db, dev, item.id, { priority }));
+}
+
 export function planTask(item: Item): void {
   const uid = getCurrentUserId();
   mutate((db, dev) => addToPlan(db, dev, uid, item.id));

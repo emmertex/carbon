@@ -14,7 +14,7 @@ and consumes webhooks. Three integration patterns, smallest to richest.
 # configuration.yaml
 rest_command:
   carbon_task:
-    url: "https://carbon.example.com/api/tasks"
+    url: "https://carbon.etx.sx/api/tasks"
     method: POST
     headers:
       Authorization: !secret carbon_token
@@ -22,7 +22,7 @@ rest_command:
     payload: '{"title": "{{ title }}", "due_date": "{{ due }}"}'
 
   carbon_geo:
-    url: "https://carbon.example.com/api/geo/event"
+    url: "https://carbon.etx.sx/api/geo/event"
     method: POST
     headers:
       Authorization: !secret carbon_token
@@ -107,7 +107,5 @@ app is open) is also a toggle there. See the README's *Reminders & location* sec
 
 - Push delivery and geofencing need a **real device + HTTPS** to verify end-to-end.
 - The `geo`/`gps` endpoints require `tasks:write`. Keep that token off any
-  internet-exposed automation you don't control.
-- Current hardening gaps relevant to HA exposure are tracked in
-  [`code-review-2026-06.md`](code-review-2026-06.md) (no rate-limit on geo events; token =
-  full write as its user).
+  internet-exposed automation you don't control — a `tasks:write` token can write as its
+  owning user.

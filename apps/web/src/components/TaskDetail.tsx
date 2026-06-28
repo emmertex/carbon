@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   X,
   Flag,
@@ -69,6 +68,7 @@ import { abbreviateTagPath } from "@/lib/tagLabel";
 import { holdCompleted, releaseCompleted } from "@/lib/completion";
 import { useQuery } from "@/hooks/useQuery";
 import { useTicker } from "@/hooks/useTicker";
+import { useFocusItem } from "@/hooks/useFocusItem";
 import { mutate } from "@/lib/mutate";
 import { useStore } from "@/lib/store";
 import {
@@ -293,7 +293,7 @@ function DepPicker({
 export function TaskDetail({ id }: { id: string }) {
   const select = useStore((s) => s.select);
   const currentUser = useStore((s) => s.currentUser);
-  const navigate = useNavigate();
+  const focusItem = useFocusItem();
   const data = useQuery(
     (db) => {
       const item = getItem(db, id);
@@ -573,10 +573,6 @@ export function TaskDetail({ id }: { id: string }) {
     );
   }
 
-  function focusItem() {
-    select(null);
-    navigate(item.type === "project" ? `/project/${id}` : `/focus/${id}`);
-  }
 
   function toggleAssignee(userId: string) {
     mutate((db, dev) => {
@@ -641,7 +637,7 @@ export function TaskDetail({ id }: { id: string }) {
           </button>
         )}
         <button
-          onClick={focusItem}
+          onClick={() => focusItem(item)}
           className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
           aria-label="Focus"
           title="Focus on this task"

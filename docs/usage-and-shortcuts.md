@@ -104,8 +104,7 @@ Configured in **Settings → Gestures & mobile**:
 Appearance (mode/theme/accent) · Gestures & mobile · Profile & Planning (signed in) ·
 Install app · Data backup (full export/import) · Sync server (URL + sign-in) · Reminders
 (push / foreground geofence) · Users + AI agents (admin) · HA person · API tokens (admin) ·
-About (version/device id). A reorganisation plan for this page is in
-[`settings-cleanup-plan.md`](settings-cleanup-plan.md).
+About (version/device id).
 
 ## Offline & sync
 
@@ -116,4 +115,8 @@ server** at all (local-only). To sync across devices, point it at a Carbon serve
 
 > Durability: writes persist on a 250 ms debounce **and** flush immediately when the tab is
 > hidden or closed (`visibilitychange`/`pagehide`), so a reload or app-kill won't drop your
-> last edits (fixed in the June 2026 pass — see [`code-review-2026-06.md`](code-review-2026-06.md)).
+> last edits.
+>
+> Local-only mode keeps everything on this device — nothing is sent anywhere until you
+> configure a sync server. See [`data-security.md`](data-security.md) for the full data-handling
+> picture.

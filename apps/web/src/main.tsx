@@ -46,10 +46,10 @@ async function boot(): Promise<void> {
     void syncNow();
     // Resume foreground geofencing if the user enabled it.
     const { geofencePref, startGeofencing } = await import('./lib/geo');
-    if (geofencePref()) startGeofencing();
-    // Resume foreground local reminders if enabled.
+    if (geofencePref()) void startGeofencing();
+    // Resume local reminders if enabled (native scheduling on Capacitor, else scan).
     const { localRemindersPref, startLocalReminders } = await import('./lib/localReminders');
-    if (localRemindersPref()) startLocalReminders();
+    if (localRemindersPref()) void startLocalReminders();
   } catch (err) {
     console.error('Failed to initialize Carbon:', err);
   }

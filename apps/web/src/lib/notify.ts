@@ -161,6 +161,17 @@ export const disablePush = (): Promise<void> => provider.disable();
 export const pushDeliversWhenClosed = (): boolean =>
   provider.kind === 'web' || provider.kind === 'fcm';
 
+// Immediate native local notifications on Capacitor. Ids must be ints; a counter
+// derived from the clock keeps them unique without collisions with scheduled ones.
+let localNotifSeq = Date.now() % 1_000_000;
+async function loadCapacitorLocalNotifications() {
+  try {
+    return await import('@capacitor/local-notifications');
+  } catch {
+    return null;
+  }
+}
+
 /** Show a notification locally on this device (used by foreground reminders). */
 export async function showLocalNotification(p: {
   title: string;
@@ -174,7 +185,17 @@ export async function showLocalNotification(p: {
       return;
     }
   }
-  if ('Notification' in window && Notification.permission === 'granted') {
+  if (platform === 'capacitor') {
+    const mod = await loadCapacitorLocalNotifications();
+    if (mod && (await mod.LocalNotifications.checkPermissions()).display === 'granted') {
+      localNotifSeq = (localNotifSeq + 1) % 2_000_000_000;
+      await mod.LocalNotifications.schedule({
+        notifications: [{ id: localNotifSeq + 1, title: p.title, body: p.body }],
+      });
+      return;
+    }
+  }
+  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
     new Notification(p.title, { body: p.body, tag: p.tag });
   }
 }

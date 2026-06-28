@@ -11,8 +11,8 @@ recipes see [`home-assistant.md`](home-assistant.md).
 ## Base URL & multi-tenancy
 
 - **Single-tenant / self-host:** the base is your server origin, e.g.
-  `https://carbon.example.com`. All routes below are under `/api`.
-- **Multi-tenant hosting:** each family is a subdomain — `https://<tenant>.carbon.etx.sx`.
+  `https://carbon.etx.sx`. All routes below are under `/api`.
+- **Multi-tenant hosting:** each workspace is a subdomain — `https://<tenant>.carbon.etx.sx`.
   Use the tenant subdomain as the base; the API is identical per tenant.
 
 ## Authentication
@@ -115,10 +115,15 @@ if omitted, the token's owning user is used. See [`home-assistant.md`](home-assi
   renewal from the gate.
 - `/host/signup/start` + `/host/signup/verify` (public, rate-limited; email + one-time code) and
   `/host/tenants/*` (host-admin) — multi-tenant control plane. `PATCH /host/tenants/:id` accepts
-  `{status, plan, expiresAt, locked}` (Lock/Unlock + Set-Expiry). See the multi-tenant notes in the
-  README and `code-review-2026-06.md` for current hardening gaps.
+  `{status, plan, expiresAt, locked}` (Lock/Unlock + Set-Expiry).
 
 ## Security notes
 
-Within a tenant the trust model is still "family" — any authenticated member can read/write
-shared items per the CRDT. Keep `tasks:write` tokens off untrusted automations.
+- All API traffic should be served over **HTTPS** — tokens travel in the `Authorization`
+  header and must not cross the network in the clear.
+- Within a tenant the trust model is "shared workspace": any authenticated member can
+  read/write items shared with them per the CRDT. Keep `tasks:write` tokens off untrusted
+  automations, and prefer the narrowest scope an integration needs (`inbox:write` for
+  capture-only).
+- For how tenant data is isolated, encrypted in transit, and kept on-device in local-only
+  mode, see [`data-security.md`](data-security.md).

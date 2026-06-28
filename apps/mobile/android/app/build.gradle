@@ -1,4 +1,13 @@
+import groovy.json.JsonSlurper
+
 apply plugin: 'com.android.application'
+
+// App version is single-sourced from the repo-root package.json. versionName mirrors it;
+// versionCode is derived (major*10000 + minor*100 + patch) so it rises monotonically.
+def carbonVersion = new JsonSlurper()
+    .parseText(new File(rootProject.projectDir, "../../../package.json").text).version
+def (vMajor, vMinor, vPatch) = carbonVersion.tokenize('.').collect { it.toInteger() }
+def carbonVersionCode = vMajor * 10000 + vMinor * 100 + vPatch
 
 android {
     namespace "com.emmertex.carbon"
@@ -7,8 +16,8 @@ android {
         applicationId "com.emmertex.carbon"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode carbonVersionCode
+        versionName carbonVersion
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

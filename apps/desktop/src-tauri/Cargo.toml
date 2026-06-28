@@ -1,6 +1,9 @@
 [package]
 name = "carbon-desktop"
-version = "0.1.0"
+# Rust crate version only. The app/bundle version is single-sourced from the repo-root
+# package.json via tauri.conf.json ("version": "../../../package.json"); this is ignored
+# for the released app version.
+version = "0.0.0"
 description = "Carbon — a simple-on-the-surface, powerful-underneath task manager."
 authors = ["Andrew Frahn"]
 edition = "2021"

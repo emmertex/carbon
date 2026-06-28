@@ -5,8 +5,9 @@ import { useStore } from '@/lib/store';
 import { updateProfile } from '@/lib/sync';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { Field, ErrorText, inputCls, btnPrimary } from './settings/controls';
+import { Field, ErrorText, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
+import { useDebouncedSave } from './settings/useDebouncedSave';
 
 const numInputCls = cn(inputCls, 'w-20');
 
@@ -44,6 +45,8 @@ export function PlanningSettings() {
     }
   }
 
+  const markDirty = useDebouncedSave(() => void save(), [startup, defaultEst]);
+
   return (
     <SettingsSection
       id="planning"
@@ -59,7 +62,10 @@ export function PlanningSettings() {
               className={numInputCls}
               placeholder={String(PLAN_DEFAULT_STARTUP_MIN)}
               value={startup}
-              onChange={(e) => setStartup(e.target.value)}
+              onChange={(e) => {
+                setStartup(e.target.value);
+                markDirty();
+              }}
             />
             <span className="text-xs text-text-faint">min</span>
           </div>
@@ -72,16 +78,25 @@ export function PlanningSettings() {
               className={numInputCls}
               placeholder={String(PLAN_DEFAULT_ESTIMATE_MIN)}
               value={defaultEst}
-              onChange={(e) => setDefaultEst(e.target.value)}
+              onChange={(e) => {
+                setDefaultEst(e.target.value);
+                markDirty();
+              }}
             />
             <span className="text-xs text-text-faint">min</span>
           </div>
         </Field>
       </div>
-      <button onClick={save} className={cn(btnPrimary, 'mt-3')}>
-        {saved ? <Check size={15} /> : null} Save
-      </button>
-      <ErrorText className="mt-2">{error}</ErrorText>
+      <p className="mt-3 flex h-5 items-center gap-1 text-xs text-text-faint">
+        {saved ? (
+          <>
+            <Check size={14} className="text-success" /> Saved
+          </>
+        ) : (
+          'Changes save automatically.'
+        )}
+      </p>
+      <ErrorText className="mt-1">{error}</ErrorText>
     </SettingsSection>
   );
 }

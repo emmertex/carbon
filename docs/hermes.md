@@ -72,8 +72,8 @@ Same Settings page, kind **`openai`** (OpenAI / OpenRouter / LM Studio / any
 OpenAI-compatible endpoint) or **`anthropic`**. Carbon calls the model itself and posts the
 reply; the model can end with `COMPLETE` to close an assigned task. The **Endpoint** is the
 *base URL* exposing `/chat/completions` (usually ending in `/v1`, e.g.
-`http://10.2.x.x:1234/v1`). This is less autonomous than Hermes — no tool use — but needs no
-external framework.
+`http://192.168.0.50:1234/v1` for a local LLM server). This is less autonomous than Hermes —
+no tool use — but needs no external framework.
 
 ## Testing & operations
 
@@ -86,9 +86,7 @@ external framework.
 
 - **SSRF guard:** in multi-tenant mode (`BASE_DOMAIN` set) agent endpoints can't point at
   private/loopback/metadata addresses. **Single-tenant self-host allows private hosts** so
-  your LAN LLM (e.g. LM Studio on `10.2.x.x`) works; set `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`
+  your LAN LLM (e.g. a local LM Studio instance) works; set `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`
   to allow them under a base domain too.
 - **Error messages** from a failed agent run are logged server-side; the public task comment
   is generic (no endpoint URL/body leak).
-
-(Both hardened in the June 2026 review — see [`code-review-2026-06.md`](code-review-2026-06.md).)

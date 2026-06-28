@@ -4,7 +4,8 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import pkg from './package.json';
+// App version is single-sourced from the repo-root package.json.
+import rootPkg from '../../package.json';
 
 // Prefer an explicitly injected hash (Docker passes GIT_HASH as a build arg,
 // since .git is excluded from the build context). Otherwise read it from git.
@@ -19,7 +20,7 @@ if (gitHash === 'unknown') {
 
 export default defineConfig({
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_VERSION__: JSON.stringify(rootPkg.version),
     __GIT_HASH__: JSON.stringify(gitHash),
   },
   plugins: [

@@ -90,6 +90,14 @@ export function ensureServerTables(db: Db): void {
       lng        REAL NOT NULL,
       updated_at TEXT NOT NULL
     );
+    -- Latest known Home Assistant zone per user (enter/leave webhook). Kept
+    -- separate from gps_history so a zone update doesn't clobber GPS coords and
+    -- vice-versa; the /api/where read merges both into one location.
+    CREATE TABLE IF NOT EXISTS user_zone (
+      user_id    TEXT PRIMARY KEY,
+      zone       TEXT,
+      updated_at TEXT NOT NULL
+    );
     -- Browser/device sign-in sessions. Distinct from api_tokens (integrations):
     -- a session grants the full human identity (incl. admin), is minted by
     -- exchanging a password once, and lets the client store an opaque,
@@ -272,6 +280,39 @@ export function getGps(
       [userId],
     ) ?? null
   );
+}
+
+/** Store the user's current HA zone (on a zone enter). Pass null on leave. */
+export function saveZone(db: Db, userId: string, zone: string | null): void {
+  db.run(
+    `INSERT INTO user_zone (user_id, zone, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET zone = excluded.zone, updated_at = excluded.updated_at`,
+    [userId, zone, new Date().toISOString()],
+  );
+}
+
+export interface UserLocation {
+  zone: string | null;
+  lat: number | null;
+  lng: number | null;
+  updatedAt: string | null;
+}
+
+/** The user's current location: their latest HA zone merged with their latest GPS
+ *  fix. `updatedAt` is the most recent of the two sources. */
+export function getUserLocation(db: Db, userId: string): UserLocation {
+  const gps = getGps(db, userId);
+  const zoneRow = db.get<{ zone: string | null; updated_at: string }>(
+    'SELECT zone, updated_at FROM user_zone WHERE user_id = ?',
+    [userId],
+  );
+  const stamps = [gps?.updated_at, zoneRow?.updated_at].filter((s): s is string => !!s);
+  return {
+    zone: zoneRow?.zone ?? null,
+    lat: gps?.lat ?? null,
+    lng: gps?.lng ?? null,
+    updatedAt: stamps.length ? stamps.sort().at(-1)! : null,
+  };
 }
 
 /**

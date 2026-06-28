@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/cn';
 
 /** Canonical text-input styling for every settings field. */
@@ -80,6 +81,32 @@ export function SettingsToggle({
       </label>
       {hint && <p className="mt-1 text-xs text-text-faint">{hint}</p>}
     </div>
+  );
+}
+
+/** An external documentation/download link with a trailing open-in-new icon. */
+export function DocLink({
+  href,
+  children,
+  className,
+}: {
+  href: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        'inline-flex items-center gap-1 text-sm text-accent hover:underline',
+        className,
+      )}
+    >
+      {children}
+      <ExternalLink size={13} className="shrink-0 opacity-70" />
+    </a>
   );
 }
 

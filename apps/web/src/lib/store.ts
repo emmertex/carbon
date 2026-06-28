@@ -55,6 +55,10 @@ interface AppState {
    *  (a /api/me returned 401). Drives the sign-in gate. False for local-only
    *  (no server) and open-mode servers. */
   authRequired: boolean;
+  /** The user explicitly opened the sign-in flow (the "Login" button in Settings),
+   *  independent of `authRequired`. Lets sign-in be reached on demand — e.g. to
+   *  attach a native/local-only app to a server — not only after a 401. */
+  loginOpen: boolean;
   /** What this origin is, per /api/health: 'single' (self-host, no base domain),
    *  'apex' (the landing/marketing host), 'app' (the dedicated offline/local-only
    *  host), 'tenant' (a real workspace), 'unknown' (a subdomain with no matching
@@ -85,6 +89,11 @@ interface AppState {
   setReady: (v: boolean) => void;
   setCurrentUser: (u: CurrentUser | null) => void;
   setAuthRequired: (v: boolean) => void;
+  /** Open the sign-in flow on demand. */
+  openLogin: () => void;
+  /** Dismiss the sign-in flow and clear any pending auth requirement, dropping back
+   *  to the app (local-only). The user can always back out of signing in. */
+  closeLogin: () => void;
   setHostInfo: (info: {
     role: AppState['hostRole'];
     baseDomain: string | null;
@@ -143,6 +152,7 @@ export const useStore = create<AppState>((set, get) => ({
   lastSyncedAt: null,
   currentUser: getCurrentUser(),
   authRequired: false,
+  loginOpen: false,
   hostRole: null,
   baseDomain: null,
   appHost: null,
@@ -157,6 +167,8 @@ export const useStore = create<AppState>((set, get) => ({
   setReady: (v) => set({ ready: v }),
   setCurrentUser: (u) => set({ currentUser: u }),
   setAuthRequired: (v) => set({ authRequired: v }),
+  openLogin: () => set({ loginOpen: true }),
+  closeLogin: () => set({ loginOpen: false, authRequired: false }),
   setHostInfo: (info) =>
     set({ hostRole: info.role, baseDomain: info.baseDomain, appHost: info.appHost }),
   setWorkspaceLock: (locked, expiresAt) =>

@@ -1,0 +1,126 @@
+# Native apps (desktop + Android)
+
+Carbon ships as native apps by wrapping the **same** `apps/web` build:
+
+- **Desktop** (`apps/desktop`) — Tauri v2 → `.deb` / `.rpm` / `.AppImage` (Linux),
+  `.msi` (Windows), `.dmg` (macOS).
+- **Android** (`apps/mobile`) — Capacitor → `.apk` / `.aab`.
+- **iOS** — code-ready via Capacitor, but not built here (needs a Mac + Xcode and a
+  $99/yr Apple Developer account to sign/distribute).
+
+There is no UI fork: both shells load `apps/web/dist`, and the app picks the right
+notification backend at runtime via `apps/web/src/lib/platform.ts` +
+`apps/web/src/lib/notify.ts` (web → Web Push, Android → FCM, desktop → OS-native).
+
+The Carbon **sync server URL is set in-app** (Settings → Sync server), so the same
+binary points at any self-hosted server.
+
+---
+
+## Desktop (Tauri)
+
+### Prerequisites (Arch / CachyOS)
+
+```fish
+rustup default stable
+sudo pacman -S --needed webkit2gtk-4.1 base-devel openssl librsvg libappindicator-gtk3
+# For the AppImage target only:
+sudo pacman -S --needed fuse2
+```
+
+### Build / run
+
+```fish
+npm run -w @carbon/desktop dev      # live dev (runs the web dev server + window)
+npm run -w @carbon/desktop build    # release bundles
+```
+
+Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/`, `rpm/`,
+`appimage/`). The raw binary is `target/release/carbon-desktop`.
+
+> The service worker is disabled for desktop builds (`CARBON_NO_PWA=1`) — assets are
+> bundled locally and notifications use the native channel, so the SW adds nothing.
+> `npm run -w @carbon/desktop build` sets this for you via the env; the AppImage
+> target additionally needs network + FUSE to fetch linuxdeploy on first run.
+
+Icons were generated from `CarbonIcon.png` with `npm run -w @carbon/desktop tauri --
+icon ../../CarbonIcon.png`. Re-run after changing the logo.
+
+---
+
+## Android (Capacitor)
+
+### Prerequisites
+
+- **JDK 17** (installed: `/usr/lib/jvm/java-17-openjdk`). Gradle must use 17, not the
+  system-default 26:
+  ```fish
+  set -x JAVA_HOME /usr/lib/jvm/java-17-openjdk
+  ```
+- **Android SDK** (not yet installed). Install the command-line tools, then:
+  ```fish
+  set -x ANDROID_HOME ~/Android/Sdk
+  sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+  ```
+  (Or install Android Studio, which bundles the SDK.)
+
+### Firebase / FCM (background push)
+
+Android background push uses Firebase Cloud Messaging. Create your own Firebase project,
+then wire up two things:
+
+1. **Android app + `google-services.json`** — in the Firebase console, add an Android
+   app with your package name (the repo default is `com.emmertex.carbon`), download
+   `google-services.json`, and place it at
+   `apps/mobile/android/app/google-services.json`. The Capacitor-generated Gradle already
+   applies the `com.google.gms.google-services` plugin **iff** that file is present, so no
+   Gradle edits are needed.
+2. **Server service account** — Firebase console → Project settings → Service accounts
+   → *Generate new private key*. Point the Carbon server at it:
+   ```
+   FCM_SERVICE_ACCOUNT_FILE=/path/to/firebase-adminsdk.json
+   ```
+   (or `FCM_SERVICE_ACCOUNT_JSON=<inline json>`). Until set, the server's FCM sender
+   is inert and only Web Push fires. Keep this key **server-side only** — never ship it
+   in the APK.
+
+### Build
+
+```fish
+npm run -w @carbon/mobile build:android   # web build → cap sync → gradlew assembleDebug
+# APK: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+npm run -w @carbon/mobile open:android     # open in Android Studio instead
+```
+
+### Server access from the device
+
+The WebView serves the app from `https://localhost`, so fetches to a **plain-http**
+LAN server are blocked as mixed content. Point the app (Settings → Sync server) at an
+**https** URL (e.g. behind a reverse proxy such as Caddy, nginx, or Nginx Proxy Manager),
+or — only as a last resort — set `android.allowMixedContent: true` in `capacitor.config.ts`.
+
+---
+
+## CORS (server)
+
+`apps/server` defaults to wildcard CORS (auth is via the `Authorization` header, not
+cookies, so there's no CSRF surface). To lock it down, set an allowlist:
+
+```
+CORS_ORIGINS=tauri://localhost,https://localhost,https://carbon.etx.sx
+```
+
+Native origins: Tauri = `tauri://localhost` (Linux/macOS) / `http://tauri.localhost`
+(Windows); Capacitor Android = `https://localhost`.
+
+---
+
+## Notes & current limitations
+
+- **iOS** is code-ready via Capacitor but not built in this repo — it needs a Mac + Xcode
+  and an Apple Developer account to sign and distribute.
+- **Background push on Android** requires your own Firebase project and a server-side
+  `FCM_SERVICE_ACCOUNT_FILE` (above). Without it, Web Push still works for browsers.
+- **Signed release builds** (Android keystore / `signingConfig`, Windows `.msi`, macOS
+  `.dmg`) are produced per-maintainer; the commands above build unsigned/debug artifacts
+  suitable for local install and testing.

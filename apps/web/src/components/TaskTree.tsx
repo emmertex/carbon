@@ -16,7 +16,6 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical } from 'lucide-react';
 import {
   moveItem,
   getItemTags,
@@ -137,7 +136,7 @@ function SortableTreeRow({
   const collapsed = useStore((s) => s.collapsed.has(item.id));
   const toggleCollapsed = useStore((s) => s.toggleCollapsed);
   const selected = useStore((s) => s.selectedId === item.id);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: item.id,
   });
 
@@ -153,19 +152,11 @@ function SortableTreeRow({
   return (
     <div
       ref={setNodeRef}
+      {...listeners}
       data-row-id={item.id}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`group/tree relative ${isDragging ? 'z-10 opacity-50' : ''}`}
+      className={`group/tree relative select-none ${isDragging ? 'z-10 opacity-50' : ''}`}
     >
-      <button
-        {...attributes}
-        {...listeners}
-        onClick={(e) => e.stopPropagation()}
-        className="absolute left-0 top-1/2 z-10 -translate-y-1/2 cursor-grab p-0.5 text-text-faint opacity-0 group-hover/tree:opacity-100"
-        aria-label="Drag to reorder or nest"
-      >
-        <GripVertical size={14} />
-      </button>
       <SwipeableRow item={item}>
         <TaskRow
           item={item}
@@ -440,8 +431,10 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
     }
   }
 
+  // Press-and-hold to drag: hold ~200ms to lift a row (reorder or nest); moving
+  // >5px before then is a tap/scroll. The whole row is the handle — no grip.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );
 
   function reset() {

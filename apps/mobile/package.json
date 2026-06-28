@@ -1,6 +1,5 @@
 {
   "name": "@carbon/mobile",
-  "version": "0.1.0",
   "private": true,
   "scripts": {
     "sync": "cap sync",
@@ -11,6 +10,8 @@
   "dependencies": {
     "@capacitor/android": "^6",
     "@capacitor/core": "^6",
+    "@capacitor/geolocation": "^6",
+    "@capacitor/local-notifications": "^6",
     "@capacitor/push-notifications": "^6"
   },
   "devDependencies": {

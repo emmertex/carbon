@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Download, Check, Share } from 'lucide-react';
-import { canInstall, isStandalone, isIos, onInstallChange, promptInstall } from '@/lib/pwa';
+import { Download, Check } from 'lucide-react';
+import { canInstall, isStandalone, onInstallChange, promptInstall } from '@/lib/pwa';
+import { LINKS } from '@/lib/links';
 import { SettingsSection } from './settings/SettingsSection';
+import { DocLink } from './settings/controls';
 
 export function InstallApp() {
   const [installable, setInstallable] = useState(canInstall());
@@ -23,6 +25,8 @@ export function InstallApp() {
 
   return (
     <SettingsSection id="install" title="Install app">
+      {/* Only surface the PWA install affordance when we can actually trigger it
+          via a button — no manual "open the browser menu" instructions. */}
       {installed ? (
         <p className="flex items-center gap-2 text-sm text-success">
           <Check size={16} />
@@ -41,19 +45,12 @@ export function InstallApp() {
             Install Carbon
           </button>
         </>
-      ) : isIos() ? (
-        <p className="flex flex-wrap items-center gap-1.5 text-sm text-text-muted">
-          To install on iPhone/iPad: tap the <Share size={15} className="inline text-accent" />{' '}
-          <strong>Share</strong> button in Safari, then{' '}
-          <strong>Add to Home&nbsp;Screen</strong>.
-        </p>
-      ) : (
-        <p className="text-sm text-text-muted">
-          Open Carbon in Chrome, Edge, or another supporting browser, then use the browser menu
-          (⋮) → <strong>Install app</strong> / <strong>Add to Home screen</strong>. Installing needs
-          an <code>https://</code> address.
-        </p>
-      )}
+      ) : null}
+
+      <p className="mt-3 text-sm text-text-muted">
+        Prefer a native build? Download the latest desktop or Android app from{' '}
+        <DocLink href={LINKS.releases}>GitHub releases</DocLink>.
+      </p>
     </SettingsSection>
   );
 }

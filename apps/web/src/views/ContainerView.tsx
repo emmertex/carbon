@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Settings2, Timer, Square } from 'lucide-react';
+import { Timer, Square } from 'lucide-react';
 import {
   getItem,
   getChildren,
@@ -25,6 +25,8 @@ import { QuickAdd } from '@/components/QuickAdd';
 import { TaskTree } from '@/components/TaskTree';
 import { TaskList } from '@/components/TaskList';
 import { ViewControls } from '@/components/ViewControls';
+import { ViewRow } from '@/components/ViewRow';
+import { ProjectGlyph } from '@/components/ProjectGlyph';
 import { Markdown } from '@/components/Markdown';
 
 /**
@@ -96,12 +98,26 @@ export function ContainerView() {
       <Breadcrumbs id={id} />
 
       <div className="mb-4 flex items-start gap-3">
-        <span
-          className="mt-1.5 h-3 w-3 shrink-0 rounded-full"
-          style={{ background: item.color || 'var(--accent)' }}
-        />
+        {/* Glyph reflects the project's order mode (sequential/parallel/single),
+            tinted by its colour; a focused task keeps a simple colour dot. */}
+        {isProject ? (
+          <span className="mt-1 shrink-0">
+            <ProjectGlyph mode={item.order_mode} color={item.color} size={22} />
+          </span>
+        ) : (
+          <span
+            className="mt-1.5 h-3 w-3 shrink-0 rounded-full"
+            style={{ background: item.color || 'var(--accent)' }}
+          />
+        )}
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-2xl font-bold tracking-tight">
+          {/* The title opens the project/task detail sidebar (replaces the old
+              settings button). */}
+          <h1
+            onClick={() => select(item.id)}
+            className="cursor-pointer truncate text-2xl font-bold tracking-tight hover:text-accent"
+            title={isProject ? 'Project details' : 'Details'}
+          >
             {item.title || (isProject ? 'Untitled project' : 'Untitled')}
           </h1>
           <p className="mt-0.5 text-sm text-text-muted">
@@ -113,19 +129,15 @@ export function ContainerView() {
         <button
           onClick={toggleTrack}
           className={cn(
-            'rounded-lg p-2 hover:bg-surface-2',
-            tracking ? 'text-danger' : 'text-text-muted hover:text-text',
+            'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium',
+            tracking
+              ? 'border-danger text-danger hover:bg-surface-2'
+              : 'border-border text-text-muted hover:bg-surface-2 hover:text-text',
           )}
-          title={tracking ? 'Stop tracking' : 'Track this project'}
+          title={tracking ? 'Stop tracking time' : 'Record time on this project'}
         >
-          {tracking ? <Square size={18} fill="currentColor" /> : <Timer size={18} />}
-        </button>
-        <button
-          onClick={() => select(item.id)}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
-          title="Details"
-        >
-          <Settings2 size={18} />
+          {tracking ? <Square size={14} fill="currentColor" /> : <Timer size={14} />}
+          {tracking ? 'Stop' : 'Record Time'}
         </button>
       </div>
 
@@ -137,6 +149,8 @@ export function ContainerView() {
       </div>
 
       <ViewControls prefs={prefs} onChange={updatePrefs} tags={tags} projects={projects} />
+
+      <ViewRow className="mb-3" />
 
       {flatMode ? (
         rows.length === 0 ? (

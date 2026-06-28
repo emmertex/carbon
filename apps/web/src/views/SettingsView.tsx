@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { getServerConfig, saveServerConfig, type ServerConfig } from '@/lib/config';
 import { useStore } from '@/lib/store';
@@ -15,16 +15,16 @@ import { DataBackup } from '@/components/DataBackup';
 import { AppearanceSection } from '@/components/settings/AppearanceSection';
 import { GesturesSection } from '@/components/settings/GesturesSection';
 import { SyncSection } from '@/components/settings/SyncSection';
+import { IntegrationsDocs } from '@/components/settings/IntegrationsDocs';
 import { AboutSection } from '@/components/settings/AboutSection';
 import { SettingsNav, useActiveGroup, type NavGroup } from '@/components/settings/SettingsNav';
 
 const GROUPS: NavGroup[] = [
   { id: 'general', label: 'General' },
   { id: 'account', label: 'Account' },
-  { id: 'sync', label: 'Sync' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'integrations', label: 'Integrations' },
-  { id: 'admin', label: 'Workspace admin' },
+  { id: 'workspace', label: 'Workspace' },
   { id: 'about', label: 'About' },
 ];
 
@@ -46,22 +46,6 @@ export function SettingsView() {
   const [cfg, setCfg] = useState<ServerConfig>(getServerConfig());
   const currentUser = useStore((s) => s.currentUser);
 
-  // Default the server URL to the domain Carbon is served from (if it's a Carbon
-  // server), so most users never have to type it.
-  useEffect(() => {
-    // The dedicated offline host is intentionally serverless — never auto-attach.
-    if (useStore.getState().hostRole === 'app') return;
-    let active = true;
-    fetch(`${window.location.origin}/api/health`)
-      .then((r) => {
-        if (active && r.ok && !getServerConfig().url) update({ url: window.location.origin });
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, []);
-
   function update(patch: Partial<ServerConfig>) {
     const next = { ...cfg, ...patch };
     setCfg(next);
@@ -82,13 +66,14 @@ export function SettingsView() {
     { id: 'profile', group: 'account', show: (c) => c.signedIn, render: () => <Profile /> },
     { id: 'planning', group: 'account', show: (c) => c.signedIn, render: () => <PlanningSettings /> },
     { id: 'data', group: 'account', show: () => true, render: () => <DataBackup /> },
-    { id: 'sync', group: 'sync', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },
     { id: 'reminders', group: 'notifications', show: () => true, render: () => <Reminders /> },
     { id: 'ha-person', group: 'notifications', show: (c) => c.signedIn && c.hasServer, render: () => <HaPerson /> },
+    { id: 'integration-docs', group: 'integrations', show: () => true, render: () => <IntegrationsDocs /> },
     { id: 'api-tokens', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <ApiTokens /> },
     { id: 'agents', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <Agents /> },
-    { id: 'users', group: 'admin', show: (c) => c.isAdmin && c.hasServer, render: () => <AdminUsers /> },
-    { id: 'subscription', group: 'admin', show: (c) => c.isAdmin && c.hasServer, render: () => <Subscription /> },
+    { id: 'sync', group: 'workspace', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },
+    { id: 'users', group: 'workspace', show: (c) => c.isAdmin && c.hasServer, render: () => <AdminUsers /> },
+    { id: 'subscription', group: 'workspace', show: (c) => c.isAdmin && c.hasServer, render: () => <Subscription /> },
     { id: 'about', group: 'about', show: () => true, render: () => <AboutSection /> },
   ];
 

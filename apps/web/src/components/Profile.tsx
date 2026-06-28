@@ -5,8 +5,9 @@ import { updateProfile } from '@/lib/sync';
 import { Avatar } from './Avatar';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { Field, ErrorText, inputCls, btnPrimary } from './settings/controls';
+import { Field, ErrorText, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
+import { useDebouncedSave } from './settings/useDebouncedSave';
 
 const AVATAR_COLORS = [
   '#ef4444',
@@ -59,6 +60,8 @@ export function Profile() {
     }
   }
 
+  const markDirty = useDebouncedSave(() => void save(), [name, initial, color]);
+
   return (
     <SettingsSection id="profile" title="Profile">
       <div className="flex items-start gap-4">
@@ -72,7 +75,10 @@ export function Profile() {
               className={cn(inputCls, 'w-full max-w-xs')}
               placeholder={currentUser.username}
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                markDirty();
+              }}
             />
           </Field>
 
@@ -83,7 +89,10 @@ export function Profile() {
                 maxLength={2}
                 placeholder={(name || currentUser.username).charAt(0).toUpperCase()}
                 value={initial}
-                onChange={(e) => setInitial(e.target.value)}
+                onChange={(e) => {
+                  setInitial(e.target.value);
+                  markDirty();
+                }}
               />
             </Field>
             <div>
@@ -92,7 +101,10 @@ export function Profile() {
                 {AVATAR_COLORS.map((c) => (
                   <button
                     key={c}
-                    onClick={() => setColor(c)}
+                    onClick={() => {
+                      setColor(c);
+                      markDirty();
+                    }}
                     title={c}
                     className={cn(
                       'h-6 w-6 rounded-full border transition-transform hover:scale-110',
@@ -105,9 +117,15 @@ export function Profile() {
             </div>
           </div>
 
-          <button onClick={save} className={btnPrimary}>
-            {saved ? <Check size={15} /> : null} Save profile
-          </button>
+          <p className="flex h-5 items-center gap-1 text-xs text-text-faint">
+            {saved ? (
+              <>
+                <Check size={14} className="text-success" /> Saved
+              </>
+            ) : (
+              'Changes save automatically.'
+            )}
+          </p>
           <ErrorText>{error}</ErrorText>
         </div>
       </div>

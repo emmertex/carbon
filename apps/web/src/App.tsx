@@ -13,6 +13,7 @@ import { TimerBar } from '@/components/TimerBar';
 import { ListView } from '@/views/ListView';
 import { ContainerView } from '@/views/ContainerView';
 import { ForecastView } from '@/views/ForecastView';
+import { NearbyView } from '@/views/NearbyView';
 import { PlanView } from '@/views/PlanView';
 import { ReviewView } from '@/views/ReviewView';
 import { TimeTrackedView } from '@/views/TimeTrackedView';
@@ -67,6 +68,7 @@ function WorkspaceNotFound({ baseDomain }: { baseDomain: string | null }) {
 export default function App() {
   const ready = useStore((s) => s.ready);
   const authRequired = useStore((s) => s.authRequired);
+  const loginOpen = useStore((s) => s.loginOpen);
   const currentUser = useStore((s) => s.currentUser);
   const hostRole = useStore((s) => s.hostRole);
   const baseDomain = useStore((s) => s.baseDomain);
@@ -103,8 +105,8 @@ export default function App() {
   // Pane gestures (compact only). Zones are decided by the touch-start X: the left
   // edge opens the nav drawer, the right edge runs a configurable action, and the
   // centre is left to the per-row task swipes. An open overlay can be dismissed
-  // from anywhere. Edge zones stay narrow so they don't fight the Android back
-  // gesture (see EDGE_ZONE).
+  // from anywhere. Edge zones span ~1/5 of the width so the swipe can start
+  // inward of the Android back-gesture strip (see EDGE_FRACTION).
   const touch = useRef<{ x: number; y: number; t: number; zone: string } | null>(null);
   function onTouchStart(e: React.TouchEvent) {
     const t = e.touches[0]!;
@@ -162,10 +164,11 @@ export default function App() {
   // A subdomain that resolves to no active workspace.
   if (hostRole === 'unknown') return <WorkspaceNotFound baseDomain={baseDomain} />;
 
-  // Sign-in gate: only when the configured server explicitly requires a login
-  // (a /api/me 401). Local-only and open-mode setups never reach this.
+  // Sign-in gate: when the configured server requires a login (a /api/me 401), or
+  // when the user opened it on demand (the Settings "Login" button). Local-only and
+  // open-mode setups only reach this via the explicit button.
   const signedIn = !!currentUser && !currentUser.open;
-  if (authRequired && !signedIn) return <SignInGate />;
+  if (loginOpen || (authRequired && !signedIn)) return <SignInGate />;
 
   // Renew gate: the workspace's subscription has lapsed (soft lock). Shown only on a
   // real signed-in workspace — local-only/open setups have no subscription to lapse.
@@ -251,6 +254,7 @@ export default function App() {
               />
               <Route path="/view/:id" element={<PerspectiveRoute />} />
               <Route path="/forecast" element={<ForecastView />} />
+              <Route path="/nearby" element={<NearbyView />} />
               <Route path="/plan" element={<PlanView />} />
               <Route path="/review" element={<ReviewView />} />
               <Route path="/time" element={<TimeTrackedView />} />

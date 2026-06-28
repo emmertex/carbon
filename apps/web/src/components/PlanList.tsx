@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react";
 import {
   DndContext,
   closestCenter,
@@ -6,16 +6,15 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
-} from '@dnd-kit/core';
-import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
+} from "@dnd-kit/core";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import {
   SortableContext,
   useSortable,
   verticalListSortingStrategy,
   arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { GripVertical } from 'lucide-react';
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   availableLeaves,
   getChildren,
@@ -23,14 +22,15 @@ import {
   type Db,
   type Item,
   type OrderMode,
-} from '@carbon/core';
-import { enrichItems } from '@/lib/enrich';
-import { useStore } from '@/lib/store';
-import { mutate } from '@/lib/mutate';
-import { toggleTaskCompletion } from '@/lib/taskActions';
-import { cn } from '@/lib/cn';
-import { TaskRow, type TaskRowData } from './TaskRow';
-import { SwipeableRow } from './SwipeableRow';
+} from "@carbon/core";
+import { enrichItems } from "@/lib/enrich";
+import { useStore } from "@/lib/store";
+import { mutate } from "@/lib/mutate";
+import { toggleTaskCompletion } from "@/lib/taskActions";
+import { cn } from "@/lib/cn";
+import { TaskRow, type TaskRowData } from "./TaskRow";
+import { SwipeableRow } from "./SwipeableRow";
+import { Chip } from "./Chip";
 
 /** A planned/matched item plus the available leaf actions to surface beneath it.
  *  For a sequential parent that's just the next action; for parallel/single it's
@@ -45,11 +45,11 @@ export interface PlanEntry {
 }
 
 export function planEntry(db: Db, item: Item): PlanEntry {
-  const hasChildren = getChildren(db, item.id).some((c) => c.type === 'task');
+  const hasChildren = getChildren(db, item.id).some((c) => c.type === "task");
   let leaves: Item[] = [];
   if (hasChildren) {
     const all = availableLeaves(db, item.id);
-    leaves = item.order_mode === 'sequential' ? all.slice(0, 1) : all;
+    leaves = item.order_mode === "sequential" ? all.slice(0, 1) : all;
   }
   return {
     parent: enrichItems(db, [item])[0],
@@ -90,7 +90,7 @@ export function PlanEntryRows({
   focused = false,
 }: {
   entry: PlanEntry;
-  grouping: 'nested' | 'flat';
+  grouping: "nested" | "flat";
   grip?: React.ReactNode;
   /** Keyboard focus highlight for the entry's primary (parent) row. */
   focused?: boolean;
@@ -100,7 +100,7 @@ export function PlanEntryRows({
 
   const leafRow = (d: TaskRowData) => (
     <SwipeableRow key={d.item.id} item={d.item}>
-      <TaskRow {...d} showProject indent={grouping === 'nested' ? 1 : 0} />
+      <TaskRow {...d} showProject indent={grouping === "nested" ? 1 : 0} />
     </SwipeableRow>
   );
   const parentRow = (
@@ -116,16 +116,22 @@ export function PlanEntryRows({
 
   // Flat: surface the available leaf actions only. If none are available, fall
   // back to the parent row so an item never silently vanishes.
-  if (grouping === 'flat') {
+  if (grouping === "flat") {
     if (leaves.length === 0) {
       return <EntryShell grip={grip} topRow={parentRow} />;
     }
     const [first, ...others] = leaves;
-    return <EntryShell grip={grip} topRow={leafRow(first)} rest={others.map(leafRow)} />;
+    return (
+      <EntryShell
+        grip={grip}
+        topRow={leafRow(first)}
+        rest={others.map(leafRow)}
+      />
+    );
   }
 
   // Nested: parent header with its available actions indented beneath.
-  const collapsible = orderMode === 'single' && leaves.length > 0;
+  const collapsible = orderMode === "single" && leaves.length > 0;
   const showLeaves = collapsible ? expanded : true;
   const topRow = (
     <SwipeableRow item={parent.item}>
@@ -134,7 +140,9 @@ export function PlanEntryRows({
         showProject
         focused={focused}
         collapsed={collapsible ? !expanded : undefined}
-        onToggleCollapse={collapsible ? () => setExpanded((e) => !e) : undefined}
+        onToggleCollapse={
+          collapsible ? () => setExpanded((e) => !e) : undefined
+        }
       />
     </SwipeableRow>
   );
@@ -161,31 +169,25 @@ function SortableEntry({
   focused = false,
 }: {
   entry: PlanEntry;
-  grouping: 'nested' | 'flat';
+  grouping: "nested" | "flat";
   focused?: boolean;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: entry.parent.item.id,
-  });
-  const grip = (
-    <button
-      {...attributes}
-      {...listeners}
-      onClick={(e) => e.stopPropagation()}
-      className="absolute left-0 top-[18px] z-10 -translate-y-1/2 cursor-grab p-0.5 text-text-faint opacity-0 group-hover/sortable:opacity-100"
-      aria-label="Drag to reorder"
-    >
-      <GripVertical size={14} />
-    </button>
-  );
+  const { listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({
+      id: entry.parent.item.id,
+    });
+  // Whole-row press-and-hold drag (see `sensors` below): there is no visible
+  // handle, so the row's pointer listeners are the drag affordance. A quick tap
+  // still selects/opens the row; holding ~200ms lifts it for reordering.
   return (
     <div
       ref={setNodeRef}
+      {...listeners}
       data-row-id={entry.parent.item.id}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`group/sortable ${isDragging ? 'z-10 opacity-80' : ''}`}
+      className={`select-none group/sortable ${isDragging ? "z-10 opacity-80" : ""}`}
     >
-      <PlanEntryRows entry={entry} grouping={grouping} grip={grip} focused={focused} />
+      <PlanEntryRows entry={entry} grouping={grouping} focused={focused} />
     </div>
   );
 }
@@ -205,7 +207,13 @@ export function PlanList({
   const grouping = useStore((s) => s.uiPrefs.planGrouping);
   const select = useStore((s) => s.select);
   const openDetail = useStore((s) => s.openDetail);
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  // Press-and-hold to drag: hold ~200ms to lift a row; moving >5px before then
+  // is treated as a tap/scroll, not a drag. Lets the whole row be the handle.
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 200, tolerance: 5 },
+    }),
+  );
 
   // Keyboard focus over the top-level (parent) rows: ArrowUp/Down to move,
   // Home/End/PageUp/PageDown to jump, Space to complete, Enter to open. This is
@@ -217,40 +225,41 @@ export function PlanList({
     if (!focusedId) return;
     containerRef.current
       ?.querySelector(`[data-row-id="${window.CSS.escape(focusedId)}"]`)
-      ?.scrollIntoView({ block: 'nearest' });
+      ?.scrollIntoView({ block: "nearest" });
   }, [focusedId]);
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (!entries.length) return;
     const ids = entries.map((en) => en.parent.item.id);
     const idx = focusedId ? ids.indexOf(focusedId) : -1;
-    const at = (i: number) => setFocusedId(ids[Math.max(0, Math.min(i, ids.length - 1))]!);
+    const at = (i: number) =>
+      setFocusedId(ids[Math.max(0, Math.min(i, ids.length - 1))]!);
 
     switch (e.key) {
-      case 'ArrowDown':
+      case "ArrowDown":
         e.preventDefault();
         return at(idx < 0 ? 0 : idx + 1);
-      case 'ArrowUp':
+      case "ArrowUp":
         e.preventDefault();
         return at(idx < 0 ? 0 : idx - 1);
-      case 'Home':
+      case "Home":
         e.preventDefault();
         return at(0);
-      case 'End':
+      case "End":
         e.preventDefault();
         return at(ids.length - 1);
-      case 'PageDown':
+      case "PageDown":
         e.preventDefault();
         return at((idx < 0 ? 0 : idx) + PAGE_STEP);
-      case 'PageUp':
+      case "PageUp":
         e.preventDefault();
         return at((idx < 0 ? 0 : idx) - PAGE_STEP);
-      case ' ': {
+      case " ": {
         if (idx < 0) return;
         e.preventDefault();
         return toggleTaskCompletion(entries[idx]!.parent.item);
       }
-      case 'Enter': {
+      case "Enter": {
         if (idx < 0) return;
         e.preventDefault();
         select(entries[idx]!.parent.item.id);
@@ -337,43 +346,26 @@ export function PlanList({
   );
 }
 
-/** The Nested/Flat actions toggle, bound to the shared `planGrouping` UI pref. */
+/** The Nested/Flat actions toggle, bound to the shared `planGrouping` UI pref.
+ *  Reused standalone by Plan/Forecast and composed into the View row. */
 export function GroupingToggle({ className }: { className?: string }) {
   const grouping = useStore((s) => s.uiPrefs.planGrouping);
   const setUiPrefs = useStore((s) => s.setUiPrefs);
   return (
-    <div className={cn('flex items-center gap-1.5 text-xs', className)}>
-      <span className="text-text-faint">Actions</span>
-      <GroupingChip active={grouping === 'nested'} onClick={() => setUiPrefs({ planGrouping: 'nested' })}>
+    <div className={cn("flex items-center gap-1.5 text-xs", className)}>
+      <span className="text-text-faint">List</span>
+      <Chip
+        active={grouping === "nested"}
+        onClick={() => setUiPrefs({ planGrouping: "nested" })}
+      >
         Nested
-      </GroupingChip>
-      <GroupingChip active={grouping === 'flat'} onClick={() => setUiPrefs({ planGrouping: 'flat' })}>
+      </Chip>
+      <Chip
+        active={grouping === "flat"}
+        onClick={() => setUiPrefs({ planGrouping: "flat" })}
+      >
         Flat
-      </GroupingChip>
+      </Chip>
     </div>
-  );
-}
-
-function GroupingChip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'flex items-center gap-1 rounded-full border px-2.5 py-1 font-medium',
-        active
-          ? 'border-accent bg-accent-soft text-accent'
-          : 'border-border text-text-muted hover:bg-surface-2',
-      )}
-    >
-      {children}
-    </button>
   );
 }

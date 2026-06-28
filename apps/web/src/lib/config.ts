@@ -1,3 +1,5 @@
+import { isNative } from './platform';
+
 export interface ServerConfig {
   url: string;
   username: string;
@@ -9,6 +11,21 @@ export interface ServerConfig {
 }
 
 const SERVER_KEY = 'carbon.server';
+
+/** Where the hosted Carbon SaaS lives — the sensible default for native builds,
+ *  which are served from localhost (Capacitor) or a tauri:// origin and so can't
+ *  derive a useful server from `window.location`. */
+export const HOSTED_SERVER_URL = 'https://app.carbon.etx.sx';
+
+/**
+ * The server URL to pre-fill when the user hasn't configured one. Native shells
+ * (Tauri / Capacitor) default to the hosted SaaS; a browser PWA defaults to the
+ * origin it was served from (a tenant subdomain or self-host serves its own API).
+ */
+export function defaultServerUrl(): string {
+  if (isNative) return HOSTED_SERVER_URL;
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
 
 const DEFAULT_SERVER: ServerConfig = {
   url: '',
@@ -41,6 +58,11 @@ export type EdgeGestureAction = 'projectRoot' | 'today' | 'inbox' | 'plan';
 export type CountScope = 'all' | 'direct';
 export type PlanGrouping = 'nested' | 'flat';
 
+/** Which per-row icons/affordances the task rows render. A global view preference
+ *  toggled from the View row; Flag and Plan are independent here (no auto-swap). */
+export type RowIcon = 'focus' | 'shared' | 'assigned' | 'tags' | 'flag' | 'plan';
+export type RowIcons = Record<RowIcon, boolean>;
+
 export interface UiPrefs {
   /** Action for a right-to-left task swipe. Right swipe is always Complete. */
   swipeLeftAction: SwipeLeftAction;
@@ -54,9 +76,20 @@ export interface UiPrefs {
   /** Plan view: nest a planned parent's available actions beneath it, or surface
    *  those actions flat (no parent header). */
   planGrouping: PlanGrouping;
+  /** Per-row iconography visibility (the View row toggles). */
+  rowIcons: RowIcons;
 }
 
 const UI_KEY = 'carbon.ui';
+
+export const DEFAULT_ROW_ICONS: RowIcons = {
+  focus: false,
+  shared: true,
+  assigned: true,
+  tags: true,
+  flag: true,
+  plan: false,
+};
 
 const DEFAULT_UI: UiPrefs = {
   swipeLeftAction: 'plan',
@@ -64,15 +97,18 @@ const DEFAULT_UI: UiPrefs = {
   edgeGestureAction: 'projectRoot',
   countScope: 'all',
   planGrouping: 'nested',
+  rowIcons: { ...DEFAULT_ROW_ICONS },
 };
 
 export function getUiPrefs(): UiPrefs {
   try {
     const raw = localStorage.getItem(UI_KEY);
-    if (!raw) return { ...DEFAULT_UI };
-    return { ...DEFAULT_UI, ...(JSON.parse(raw) as Partial<UiPrefs>) };
+    if (!raw) return { ...DEFAULT_UI, rowIcons: { ...DEFAULT_ROW_ICONS } };
+    const parsed = JSON.parse(raw) as Partial<UiPrefs>;
+    // rowIcons is nested, so merge it explicitly to pick up newly-added icons.
+    return { ...DEFAULT_UI, ...parsed, rowIcons: { ...DEFAULT_ROW_ICONS, ...parsed.rowIcons } };
   } catch {
-    return { ...DEFAULT_UI };
+    return { ...DEFAULT_UI, rowIcons: { ...DEFAULT_ROW_ICONS } };
   }
 }
 
@@ -125,7 +161,7 @@ export function authHeaders(cfg: ServerConfig): Record<string, string> {
 // ----- theme ----------------------------------------------------------------
 
 /** A concrete palette applied via `data-theme`. */
-export type Theme = 'light' | 'dark' | 'epaper' | 'gruvbox';
+export type Theme = 'light' | 'dark' | 'epaper' | 'gruvbox' | 'gruvboxlight' | 'ayu';
 /** How the active palette is chosen. The light/dark *roles* are user-assignable. */
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type Accent =
@@ -148,10 +184,12 @@ const ACCENT_KEY = 'carbon.accent';
 export const LIGHT_THEMES: { id: Theme; label: string }[] = [
   { id: 'light', label: 'Light' },
   { id: 'epaper', label: 'ePaper' },
+  { id: 'gruvboxlight', label: 'Gruvbox Light' },
 ];
 export const DARK_THEMES: { id: Theme; label: string }[] = [
   { id: 'dark', label: 'Dark' },
   { id: 'gruvbox', label: 'Gruvbox' },
+  { id: 'ayu', label: 'Ayu Dark' },
 ];
 export const THEME_MODES: { id: ThemeMode; label: string }[] = [
   { id: 'system', label: 'System' },
@@ -171,8 +209,10 @@ export const ACCENTS: { id: Accent; color: string }[] = [
   { id: 'orange', color: '#d65d0e' }, // gruvbox orange
 ];
 
-const isLight = (t: string | null): t is Theme => t === 'light' || t === 'epaper';
-const isDarkTheme = (t: string | null): t is Theme => t === 'dark' || t === 'gruvbox';
+const isLight = (t: string | null): t is Theme =>
+  t === 'light' || t === 'epaper' || t === 'gruvboxlight';
+const isDarkTheme = (t: string | null): t is Theme =>
+  t === 'dark' || t === 'gruvbox' || t === 'ayu';
 
 export function getThemeMode(): ThemeMode {
   const m = localStorage.getItem(MODE_KEY);

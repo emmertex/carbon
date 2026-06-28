@@ -2,17 +2,24 @@ import { allItems } from '@carbon/core';
 import { getDb } from './db';
 import { getServerConfig } from './config';
 import { useStore } from './store';
+import { isCapacitor } from './platform';
+import { requestNativePermission, syncNativeSchedule, cancelAllNative } from './nativeReminders';
 
-// Foreground local reminders: when the server isn't pushing for us (no server, or
-// not signed in), scan due / reminder / defer times while the app is open and fire
-// a local notification. Works without any server — like geofencing, foreground only.
+// Local reminders: when the server isn't pushing for us (no server, or not signed
+// in), fire reminder / due / defer alerts on this device.
+//
+//   web/desktop  → foreground scan: while the app is open, an interval checks for
+//                  newly-passed times and shows a notification.
+//   capacitor    → native OS scheduling via @capacitor/local-notifications, so the
+//                  reminders fire even when the app is closed (see nativeReminders.ts).
+//                  The interval just re-reconciles the schedule with current data.
 
 const PREF_KEY = 'carbon.localreminders';
 const SENT_KEY = 'carbon.localreminders.sent';
 let timer: ReturnType<typeof setInterval> | null = null;
 
 export function localRemindersSupported(): boolean {
-  return typeof Notification !== 'undefined';
+  return isCapacitor || typeof Notification !== 'undefined';
 }
 export function localRemindersPref(): boolean {
   return localStorage.getItem(PREF_KEY) === '1';
@@ -72,12 +79,28 @@ async function scan(): Promise<void> {
   if (changed) markSent(markers);
 }
 
-/** Start scanning (call after Notification permission is granted). */
-export function startLocalReminders(): void {
+/**
+ * Enable local reminders on this device. On web/desktop the caller is expected to
+ * have already granted Notification permission; on Capacitor we request the native
+ * permission ourselves. Resolves false if a needed permission was denied.
+ */
+export async function startLocalReminders(): Promise<boolean> {
   localStorage.setItem(PREF_KEY, '1');
-  if (timer) return;
-  void scan();
-  timer = setInterval(() => void scan(), 60_000);
+  if (isCapacitor) {
+    if (!(await requestNativePermission())) {
+      localStorage.removeItem(PREF_KEY);
+      return false;
+    }
+    await syncNativeSchedule();
+    // Re-reconcile periodically so edits made while the app is open are picked up.
+    if (!timer) timer = setInterval(() => void syncNativeSchedule(), 300_000);
+    return true;
+  }
+  if (!timer) {
+    void scan();
+    timer = setInterval(() => void scan(), 60_000);
+  }
+  return true;
 }
 
 export function stopLocalReminders(): void {
@@ -86,4 +109,10 @@ export function stopLocalReminders(): void {
     clearInterval(timer);
     timer = null;
   }
+  if (isCapacitor) void cancelAllNative();
+}
+
+/** Re-reconcile the native schedule now (call after data sync on Capacitor). */
+export function refreshLocalReminders(): void {
+  if (isCapacitor && localRemindersPref()) void syncNativeSchedule();
 }

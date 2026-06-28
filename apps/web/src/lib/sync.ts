@@ -19,7 +19,6 @@ import {
   saveServerConfig,
   authHeaders,
   saveCurrentUser,
-  type ServerConfig,
   type CurrentUser,
 } from './config';
 import { useStore } from './store';
@@ -94,10 +93,10 @@ export async function fetchHostInfo(): Promise<void> {
         useStore.getState().setCurrentUser(null);
         useStore.getState().setAuthRequired(false);
         useStore.getState().setLocalOnly(true);
-      } else if (h.role === 'tenant' && !getServerConfig().url) {
-        // A workspace subdomain syncs to (and requires sign-in against) its own
-        // origin — wire it up so a fresh visit lands on the sign-in gate, not an
-        // empty local app.
+      } else if ((h.role === 'tenant' || h.role === 'single') && !getServerConfig().url) {
+        // A workspace subdomain or single-tenant self-host syncs to (and requires
+        // sign-in against) its own origin — wire it up so a fresh visit lands on the
+        // sign-in gate, not an empty local app.
         saveServerConfig({ ...getServerConfig(), url: window.location.origin });
       }
     }
@@ -346,25 +345,6 @@ export async function syncNow(): Promise<boolean> {
     return false;
   } finally {
     inFlight = false;
-  }
-}
-
-export interface ConnectionResult {
-  ok: boolean;
-  message: string;
-}
-
-export async function testConnection(cfg: ServerConfig): Promise<ConnectionResult> {
-  if (!cfg.url) return { ok: false, message: 'No server URL set' };
-  try {
-    const health = await fetch(joinUrl(cfg.url, '/api/health'));
-    if (!health.ok) return { ok: false, message: `Server returned ${health.status}` };
-    const users = await fetch(joinUrl(cfg.url, '/api/users'), { headers: authHeaders(cfg) });
-    if (users.status === 401) return { ok: false, message: 'Authentication failed' };
-    if (!users.ok) return { ok: false, message: `Server returned ${users.status}` };
-    return { ok: true, message: 'Connected' };
-  } catch {
-    return { ok: false, message: 'Could not reach server' };
   }
 }
 

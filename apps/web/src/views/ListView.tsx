@@ -7,7 +7,7 @@ import { getCurrentUserId } from '@/lib/store';
 import { queryRoots } from '@/lib/listQuery';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
-import { GroupingToggle } from '@/components/PlanList';
+import { ViewRow } from '@/components/ViewRow';
 import { VirtualTaskList } from '@/components/VirtualTaskList';
 import { ViewControls } from '@/components/ViewControls';
 import {
@@ -104,7 +104,7 @@ export function ListView({
         projects={projects}
       />
 
-      {count > 0 && <GroupingToggle className="mb-3" />}
+      {count > 0 && <ViewRow grouping className="mb-3" />}
 
       {quickAdd && (
         <div className="mb-3">

@@ -84,6 +84,12 @@ export function openControlDb(path: string): Db {
       status             TEXT,
       current_period_end TEXT
     );
+    -- Webhook idempotency: each provider event is applied at most once.
+    CREATE TABLE IF NOT EXISTS billing_events (
+      event_id    TEXT PRIMARY KEY,
+      type        TEXT,
+      received_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS pending_signups (
       id             TEXT PRIMARY KEY,
       email          TEXT NOT NULL,
@@ -103,6 +109,11 @@ export function openControlDb(path: string): Db {
   ensureColumn(db, 'tenants', 'locked_at', 'TEXT');
   ensureColumn(db, 'tenants', 'admin_email', 'TEXT');
   ensureColumn(db, 'tenants', 'blob_quota_bytes', 'INTEGER');
+  // Subscription columns added for Square auto-renewing subscriptions.
+  ensureColumn(db, 'subscriptions', 'square_customer_id', 'TEXT');
+  ensureColumn(db, 'subscriptions', 'square_subscription_id', 'TEXT');
+  ensureColumn(db, 'subscriptions', 'plan_id', 'TEXT');
+  ensureColumn(db, 'subscriptions', 'canceled_at', 'TEXT');
   return db;
 }
 
@@ -230,6 +241,12 @@ export function setTenantLock(db: Db, id: string, locked: boolean): void {
  *  default; 0 means unlimited. */
 export function setTenantBlobQuota(db: Db, id: string, bytes: number | null): void {
   db.run('UPDATE tenants SET blob_quota_bytes = ? WHERE id = ?', [bytes, id]);
+}
+
+/** Persist the workspace billing/contact email (e.g. captured at subscribe time when a
+ *  host-admin-created tenant had none). Used for receipts + the Square customer. */
+export function setTenantAdminEmail(db: Db, id: string, email: string | null): void {
+  db.run('UPDATE tenants SET admin_email = ? WHERE id = ?', [email, id]);
 }
 
 /** Soft-delete then remove the tenant's data dir. Caller handles export/grace first. */
