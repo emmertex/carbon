@@ -9,7 +9,32 @@ import { getCurrentPosition } from './location';
 // Reverse-geocoding to a place name is best-effort and never blocks. Everything
 // degrades gracefully when offline or when permission is denied.
 
+/** A single GPS fix from one source, with metadata for the source icons. */
+export interface GpsFix {
+  lat: number;
+  lng: number;
+  /** Horizontal accuracy in metres, when the source reports it. */
+  accuracy: number | null;
+  /** Epoch ms when this fix was recorded (server timestamp, or fetch time for device). */
+  updatedAt: number;
+}
+
+/** The HA zone the user is currently in (event-driven: cleared on leave). */
+export interface ZoneFix {
+  name: string;
+  updatedAt: number;
+}
+
 export interface WhereState {
+  // --- Distinct sources, surfaced individually by the Nearby view ---
+  /** Home Assistant zone (cleared on leave; not time-decayed). */
+  haZone: ZoneFix | null;
+  /** Home Assistant device-tracker GPS fix. */
+  haGps: GpsFix | null;
+  /** Native device GPS (navigator.geolocation / Capacitor). */
+  deviceGps: GpsFix | null;
+
+  // --- Merged convenience fields used for task matching + the sidebar gate ---
   /** Home Assistant zone name, if the server knows one. */
   zone: string | null;
   /** Best current GPS point (server HA fix, else native geolocation). */
@@ -20,7 +45,20 @@ export interface WhereState {
   resolved: boolean;
 }
 
-const EMPTY: WhereState = { zone: null, point: null, place: null, resolved: false };
+const EMPTY: WhereState = {
+  haZone: null,
+  haGps: null,
+  deviceGps: null,
+  zone: null,
+  point: null,
+  place: null,
+  resolved: false,
+};
+
+/** GPS fixes older than this are treated as stale and hidden from the source
+ *  icons. Zones are event-driven (cleared on leave) and so are never time-decayed. */
+export const GPS_STALE_MS = 30 * 60_000; // 30 min
+export const isFixStale = (updatedAt: number): boolean => Date.now() - updatedAt > GPS_STALE_MS;
 
 let state: WhereState = EMPTY;
 const listeners = new Set<() => void>();
@@ -42,28 +80,41 @@ function serverAvailable(): boolean {
   return !!getServerConfig().url && !!user && !user.open;
 }
 
-async function fetchServerWhere(): Promise<{ zone: string | null; point: { lat: number; lng: number } | null } | null> {
+interface ServerWhere {
+  zone: { name: string; updatedAt: string } | null;
+  haGps: { lat: number; lng: number; accuracy: number | null; updatedAt: string } | null;
+}
+
+async function fetchServerWhere(): Promise<{ haZone: ZoneFix | null; haGps: GpsFix | null } | null> {
   if (!serverAvailable()) return null;
   const cfg = getServerConfig();
   try {
     const res = await fetch(`${cfg.url}/api/where`, { headers: authHeaders(cfg) });
     if (!res.ok) return null;
-    const body = (await res.json()) as { zone: string | null; lat: number | null; lng: number | null };
-    const point =
-      typeof body.lat === 'number' && typeof body.lng === 'number'
-        ? { lat: body.lat, lng: body.lng }
-        : null;
-    return { zone: body.zone ?? null, point };
+    const body = (await res.json()) as ServerWhere;
+    const haZone = body.zone
+      ? { name: body.zone.name, updatedAt: Date.parse(body.zone.updatedAt) }
+      : null;
+    const haGps = body.haGps
+      ? {
+          lat: body.haGps.lat,
+          lng: body.haGps.lng,
+          accuracy: body.haGps.accuracy ?? null,
+          updatedAt: Date.parse(body.haGps.updatedAt),
+        }
+      : null;
+    return { haZone, haGps };
   } catch {
     return null; // offline / network error — degrade gracefully
   }
 }
 
-async function nativePoint(): Promise<{ lat: number; lng: number } | null> {
+async function nativeFix(): Promise<GpsFix | null> {
   // Uses the phone's sensors via @capacitor/geolocation on native, browser API on
-  // the web. Never throws to the UI.
+  // the web. Never throws to the UI. Stamped with fetch time (the device fix is
+  // always "now").
   const p = await getCurrentPosition({ highAccuracy: false, timeout: 15_000, maximumAge: 60_000 });
-  return p ? { lat: p.lat, lng: p.lng } : null;
+  return p ? { lat: p.lat, lng: p.lng, accuracy: p.accuracy ?? null, updatedAt: Date.now() } : null;
 }
 
 /** Best-effort reverse geocode via OpenStreetMap Nominatim (no key). Never blocks. */
@@ -79,13 +130,32 @@ async function reverseGeocode(point: { lat: number; lng: number }): Promise<stri
   }
 }
 
+/** Recompute the merged convenience fields (zone/point) from the three sources.
+ *  Server HA GPS wins over the native device fix; the zone drives task matching. */
+function merge(sources: Pick<WhereState, 'haZone' | 'haGps' | 'deviceGps'>): Partial<WhereState> {
+  const gps = sources.haGps ?? sources.deviceGps;
+  return {
+    ...sources,
+    zone: sources.haZone?.name ?? null,
+    point: gps ? { lat: gps.lat, lng: gps.lng } : null,
+  };
+}
+
 async function resolve(): Promise<void> {
   const server = await fetchServerWhere();
-  // Server HA GPS wins over native; fall back to native if the server has none.
-  const point = server?.point ?? (await nativePoint());
-  emit({ zone: server?.zone ?? null, point, place: null });
+  const haZone = server?.haZone ?? null;
+  const haGps = server?.haGps ?? null;
 
-  // Reverse-geocode in the background; update once it arrives. Don't block.
+  // Emit the server-derived state first so Nearby stays responsive, then fill in
+  // the native device fix (which may take up to ~15s) in the background.
+  emit({ ...merge({ haZone, haGps, deviceGps: state.deviceGps }), place: null });
+
+  const deviceGps = await nativeFix();
+  const merged = merge({ haZone, haGps, deviceGps });
+  emit({ ...merged, place: null });
+
+  // Reverse-geocode the merged point in the background; update once it arrives.
+  const point = merged.point ?? null;
   if (point) {
     void reverseGeocode(point).then((place) => {
       if (place && state.point && state.point.lat === point.lat && state.point.lng === point.lng) {

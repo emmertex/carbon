@@ -36,6 +36,7 @@ import { Markdown } from '@/components/Markdown';
 export function ContainerView() {
   const { id = '' } = useParams();
   const select = useStore((s) => s.select);
+  const openDetail = useStore((s) => s.openDetail);
 
   const [prefs, setPrefs] = useState<ViewPrefs>(() => getPrefs(`project:${id}`));
   useEffect(() => setPrefs(getPrefs(`project:${id}`)), [id]);
@@ -114,7 +115,10 @@ export function ContainerView() {
           {/* The title opens the project/task detail sidebar (replaces the old
               settings button). */}
           <h1
-            onClick={() => select(item.id)}
+            onClick={() => {
+              select(item.id);
+              openDetail(); // compact: the overlay only renders on detailOpen
+            }}
             className="cursor-pointer truncate text-2xl font-bold tracking-tight hover:text-accent"
             title={isProject ? 'Project details' : 'Details'}
           >

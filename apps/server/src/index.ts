@@ -877,6 +877,8 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       person?: string;
       lat?: number;
       lng?: number;
+      accuracy?: number;
+      gps_accuracy?: number;
     };
     if (typeof body.lat !== 'number' || typeof body.lng !== 'number') {
       return c.json({ error: 'lat and lng (numbers) required' }, 400);
@@ -885,7 +887,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     const userId =
       (body.person ? resolveUserByHaPerson(db, body.person) : null) ?? c.get('userId');
     if (userId === 'local') return c.json({ error: 'no user' }, 400);
-    saveGps(db, userId, body.lat, body.lng);
+    saveGps(db, userId, body.lat, body.lng, body.accuracy ?? body.gps_accuracy ?? null);
     return c.json({ ok: true });
   });
 
@@ -898,6 +900,8 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       event?: 'enter' | 'leave';
       lat?: number;
       lng?: number;
+      accuracy?: number;
+      gps_accuracy?: number;
     };
     // Resolve which user this is about: an HA person mapping wins, else the token's user.
     const userId =
@@ -910,7 +914,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     // refresh the latest GPS fix too.
     if (body.zone != null) saveZone(db, userId, isEnter ? body.zone : null);
     if (typeof body.lat === 'number' && typeof body.lng === 'number') {
-      saveGps(db, userId, body.lat, body.lng);
+      saveGps(db, userId, body.lat, body.lng, body.accuracy ?? body.gps_accuracy ?? null);
     }
     if (!isEnter) return c.json({ ok: true, matched: 0 });
 
@@ -937,7 +941,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
   // view. Either field may be null; both null means we don't know where they are.
   api.get('/where', requireScope('tasks:read'), (c) => {
     const userId = c.get('userId');
-    if (userId === 'local') return c.json({ zone: null, lat: null, lng: null, updatedAt: null });
+    if (userId === 'local') return c.json({ zone: null, haGps: null });
     return c.json(getUserLocation(db, userId));
   });
 

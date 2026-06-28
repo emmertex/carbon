@@ -112,6 +112,12 @@ export function ensureServerTables(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_hash ON sessions(token_hash);
   `);
+  // Additive: horizontal accuracy (metres) for the latest GPS fix, when HA reports
+  // it. Idempotent ALTER for DBs created before this column existed.
+  const gpsCols = db.all<{ name: string }>(`PRAGMA table_info(gps_history)`);
+  if (!gpsCols.some((c) => c.name === 'accuracy')) {
+    db.exec(`ALTER TABLE gps_history ADD COLUMN accuracy REAL`);
+  }
 }
 
 // ----- sign-in sessions (browser / device tokens) ---------------------------
@@ -260,12 +266,19 @@ export function resolveUserByHaPerson(db: Db, person: string): string | null {
 
 // ----- GPS history (HA device-tracker feed) --------------------------------
 
-/** Store the latest GPS coordinate for a user (called by HA on a tick). */
-export function saveGps(db: Db, userId: string, lat: number, lng: number): void {
+/** Store the latest GPS coordinate for a user (called by HA on a tick). Accuracy
+ *  (horizontal, metres) is optional — HA's device_tracker reports `gps_accuracy`. */
+export function saveGps(
+  db: Db,
+  userId: string,
+  lat: number,
+  lng: number,
+  accuracy?: number | null,
+): void {
   db.run(
-    `INSERT INTO gps_history (user_id, lat, lng, updated_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at`,
-    [userId, lat, lng, new Date().toISOString()],
+    `INSERT INTO gps_history (user_id, lat, lng, accuracy, updated_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy = excluded.accuracy, updated_at = excluded.updated_at`,
+    [userId, lat, lng, accuracy ?? null, new Date().toISOString()],
   );
 }
 
@@ -273,10 +286,10 @@ export function saveGps(db: Db, userId: string, lat: number, lng: number): void 
 export function getGps(
   db: Db,
   userId: string,
-): { lat: number; lng: number; updated_at: string } | null {
+): { lat: number; lng: number; accuracy: number | null; updated_at: string } | null {
   return (
-    db.get<{ lat: number; lng: number; updated_at: string }>(
-      'SELECT lat, lng, updated_at FROM gps_history WHERE user_id = ?',
+    db.get<{ lat: number; lng: number; accuracy: number | null; updated_at: string }>(
+      'SELECT lat, lng, accuracy, updated_at FROM gps_history WHERE user_id = ?',
       [userId],
     ) ?? null
   );
@@ -292,26 +305,26 @@ export function saveZone(db: Db, userId: string, zone: string | null): void {
 }
 
 export interface UserLocation {
-  zone: string | null;
-  lat: number | null;
-  lng: number | null;
-  updatedAt: string | null;
+  /** Latest HA zone (cleared on leave), with the time it was entered. */
+  zone: { name: string; updatedAt: string } | null;
+  /** Latest HA device-tracker GPS fix, with accuracy (m) when known. */
+  haGps: { lat: number; lng: number; accuracy: number | null; updatedAt: string } | null;
 }
 
-/** The user's current location: their latest HA zone merged with their latest GPS
- *  fix. `updatedAt` is the most recent of the two sources. */
+/** The user's current location, with the HA zone and HA GPS kept as distinct
+ *  sources (each with its own timestamp) so the Nearby view can surface them
+ *  individually. The native device GPS is a third source resolved client-side. */
 export function getUserLocation(db: Db, userId: string): UserLocation {
   const gps = getGps(db, userId);
   const zoneRow = db.get<{ zone: string | null; updated_at: string }>(
     'SELECT zone, updated_at FROM user_zone WHERE user_id = ?',
     [userId],
   );
-  const stamps = [gps?.updated_at, zoneRow?.updated_at].filter((s): s is string => !!s);
   return {
-    zone: zoneRow?.zone ?? null,
-    lat: gps?.lat ?? null,
-    lng: gps?.lng ?? null,
-    updatedAt: stamps.length ? stamps.sort().at(-1)! : null,
+    zone: zoneRow?.zone ? { name: zoneRow.zone, updatedAt: zoneRow.updated_at } : null,
+    haGps: gps
+      ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy ?? null, updatedAt: gps.updated_at }
+      : null,
   };
 }
 

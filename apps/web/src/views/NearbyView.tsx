@@ -4,6 +4,7 @@ import { tasksNearLocation } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
 import { PlanList, GroupingToggle, planEntry } from '@/components/PlanList';
+import { LocationSources } from '@/components/LocationSources';
 
 /** Round a coordinate to ~5 decimal places (≈1m) for display. */
 const fmtCoord = (n: number) => n.toFixed(5);
@@ -46,6 +47,7 @@ export function NearbyView() {
           )}
           {gpsLabel && <p className="mt-0.5 text-text-faint">{gpsLabel}</p>}
         </div>
+        <LocationSources where={where} />
       </div>
 
       {data && data.entries.length > 0 && <GroupingToggle className="mb-3" />}
