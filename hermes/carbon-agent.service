@@ -1,0 +1,22 @@
+[Unit]
+Description=Carbon Agent webhook listener
+After=network.target
+
+[Service]
+Type=simple
+# Run as your user so ~/.hermes paths match the queue processor.
+User=ku7
+Environment=HOME=/home/user
+Environment=CARBON_URL=https://carbon.etx.sx
+Environment=CARBON_TOKEN=REPLACE_WITH_AGENT_TOKEN
+# Set this to match the "Shared secret" in the Carbon agent (or remove the line).
+Environment=CARBON_SECRET=REPLACE_OR_REMOVE
+# Absolute path — systemd does NOT expand ~. Point this at wherever you place the file.
+ExecStart=/usr/bin/python3 /home/user/.hermes/skills/productivity/carbon-agent/carbon-webhook-listener.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

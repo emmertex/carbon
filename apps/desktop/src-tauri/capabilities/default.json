@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main Carbon window.",
+  "windows": ["main"],
+  "permissions": ["core:default", "notification:default"]
+}

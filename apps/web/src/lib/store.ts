@@ -1,0 +1,233 @@
+import { create } from 'zustand';
+import {
+  getThemeMode,
+  getLightTheme,
+  getDarkTheme,
+  getAccent,
+  getCurrentUser,
+  applyTheme,
+  getUiPrefs,
+  saveUiPrefs,
+  type Theme,
+  type ThemeMode,
+  type Accent,
+  type CurrentUser,
+  type UiPrefs,
+} from './config';
+
+export type SyncStatus = 'idle' | 'syncing' | 'error' | 'offline' | 'disabled';
+
+export interface Toast {
+  id: number;
+  message: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+interface AppState {
+  ready: boolean;
+  /** Bumped after every mutation/sync so `useQuery` re-runs. */
+  dbRevision: number;
+  selectedId: string | null;
+  /** Whether the detail pane is *open*. On desktop the docked pane shows whenever
+   *  a task is selected; on mobile this gates the overlay (2nd tap opens it). */
+  detailOpen: boolean;
+  /** Whether the right-side Tags management panel is open (mutually exclusive with
+   *  the task/project detail pane). */
+  tagsPanelOpen: boolean;
+  sidebarOpen: boolean;
+  /** Collapsed tree nodes (children hidden); persisted across sessions. */
+  collapsed: Set<string>;
+  /** Expanded subtask rows in flat list views (Today/Flagged/etc). Unlike `collapsed`
+   *  these default to *collapsed* — membership means "show this task's subtasks".
+   *  Persisted across sessions. */
+  expanded: Set<string>;
+  themeMode: ThemeMode;
+  lightTheme: Theme;
+  darkTheme: Theme;
+  accent: Accent;
+  syncStatus: SyncStatus;
+  /** Last sync failure message (for the SyncIndicator tooltip); null when healthy. */
+  syncError: string | null;
+  lastSyncedAt: number | null;
+  currentUser: CurrentUser | null;
+  /** The configured server requires a login and we don't have a valid session
+   *  (a /api/me returned 401). Drives the sign-in gate. False for local-only
+   *  (no server) and open-mode servers. */
+  authRequired: boolean;
+  /** What this origin is, per /api/health: 'single' (self-host, no base domain),
+   *  'apex' (the landing/marketing host), 'app' (the dedicated offline/local-only
+   *  host), 'tenant' (a real workspace), 'unknown' (a subdomain with no matching
+   *  workspace), or null before health resolves. */
+  hostRole: 'single' | 'apex' | 'app' | 'tenant' | 'unknown' | null;
+  /** Apex domain reported by the server (for "go to my workspace" links). */
+  baseDomain: string | null;
+  /** Label of the dedicated offline/local-only host (e.g. "app"). */
+  appHost: string | null;
+  /** Local-only "use without signing in" choice on the apex landing. */
+  localOnly: boolean;
+  /** Workspace subscription has lapsed (expired or operator-locked): the app shows a
+   *  read-only renew gate. From /api/health `locked`. */
+  workspaceLocked: boolean;
+  /** ISO timestamp the workspace locks / locked at (for the gate copy). */
+  workspaceExpiresAt: string | null;
+  /** Gesture / mobile-layout preferences (persisted to localStorage). */
+  uiPrefs: UiPrefs;
+  /** Incremented to request focusing the quick-add input (keyboard `c` / `/`).
+   *  QuickAdd watches this nonce and focuses itself; works regardless of which
+   *  screen's QuickAdd is mounted. */
+  quickAddFocusNonce: number;
+  /** Transient snackbar (e.g. undoable delete). */
+  toast: Toast | null;
+  /** Prompt: a task was completed while a different project's session runs. */
+  interrupt: { project: string } | null;
+
+  setReady: (v: boolean) => void;
+  setCurrentUser: (u: CurrentUser | null) => void;
+  setAuthRequired: (v: boolean) => void;
+  setHostInfo: (info: {
+    role: AppState['hostRole'];
+    baseDomain: string | null;
+    appHost: string | null;
+  }) => void;
+  setWorkspaceLock: (locked: boolean, expiresAt: string | null) => void;
+  setLocalOnly: (v: boolean) => void;
+  bump: () => void;
+  select: (id: string | null) => void;
+  openDetail: () => void;
+  closeDetail: () => void;
+  openTagsPanel: () => void;
+  closeTagsPanel: () => void;
+  setSidebarOpen: (v: boolean) => void;
+  focusQuickAdd: () => void;
+  toggleCollapsed: (id: string) => void;
+  toggleExpanded: (id: string) => void;
+  setThemeMode: (m: ThemeMode) => void;
+  setLightTheme: (t: Theme) => void;
+  setDarkTheme: (t: Theme) => void;
+  setAccent: (a: Accent) => void;
+  setSyncStatus: (s: SyncStatus) => void;
+  setSyncError: (msg: string | null) => void;
+  setLastSyncedAt: (t: number) => void;
+  setUiPrefs: (patch: Partial<UiPrefs>) => void;
+  showToast: (t: Omit<Toast, 'id'>) => void;
+  dismissToast: () => void;
+  setInterrupt: (v: { project: string } | null) => void;
+}
+
+const COLLAPSE_KEY = 'carbon.collapsed';
+const EXPAND_KEY = 'carbon.expanded';
+function loadIdSet(key: string): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(key) || '[]') as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+export const useStore = create<AppState>((set, get) => ({
+  ready: false,
+  dbRevision: 0,
+  selectedId: null,
+  detailOpen: false,
+  tagsPanelOpen: false,
+  sidebarOpen: false,
+  collapsed: loadIdSet(COLLAPSE_KEY),
+  expanded: loadIdSet(EXPAND_KEY),
+  themeMode: getThemeMode(),
+  lightTheme: getLightTheme(),
+  darkTheme: getDarkTheme(),
+  accent: getAccent(),
+  syncStatus: 'idle',
+  syncError: null,
+  lastSyncedAt: null,
+  currentUser: getCurrentUser(),
+  authRequired: false,
+  hostRole: null,
+  baseDomain: null,
+  appHost: null,
+  localOnly: localStorage.getItem('carbon.localOnly') === '1',
+  workspaceLocked: false,
+  workspaceExpiresAt: null,
+  uiPrefs: getUiPrefs(),
+  quickAddFocusNonce: 0,
+  toast: null,
+  interrupt: null,
+
+  setReady: (v) => set({ ready: v }),
+  setCurrentUser: (u) => set({ currentUser: u }),
+  setAuthRequired: (v) => set({ authRequired: v }),
+  setHostInfo: (info) =>
+    set({ hostRole: info.role, baseDomain: info.baseDomain, appHost: info.appHost }),
+  setWorkspaceLock: (locked, expiresAt) =>
+    set({ workspaceLocked: locked, workspaceExpiresAt: expiresAt }),
+  setLocalOnly: (v) => {
+    localStorage.setItem('carbon.localOnly', v ? '1' : '0');
+    set({ localOnly: v });
+  },
+  bump: () => set((s) => ({ dbRevision: s.dbRevision + 1 })),
+  // Panes are mutually exclusive on compact screens: opening one closes the other.
+  // Selecting does NOT auto-open the overlay (mobile needs a 2nd tap); the docked
+  // desktop pane shows on selectedId regardless of detailOpen.
+  select: (id) =>
+    set(
+      id
+        ? { selectedId: id, sidebarOpen: false, tagsPanelOpen: false }
+        : { selectedId: null, detailOpen: false },
+    ),
+  openDetail: () => set({ detailOpen: true }),
+  closeDetail: () => set({ detailOpen: false }),
+  openTagsPanel: () =>
+    set({ tagsPanelOpen: true, selectedId: null, detailOpen: false, sidebarOpen: false }),
+  closeTagsPanel: () => set({ tagsPanelOpen: false }),
+  setSidebarOpen: (v) =>
+    set(v ? { sidebarOpen: true, selectedId: null, detailOpen: false } : { sidebarOpen: false }),
+  focusQuickAdd: () => set((s) => ({ quickAddFocusNonce: s.quickAddFocusNonce + 1 })),
+  toggleCollapsed: (id) =>
+    set((s) => {
+      const next = new Set(s.collapsed);
+      next.has(id) ? next.delete(id) : next.add(id);
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      return { collapsed: next };
+    }),
+  toggleExpanded: (id) =>
+    set((s) => {
+      const next = new Set(s.expanded);
+      next.has(id) ? next.delete(id) : next.add(id);
+      localStorage.setItem(EXPAND_KEY, JSON.stringify([...next]));
+      return { expanded: next };
+    }),
+  // Each theme control re-applies the full (mode, light, dark) triple to the DOM.
+  setThemeMode: (m) => {
+    const s = get();
+    applyTheme(m, s.lightTheme, s.darkTheme);
+    set({ themeMode: m });
+  },
+  setLightTheme: (t) => {
+    const s = get();
+    applyTheme(s.themeMode, t, s.darkTheme);
+    set({ lightTheme: t });
+  },
+  setDarkTheme: (t) => {
+    const s = get();
+    applyTheme(s.themeMode, s.lightTheme, t);
+    set({ darkTheme: t });
+  },
+  setAccent: (a) => set({ accent: a }),
+  setSyncStatus: (s) => set({ syncStatus: s, ...(s === 'idle' ? { syncError: null } : {}) }),
+  setSyncError: (msg) => set({ syncError: msg }),
+  setLastSyncedAt: (t) => set({ lastSyncedAt: t }),
+  setUiPrefs: (patch) =>
+    set((s) => {
+      const next = { ...s.uiPrefs, ...patch };
+      saveUiPrefs(next);
+      return { uiPrefs: next };
+    }),
+  showToast: (t) => set((s) => ({ toast: { ...t, id: (s.toast?.id ?? 0) + 1 } })),
+  dismissToast: () => set({ toast: null }),
+  setInterrupt: (v) => set({ interrupt: v }),
+}));
+
+export function getCurrentUserId(): string | null {
+  return useStore.getState().currentUser?.id ?? null;
+}

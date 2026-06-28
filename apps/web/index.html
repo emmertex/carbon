@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Carbon</title>
+    <script>
+      // Apply the saved theme + accent before paint to avoid a flash.
+      (function () {
+        try {
+          var ls = localStorage;
+          var legacy = ls.getItem('carbon.theme'); // pre-roles single-theme setups
+          var isLight = function (v) { return v === 'light' || v === 'epaper'; };
+          var isDark = function (v) { return v === 'dark' || v === 'gruvbox'; };
+          var mode = ls.getItem('carbon.themeMode');
+          if (mode !== 'system' && mode !== 'light' && mode !== 'dark') {
+            mode = isLight(legacy) ? 'light' : isDark(legacy) ? 'dark' : 'system';
+          }
+          var light = ls.getItem('carbon.lightTheme');
+          if (!isLight(light)) light = legacy === 'epaper' ? 'epaper' : 'light';
+          var dark = ls.getItem('carbon.darkTheme');
+          if (!isDark(dark)) dark = legacy === 'gruvbox' ? 'gruvbox' : 'dark';
+          var resolved =
+            mode === 'light'
+              ? light
+              : mode === 'dark'
+                ? dark
+                : window.matchMedia('(prefers-color-scheme: dark)').matches
+                  ? dark
+                  : light;
+          document.documentElement.setAttribute('data-theme', resolved);
+          document.documentElement.setAttribute('data-accent', ls.getItem('carbon.accent') || 'indigo');
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

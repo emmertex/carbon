@@ -1,0 +1,33 @@
+# The server image only needs core + web + server. Keep everything else out of
+# the build context — smaller, faster, and avoids dragging in toolchain-specific
+# artifacts.
+
+# Dependencies / VCS
+node_modules
+**/node_modules
+.git
+.gitignore
+
+# Native shells (need Rust / Android SDK, not built in this image)
+apps/desktop
+apps/mobile
+
+# Build outputs (rebuilt inside the image)
+**/dist
+**/build
+**/target
+.turbo
+**/.turbo
+dev-dist
+
+# Local data / secrets / logs
+data
+**/.env
+**/.env.*
+*.log
+
+# Editor / agent / docs
+.vscode
+.idea
+.claude
+docs

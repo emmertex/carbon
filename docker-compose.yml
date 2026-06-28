@@ -1,0 +1,27 @@
+services:
+  carbon:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+      args:
+        # Compose can't run git itself, so pass the hash from the environment:
+        #   GIT_HASH=$(git rev-parse --short HEAD) docker compose build
+        # Falls back to 'unknown' when GIT_HASH isn't set.
+        GIT_HASH: ${GIT_HASH:-unknown}
+    ports:
+      - "${PORT:-3069}:3069"
+    volumes:
+      - ./data:/app/data
+    # Inject the whole .env (BASE_DOMAIN, HOST_ADMINS, APP_HOST, AUTH_USERS,
+    # CORS_ORIGINS, VAPID_*, …). Compose also reads .env for ${...} interpolation
+    # above, but only env_file / environment values reach the container process.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Pinned container internals — override anything in .env so the volume path
+      # and listen port stay correct regardless of what .env contains.
+      - DATABASE_PATH=/app/data/carbon.db
+      - PORT=3069
+      - NODE_ENV=production
+    restart: unless-stopped

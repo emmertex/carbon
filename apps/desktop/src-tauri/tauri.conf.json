@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Carbon",
+  "version": "0.1.0",
+  "identifier": "com.emmertex.carbon",
+  "build": {
+    "frontendDist": "../../web/dist",
+    "devUrl": "http://localhost:3042",
+    "beforeDevCommand": "npm run -w @carbon/web dev",
+    "beforeBuildCommand": "npm run -w @carbon/web build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Carbon",
+        "width": 1100,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "A simple-on-the-surface, powerful-underneath task manager.",
+    "longDescription": "Carbon is an offline-first GTD task manager that syncs to a self-hosted server."
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Carbon</string>
+    <string name="title_activity_main">Carbon</string>
+    <string name="package_name">com.emmertex.carbon</string>
+    <string name="custom_url_scheme">com.emmertex.carbon</string>
+</resources>

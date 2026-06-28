@@ -1,0 +1,138 @@
+// Client for the cross-tenant control plane (/host/*). Signup is public; the
+// tenant-management calls require host-admin Basic credentials, which the host
+// operator enters in the Host Admin view (kept in-memory, not persisted).
+
+export interface TenantRecord {
+  id: string;
+  subdomain: string;
+  display_name: string | null;
+  status: 'active' | 'provisional' | 'suspended' | 'deleted';
+  plan: string | null;
+  created_at: string;
+  db_path: string;
+  blobs_dir: string;
+  expires_at: string | null;
+  locked_at: string | null;
+  admin_email: string | null;
+  blob_quota_bytes: number | null;
+  url: string;
+}
+
+export interface TenantUsage {
+  id: string;
+  subdomain: string;
+  users: number;
+  dbBytes: number;
+  lastActivity: string | null;
+  blobBytes: number;
+  /** Effective blob quota in bytes (0 = unlimited). */
+  blobQuota: number;
+}
+
+export interface SignupResult {
+  subdomain: string;
+  url: string;
+  status: string;
+}
+
+export interface SignupInput {
+  email: string;
+  subdomain?: string;
+  adminUsername: string;
+  adminPassword: string;
+  displayName?: string;
+}
+
+function base(): string {
+  return window.location.origin;
+}
+
+function hostAuthHeaders(creds: HostCreds): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: 'Basic ' + btoa(`${creds.username}:${creds.password}`),
+  };
+}
+
+export interface HostCreds {
+  username: string;
+  password: string;
+}
+
+async function parseError(res: Response): Promise<string> {
+  const msg = ((await res.json().catch(() => ({}))) as { error?: string }).error;
+  return msg || `request failed: ${res.status}`;
+}
+
+/** Signup step 1: stage the workspace and email a one-time verification code. */
+export async function signupStart(input: SignupInput): Promise<void> {
+  const res = await fetch(`${base()}/host/signup/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+}
+
+/** Signup step 2: verify the emailed code, creating the workspace + its first admin. */
+export async function signupVerify(email: string, code: string): Promise<SignupResult> {
+  const res = await fetch(`${base()}/host/signup/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as SignupResult;
+}
+
+export async function hostListTenants(creds: HostCreds): Promise<TenantRecord[]> {
+  const res = await fetch(`${base()}/host/tenants`, { headers: hostAuthHeaders(creds) });
+  if (!res.ok) throw new Error(await parseError(res));
+  return ((await res.json()) as { tenants: TenantRecord[] }).tenants;
+}
+
+export async function hostCreateTenant(
+  creds: HostCreds,
+  input: { subdomain?: string; adminUsername: string; adminPassword: string; displayName?: string; plan?: string },
+): Promise<TenantRecord> {
+  const res = await fetch(`${base()}/host/tenants`, {
+    method: 'POST',
+    headers: hostAuthHeaders(creds),
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as TenantRecord;
+}
+
+export async function hostPatchTenant(
+  creds: HostCreds,
+  id: string,
+  patch: {
+    status?: 'active' | 'provisional' | 'suspended';
+    plan?: string | null;
+    expiresAt?: string | null;
+    locked?: boolean;
+    blobQuotaMb?: number | null;
+  },
+): Promise<void> {
+  const res = await fetch(`${base()}/host/tenants/${id}`, {
+    method: 'PATCH',
+    headers: hostAuthHeaders(creds),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+}
+
+export async function hostDeleteTenant(creds: HostCreds, id: string): Promise<void> {
+  const res = await fetch(`${base()}/host/tenants/${id}`, {
+    method: 'DELETE',
+    headers: hostAuthHeaders(creds),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+}
+
+export async function hostTenantUsage(creds: HostCreds, id: string): Promise<TenantUsage> {
+  const res = await fetch(`${base()}/host/tenants/${id}/usage`, { headers: hostAuthHeaders(creds) });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as TenantUsage;
+}
