@@ -10,5 +10,9 @@ import { getWhere, subscribeWhere, type WhereState } from '@/lib/where';
  */
 export function useWhere(): WhereState & { hasLocation: boolean } {
   const where = useSyncExternalStore(subscribeWhere, getWhere, getWhere);
-  return { ...where, hasLocation: !!where.zone || !!where.point };
+  // `hasLocation` gates the sidebar nav item + the Nearby route. It tracks whether we
+  // have *any* location data at all (so manually disabling every source doesn't hide
+  // the view / eject the user) — task matching still uses the active-only zone/point.
+  const hasLocation = !!where.haZone || where.devices.length > 0;
+  return { ...where, hasLocation };
 }

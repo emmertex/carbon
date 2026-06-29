@@ -60,6 +60,10 @@ import {
   getGps,
   saveZone,
   getUserLocation,
+  saveDeviceLocation,
+  listDeviceLocations,
+  deleteDeviceLocation,
+  DEVICE_STALE_MS,
   startGpsScheduler,
   type AuthVars,
 } from './auth';
@@ -78,7 +82,11 @@ import {
   deleteAgent,
   testAgent,
   triggerAgents,
+  getNlSettings,
+  setNlSettings,
+  getAgentUsage,
 } from './agents';
+import { runAgentCommand } from './agent-command';
 import {
   ensureCaldavDeviceId,
   getCaldavConfigRow,
@@ -90,6 +98,16 @@ import {
   startCaldavScheduler,
   type CaldavConfigPatch,
 } from './caldav';
+import { registerAgentApi } from './agent-api';
+import { buildAgentApiDeps } from './agent-ops';
+import {
+  ensureTelegramTables,
+  startTelegramBot,
+  createTelegramCode,
+  getTelegramLinkForUser,
+  unlinkTelegramUser,
+  type TelegramBot,
+} from './telegram';
 import {
   initTenantDb,
   createTenantRegistry,
@@ -174,6 +192,17 @@ const CONTROL_DB_PATH = resolve(
 const TENANTS_DIR = resolve(process.env.TENANTS_DIR ?? join(dirname(DB_PATH), 'tenants'));
 // Days of access a self-service signup gets before the workspace locks (renew gate).
 const SIGNUP_TRIAL_DAYS = Math.max(1, Number(process.env.SIGNUP_TRIAL_DAYS) || 30);
+
+// ----- Telegram bot (optional, per-server) ----------------------------------
+// One bot for the whole server. Users link their individual Carbon user via a one-time code
+// from Settings → Telegram, then drive the same NL agent over chat. Disabled when the token
+// is unset. The webhook is auto-registered at <TELEGRAM_WEBHOOK_URL>/telegram/webhook.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined;
+const TELEGRAM_WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL?.trim() || undefined;
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || undefined;
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME?.trim() || undefined;
+// Assigned once the async startup (getMe + setWebhook) resolves; the webhook route reads it.
+let telegramBot: TelegramBot | null = null;
 
 type Env = { Variables: AuthVars };
 
@@ -777,6 +806,78 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return c.json(att, 201);
   });
 
+  // ----- natural-language agent API (/api/agent/*) ----------------------------
+  // Granular, context-small primitives a tiny LLM (via Hermes) composes for NL task
+  // management. Mounts on the same `api` router, inheriting its auth middleware.
+  const agentApiDeps = buildAgentApiDeps(db, serverDeviceId, {
+    multiTenant: !!BASE_DOMAIN,
+    allowPrivate: allowPrivate(),
+  });
+  registerAgentApi(api, agentApiDeps);
+
+  // In-app NL commands (Stage 2): the Add box posts here when the first word matches a
+  // configured keyword. Runs as the user, so created items are owned by and visible to them.
+  api.get('/agent/config', requireScope('tasks:read'), (c) => {
+    const nl = getNlSettings(db);
+    return c.json({ enabled: nl.enabled, keywords: nl.keywords });
+  });
+
+  api.post('/agent/command', requireScope('inbox:write'), async (c) => {
+    const userId = c.get('userId');
+    // Each command drives up to MAX_ITERS billable LLM round-trips, so cap how many a
+    // single user/token can fire per hour — a leaked token can't run up unbounded cost.
+    if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
+      return c.json({ error: 'too many commands, try later' }, 429);
+    }
+    const b = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const text = (b.text ?? '').trim();
+    if (!text) return c.json({ error: 'text required' }, 400);
+    const nl = getNlSettings(db);
+    const agent = nl.enabled && nl.agentId ? getAgent(db, nl.agentId) : undefined;
+    if (!agent || !agent.enabled || agent.kind === 'webhook') {
+      return c.json({ error: 'nl_not_configured' }, 503);
+    }
+    try {
+      const r = await runAgentCommand(agentApiDeps, agent, userId, text, allowPrivate());
+      return c.json(r);
+    } catch (e) {
+      // Log the detail server-side; don't return it — provider exception messages can
+      // carry upstream URLs / error bodies that the API caller shouldn't see.
+      console.error('[carbon] nl command failed:', e);
+      return c.json({ error: 'command_failed' }, 502);
+    }
+  });
+
+  // ----- Telegram linking (per-user) ------------------------------------------
+  // The bot is per-server; these let the signed-in user connect their *own* chat. The pairing
+  // code lives in the control DB keyed by (tenant, user); the user sends it to the bot. Open
+  // mode links the synthetic 'local' user. The tenant subdomain is null for self-host ('default').
+  const tgSubdomain = (): string | null => (ctx.id === 'default' ? null : ctx.subdomain);
+
+  api.get('/telegram', requireScope('tasks:read'), (c) => {
+    const link = getTelegramLinkForUser(controlDb, ctx.id, c.get('userId'));
+    return c.json({
+      enabled: !!TELEGRAM_BOT_TOKEN,
+      botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null,
+      link: link ? { username: link.username } : null,
+    });
+  });
+
+  api.post('/telegram/code', requireScope('tasks:read'), (c) => {
+    if (!TELEGRAM_BOT_TOKEN) return c.json({ error: 'telegram_not_configured' }, 503);
+    const { code, expiresAt } = createTelegramCode(controlDb, {
+      tenantId: ctx.id,
+      subdomain: tgSubdomain(),
+      userId: c.get('userId'),
+    });
+    return c.json({ code, expiresAt, botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null });
+  });
+
+  api.delete('/telegram', requireScope('tasks:read'), (c) => {
+    const removed = unlinkTelegramUser(controlDb, ctx.id, c.get('userId'));
+    return c.json({ ok: true, removed });
+  });
+
   // ----- admin: API tokens ----------------------------------------------------
 
   api.get('/admin/tokens', requireAdmin, (c) => c.json({ tokens: listTokens(db) }));
@@ -859,6 +960,35 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     if (agent) softDeleteUser(db, agent.user_id);
     return c.json({ ok: true });
   });
+
+  // ----- admin: natural-language command settings + token usage ----------------
+
+  const nlSettingsJson = () => {
+    const nl = getNlSettings(db);
+    return { agent_id: nl.agentId, keywords: nl.keywords, enabled: nl.enabled };
+  };
+
+  api.get('/admin/nl-settings', requireAdmin, (c) => c.json(nlSettingsJson()));
+
+  api.patch('/admin/nl-settings', requireAdmin, async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as {
+      agent_id?: string | null;
+      keywords?: string[];
+      enabled?: boolean;
+    };
+    if (b.agent_id) {
+      const a = getAgent(db, b.agent_id);
+      if (!a || a.kind === 'webhook') return c.json({ error: 'pick a direct-LLM agent' }, 400);
+    }
+    const patch: { agentId?: string | null; keywords?: string[]; enabled?: boolean } = {};
+    if (b.agent_id !== undefined) patch.agentId = b.agent_id || null;
+    if (Array.isArray(b.keywords)) patch.keywords = b.keywords.filter((k) => typeof k === 'string');
+    if (typeof b.enabled === 'boolean') patch.enabled = b.enabled;
+    setNlSettings(db, patch);
+    return c.json(nlSettingsJson());
+  });
+
+  api.get('/admin/nl-usage', requireAdmin, (c) => c.json(getAgentUsage(db)));
 
   // ----- admin: per-project CalDAV two-way sync --------------------------------
   // Config is server-only (holds the CalDAV password) and keyed by the project's
@@ -962,6 +1092,8 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
   api.post('/gps', requireScope('tasks:write'), async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       person?: string;
+      device_id?: string;
+      name?: string;
       lat?: number;
       lng?: number;
       accuracy?: number;
@@ -976,7 +1108,26 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     // person is named at all.
     const userId = resolvePerson(c, body.person);
     if (!userId) return c.json({ ok: true, saved: false, reason: 'unmapped person' });
-    saveGps(db, userId, body.lat, body.lng, body.accuracy ?? body.gps_accuracy ?? null);
+    const accuracy = body.accuracy ?? body.gps_accuracy ?? null;
+    // A self-reporting client passes its own device_id (→ source 'device'); HA's
+    // single-fix feed has none, so it lands as the reserved `ha:<user>` device.
+    // A named-`person` report is *about another user* (HA reporting a household member),
+    // so it may only write that user's single `ha:<user>` row — never an arbitrary named
+    // device pill. Only an own report (no person) may register a named device source.
+    const ownReport = !body.person;
+    const isDevice = ownReport && !!body.device_id;
+    saveDeviceLocation(db, {
+      userId,
+      deviceId: isDevice ? body.device_id! : `ha:${userId}`,
+      name: isDevice ? (body.name ?? null) : null,
+      lat: body.lat,
+      lng: body.lng,
+      accuracy,
+      source: isDevice ? 'device' : 'ha',
+    });
+    // Keep the legacy single row for the HA path only, so background proximity
+    // push (checkGpsProximity) is unchanged and a device fix never clobbers it.
+    if (!isDevice) saveGps(db, userId, body.lat, body.lng, accuracy);
     return c.json({ ok: true });
   });
 
@@ -1026,12 +1177,23 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return c.json({ ok: true, matched: matched.length });
   });
 
-  // The user's current location (latest HA zone + latest GPS fix), for the Nearby
-  // view. Either field may be null; both null means we don't know where they are.
+  // The user's current location for the Nearby view: the HA zone plus one entry per
+  // fresh device (≤24h). `haGps` is kept as a derived alias (the freshest HA device)
+  // so an un-updated client still resolves; it will be dropped once clients roll over.
   api.get('/where', requireScope('tasks:read'), (c) => {
     const userId = c.get('userId');
-    if (userId === 'local') return c.json({ zone: null, haGps: null });
-    return c.json(getUserLocation(db, userId));
+    if (userId === 'local') return c.json({ zone: null, haGps: null, devices: [] });
+    const base = getUserLocation(db, userId); // { zone, haGps } (legacy single-row)
+    const devices = listDeviceLocations(db, userId, DEVICE_STALE_MS);
+    return c.json({ ...base, devices });
+  });
+
+  // Remove one of the caller's devices (a retired phone). Own devices only.
+  api.delete('/where/device/:id', requireScope('tasks:write'), (c) => {
+    const userId = c.get('userId');
+    if (userId === 'local') return c.json({ ok: true });
+    deleteDeviceLocation(db, userId, c.req.param('id'));
+    return c.json({ ok: true });
   });
 
   // Map a Carbon user to a Home Assistant `person.*` entity. Unlike Settings →
@@ -1210,6 +1372,9 @@ const defaultApp = buildTenantApp(defaultCtx);
 
 const controlDb = openControlDb(CONTROL_DB_PATH);
 bootstrapHostAdmins(controlDb, process.env.HOST_ADMINS);
+// Telegram state (links, pending codes, FSM) is server-wide, so it lives in the control DB.
+// Ensure the tables exist before any /api/telegram route can write a pairing code.
+ensureTelegramTables(controlDb);
 
 const registry = createTenantRegistry({
   defaultCtx,
@@ -1229,6 +1394,26 @@ startCaldavScheduler(() =>
     allowPrivate: agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
   })),
 );
+
+// Per-server Telegram bot: confirm the token, register the webhook, and expose the handler the
+// /telegram/webhook route calls. Fire-and-forget (getMe/setWebhook are network calls); no-ops
+// when TELEGRAM_BOT_TOKEN is unset.
+startTelegramBot({
+  controlDb,
+  registry,
+  botToken: TELEGRAM_BOT_TOKEN,
+  botUsername: TELEGRAM_BOT_USERNAME,
+  baseDomain: BASE_DOMAIN,
+  webhookUrl: TELEGRAM_WEBHOOK_URL,
+  webhookSecret: TELEGRAM_WEBHOOK_SECRET,
+  resolveSubdomain: (sub) => resolveTenantLocation(controlDb, sub)?.subdomain ?? null,
+  allowPrivateFor: (tenantId) =>
+    agentsAllowPrivate(tenantId === 'default' ? null : getTenantById(controlDb, tenantId)),
+})
+  .then((bot) => {
+    telegramBot = bot;
+  })
+  .catch((e) => console.error('[carbon] telegram bot failed to start:', e));
 
 // Lock is derived (no write fires at expiry — the dispatcher recomputes per request),
 // so the only control-plane housekeeping is GCing expired pending signups. Hourly.
@@ -1339,6 +1524,11 @@ const emailStartHits = new Map<string, number[]>();
 const SIGNUP_PER_EMAIL_HOUR = Math.max(1, Number(process.env.SIGNUP_PER_EMAIL_HOUR) || 3);
 const verifyHits = new Map<string, number[]>();
 const VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.VERIFY_PER_IP_HOUR) || 30);
+
+// Per-user cap on the LLM-backed NL command endpoint (each call = up to MAX_ITERS
+// provider round-trips). Keyed on the resolved user id, not IP.
+const nlCommandHits = new Map<string, number[]>();
+const NL_COMMAND_PER_USER_HOUR = Math.max(1, Number(process.env.NL_COMMAND_PER_USER_HOUR) || 120);
 function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boolean {
   const now = Date.now();
   const win = now - 3_600_000;
@@ -1609,6 +1799,24 @@ host.get('/tenants/:id/usage', (c) => {
 });
 
 app.route('/host', host);
+
+// ----- Telegram webhook (per-server, outside tenant dispatch) ----------------
+// Telegram POSTs updates here. The bot maps the chat → (workspace, user) via the control DB,
+// so this is a single server-level endpoint, not per-subdomain. Verify the secret token header
+// (only Telegram knows it) and always answer 200 fast — work happens in the handler.
+app.post('/telegram/webhook', async (c) => {
+  if (TELEGRAM_WEBHOOK_SECRET) {
+    const got = c.req.header('x-telegram-bot-api-secret-token');
+    if (got !== TELEGRAM_WEBHOOK_SECRET) return c.json({ error: 'forbidden' }, 403);
+  }
+  if (!telegramBot) return c.json({ ok: true }); // bot disabled / not ready yet — Telegram retries
+  const update = await c.req.json().catch(() => null);
+  if (update) {
+    // Don't make Telegram wait on the LLM round-trip; process after responding.
+    void telegramBot.handle(update).catch((e) => console.error('[carbon] telegram handle error:', e));
+  }
+  return c.json({ ok: true });
+});
 
 // ----- tenant dispatch: forward /api/* to the per-subdomain tenant app -------
 

@@ -7,6 +7,7 @@ const DOCS: { href: string; label: string; desc: string }[] = [
   { href: LINKS.agentsApi, label: 'Carbon Agents API', desc: 'Wire AI agents into tasks and the inbox.' },
   { href: LINKS.restApi, label: 'REST API', desc: 'Token-authenticated HTTP access to your data.' },
   { href: LINKS.homeAssistant, label: 'Home Assistant integration', desc: 'Location-aware reminders via HA zones.' },
+  { href: LINKS.telegram, label: 'Telegram bot', desc: 'Control Carbon from Telegram in plain language.' },
 ];
 
 /** Always-visible directory of integration docs (the API/Agent sections below are

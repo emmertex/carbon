@@ -6,6 +6,7 @@ import { useStore } from '@/lib/store';
 import { getDb } from '@/lib/db';
 import { zoneForX } from '@/lib/gestures';
 import { useGlobalHotkeys } from '@/hooks/useGlobalHotkeys';
+import { useDesktopQuickAddBridge } from '@/desktop/quickAddBridge';
 import { Sidebar } from '@/components/Sidebar';
 import { DetailPane } from '@/components/DetailPane';
 import { Snackbar } from '@/components/Snackbar';
@@ -22,6 +23,7 @@ import { SettingsView } from '@/views/SettingsView';
 import { SignupView } from '@/views/SignupView';
 import { HostAdminView } from '@/views/HostAdminView';
 import { LandingView } from '@/views/LandingView';
+import { FeaturesComparisonView } from '@/views/FeaturesComparisonView';
 import { SignInGate } from '@/components/SignInGate';
 import { RenewGate } from '@/components/RenewGate';
 
@@ -83,6 +85,9 @@ export default function App() {
 
   // App-wide keyboard shortcuts (screen switching, focus quick-add, scrolling).
   useGlobalHotkeys({ navigate, focusQuickAdd });
+
+  // Desktop only: receive tasks forwarded from the spotlight quick-add window.
+  useDesktopQuickAddBridge();
 
   // Navigating to a different view always dismisses the right-hand panel — the
   // task/project detail (selectedId) or the Tags panel. Without this the panel
@@ -159,6 +164,7 @@ export default function App() {
   // Standalone full-page routes that bypass the app chrome.
   if (location.pathname === '/signup') return <SignupView />;
   if (location.pathname === '/host-admin') return <HostAdminView />;
+  if (location.pathname === '/features') return <FeaturesComparisonView />;
 
   // Apex (marketing/landing host): offer signup / local-only / go-to-workspace,
   // unless the visitor already chose to use Carbon without an account.

@@ -22,6 +22,50 @@ Quick-add bar keys: **↑/↓** move through the autocomplete suggestions, **Ent
 accept the highlighted suggestion, **Esc** dismiss the menu. With the menu closed, **Enter**
 submits the task.
 
+### Natural-language commands
+
+When an admin has configured an LLM agent (**Settings → Users + AI agents**) and enabled
+NL commands, the quick-add bar doubles as a command box. Start a line with a configured
+keyword (e.g. `add`) and write plainly:
+
+- `add milk and eggs to shopping` → creates both tasks in the *shopping* list.
+- `remind me to get milk at Coles` → adds the task, tags it `coles`, and geofences the tag
+  to the **nearest Coles** to your current location (no coordinates needed).
+- `tick off milk and bread` → marks those tasks done.
+- `tag everything in shopping urgent` → bulk-tags the whole list.
+
+The server fuzzy-matches names to lists/tags/tasks, runs the agent's tool-loop in-process,
+and replies with exactly what changed. Token usage per command is tracked under
+**Settings → Users + AI agents**. The same capability is available to external bots
+(Telegram, Hermes, scripts) over the [agent API](carbon-agent-api.md).
+
+### Desktop quick-add
+
+The desktop app adds a **global hotkey** (`Ctrl/⌘ + Shift + A`) and a **system-tray** icon
+that pop a spotlight capture bar from anywhere — type a task (or an NL command) and it lands
+in your inbox without switching windows. See [native apps](native-apps.md#quick-add-global-hotkey--tray).
+
+## Copy as Markdown
+
+From any task or project's **row quick-menu**, **Copy as Markdown** puts that item and all
+its subtasks on the clipboard as a nested checklist (`lib/exportMarkdown.ts`) — a quick way
+to drop a project into a chat or note. It's a one-way export for sharing, kept deliberately
+minimal:
+
+```
+* [ ] Plan the trip #travel @due:20260628
+  * [x] Book flights @due:202606281830
+  * [/] Renew passport #errand
+```
+
+- **Checkbox** reflects status: `[ ]` active, `[x]` done, `[/]` dropped.
+- **Indentation** is two spaces per level; subtasks nest under their parent in sort order.
+- **`#tags`** are listed inline (full path for nested tags, e.g. `#Shopping:Coles`).
+- **`@due:`** appears only when a due date is set — `YYYYMMDD`, or `YYYYMMDDHHmm` when the
+  due has a specific time.
+
+Other fields (notes, defer, effort, priority, flags) are omitted to keep the paste clean.
+
 ## Global shortcuts
 
 Work from anywhere (ignored while typing in a field):
@@ -81,7 +125,9 @@ Configured in **Settings → Gestures & mobile**:
   under the finger.
 - **Right-edge swipe** → jump to a destination: *Project Root*, *Today*, *Inbox*, or *Plan*.
 - **Row quick-menu**: tap the row's menu affordance for quick assign / tag / flag actions
-  without opening the detail pane.
+  without opening the detail pane. **Copy as Markdown** there copies the task (or project)
+  and all its subtasks to the clipboard as a nested checklist — handy for pasting into a
+  chat. See [Copy as Markdown](#copy-as-markdown) below.
 
 ## Views & perspectives
 
@@ -103,8 +149,8 @@ Configured in **Settings → Gestures & mobile**:
 
 Appearance (mode/theme/accent) · Gestures & mobile · Profile & Planning (signed in) ·
 Install app · Data backup (full export/import) · Sync server (URL + sign-in) · Reminders
-(push / foreground geofence) · Users + AI agents (admin) · HA person · API tokens (admin) ·
-About (version/device id).
+(push / foreground geofence) · This device & location sources · Users + AI agents (admin,
+incl. NL commands + token usage) · HA person · API tokens (admin) · About (version/device id).
 
 ## Offline & sync
 

@@ -6,8 +6,11 @@ import { AdminUsers } from '@/components/AdminUsers';
 import { Subscription } from '@/components/Subscription';
 import { ApiTokens } from '@/components/ApiTokens';
 import { Agents } from '@/components/Agents';
+import { NlCommands } from '@/components/NlCommands';
+import { Telegram } from '@/components/Telegram';
 import { Reminders } from '@/components/Reminders';
 import { HaPerson } from '@/components/HaPerson';
+import { ThisDevice } from '@/components/ThisDevice';
 import { Profile } from '@/components/Profile';
 import { PlanningSettings } from '@/components/PlanningSettings';
 import { InstallApp } from '@/components/InstallApp';
@@ -68,9 +71,12 @@ export function SettingsView() {
     { id: 'data', group: 'account', show: () => true, render: () => <DataBackup /> },
     { id: 'reminders', group: 'notifications', show: () => true, render: () => <Reminders /> },
     { id: 'ha-person', group: 'notifications', show: (c) => c.signedIn && c.hasServer, render: () => <HaPerson /> },
+    { id: 'this-device', group: 'notifications', show: (c) => c.signedIn && c.hasServer, render: () => <ThisDevice /> },
     { id: 'integration-docs', group: 'integrations', show: () => true, render: () => <IntegrationsDocs /> },
     { id: 'api-tokens', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <ApiTokens /> },
     { id: 'agents', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <Agents /> },
+    { id: 'nl-commands', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <NlCommands /> },
+    { id: 'telegram', group: 'integrations', show: (c) => c.hasServer, render: () => <Telegram /> },
     { id: 'sync', group: 'workspace', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },
     { id: 'users', group: 'workspace', show: (c) => c.isAdmin && c.hasServer, render: () => <AdminUsers /> },
     { id: 'subscription', group: 'workspace', show: (c) => c.isAdmin && c.hasServer, render: () => <Subscription /> },

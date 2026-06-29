@@ -75,6 +75,30 @@ reply; the model can end with `COMPLETE` to close an assigned task. The **Endpoi
 `http://192.168.0.50:1234/v1` for a local LLM server). This is less autonomous than Hermes —
 no tool use — but needs no external framework.
 
+## Natural-language flows
+
+Beyond the comment-reply trigger above, Carbon exposes a **granular agent API**
+(`/api/agent/*`, see [`carbon-agent-api.md` §6](carbon-agent-api.md)) so a *small* model
+(e.g. Qwen 2.5 1.5B) can do natural-language task management: "add milk and eggs to my
+shopping list", "mark off bread and milk", "what do I need at Coles?". The server does the
+fuzzy matching and batching, so the model passes plain names and composes a few small calls.
+
+The Python helper module (`hermes/carbon-webhook-listener.py`) ships matching wrappers:
+`agent_add()`, `agent_complete()`, `agent_resolve()`, `agent_lists()`, `agent_tags()`,
+`agent_items()`, `agent_nearby()`, `agent_set_tag_geo()`, `agent_update()`.
+
+**Skill rules (the short version a 1.5B model should follow):**
+1. Resolve before you write; if a name is uncertain (`/resolve` → `best.confident` false), ask.
+2. "Add X and Y to LIST" → one `agent_add(list, titles=[X,Y])`.
+3. "Remind me to get X at PLACE" → `agent_add(list="shopping", tags=[PLACE], titles=[X])`; the tag carries the location (geofence it once with `agent_set_tag_geo`).
+4. "Mark/tick off X and Y" → `agent_complete(queries=[X,Y])`, then report `matched` vs `unmatched` **verbatim** — never claim you completed an unmatched item.
+5. "What do I need at PLACE?" → `agent_nearby(tag=PLACE)`; if empty, say so and offer `agent_items(list="shopping")`.
+
+The exact, example-driven system prompt is exported as `AGENT_API_SYSTEM_PROMPT`
+(`apps/server/src/agents.ts`) — use it (or a close paraphrase) as the model's system message.
+Point a local LLM at it through your Hermes profile; geocoding for "nearest PLACE" is
+controlled by the `CARBON_GEOCODE_*` env vars (OpenStreetMap by default).
+
 ## Testing & operations
 
 - **Test** button in Settings → AI agents does a live connectivity check (webhook POST with

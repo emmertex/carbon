@@ -56,7 +56,122 @@ export function ensureAgentTables(db: Db): void {
   `);
 }
 
-interface FullAgentRow extends AgentRow {
+// ----- token usage tracking + NL-command settings ---------------------------
+
+/** Per-call LLM token usage, for the Settings usage readout. Server-only, never synced. */
+export function ensureAgentUsageTables(db: Db): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_usage (
+      id            TEXT PRIMARY KEY,
+      agent_id      TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      input_tokens  INTEGER,
+      output_tokens INTEGER,
+      model         TEXT,
+      request_kind  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_usage_kind ON agent_usage(request_kind);
+  `);
+}
+
+export type UsageKind = 'comment_reply' | 'nl_command' | 'telegram_command';
+
+export function recordAgentUsage(
+  db: Db,
+  agentId: string,
+  usage: { input?: number; output?: number },
+  model: string,
+  kind: UsageKind,
+): void {
+  db.run(
+    `INSERT INTO agent_usage (id, agent_id, ts, input_tokens, output_tokens, model, request_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      crypto.randomUUID(),
+      agentId,
+      new Date().toISOString(),
+      usage.input ?? 0,
+      usage.output ?? 0,
+      model,
+      kind,
+    ],
+  );
+}
+
+export interface UsageTotals {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** Aggregate token totals overall and per request kind (for Settings). */
+export function getAgentUsage(db: Db): { total: UsageTotals; byKind: Record<string, UsageTotals> } {
+  const rows = db.all<{ request_kind: string; calls: number; inp: number; outp: number }>(
+    `SELECT request_kind,
+            COUNT(*) AS calls,
+            COALESCE(SUM(input_tokens),0) AS inp,
+            COALESCE(SUM(output_tokens),0) AS outp
+     FROM agent_usage GROUP BY request_kind`,
+  );
+  const total: UsageTotals = { calls: 0, input_tokens: 0, output_tokens: 0 };
+  const byKind: Record<string, UsageTotals> = {};
+  for (const r of rows) {
+    const t = { calls: Number(r.calls), input_tokens: Number(r.inp), output_tokens: Number(r.outp) };
+    byKind[r.request_kind] = t;
+    total.calls += t.calls;
+    total.input_tokens += t.input_tokens;
+    total.output_tokens += t.output_tokens;
+  }
+  return { total, byKind };
+}
+
+// NL-command settings live in the shared `meta` k/v table (same pattern as push/vapid).
+function getMeta(db: Db, key: string): string | null {
+  return db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [key])?.value ?? null;
+}
+function setMeta(db: Db, key: string, value: string): void {
+  db.run(
+    `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [key, value],
+  );
+}
+
+/** First-word keywords (case-insensitive) that route an Add-box entry to the LLM. */
+export const DEFAULT_NL_KEYWORDS = ['can', 'add', 'check off', 'mark off', 'mark as'];
+
+export interface NlSettings {
+  agentId: string | null;
+  keywords: string[];
+  enabled: boolean;
+}
+
+export function getNlSettings(db: Db): NlSettings {
+  const agentId = getMeta(db, 'nl_agent_id') || null;
+  let keywords = DEFAULT_NL_KEYWORDS;
+  const raw = getMeta(db, 'nl_keywords');
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) keywords = parsed.filter((k): k is string => typeof k === 'string');
+    } catch {
+      /* keep defaults */
+    }
+  }
+  // Enabled only when explicitly on AND an agent is configured.
+  const enabled = getMeta(db, 'nl_enabled') === '1' && !!agentId;
+  return { agentId, keywords, enabled };
+}
+
+export function setNlSettings(
+  db: Db,
+  patch: { agentId?: string | null; keywords?: string[]; enabled?: boolean },
+): void {
+  if ('agentId' in patch) setMeta(db, 'nl_agent_id', patch.agentId ?? '');
+  if (patch.keywords) setMeta(db, 'nl_keywords', JSON.stringify(patch.keywords));
+  if ('enabled' in patch) setMeta(db, 'nl_enabled', patch.enabled ? '1' : '0');
+}
+
+export interface FullAgentRow extends AgentRow {
   api_key: string | null;
 }
 
@@ -183,14 +298,96 @@ function snippet(s: string, n = 200): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-async function callLLM(
+/** Token counts, normalised across providers (Anthropic input/output, OpenAI prompt/completion). */
+export interface Usage {
+  input: number;
+  output: number;
+}
+
+/** A tool the model may call; `parameters` is a JSON Schema object. */
+export interface ToolDef {
+  name: string;
+  description: string;
+  parameters: object;
+}
+
+/** A tool invocation the model returned. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/** Provider-agnostic chat message used to drive a tool loop. */
+export type ChatMsg =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
+  | { role: 'tool'; toolCallId: string; name: string; content: string };
+
+export interface ChatResult {
+  text: string;
+  toolCalls: ToolCall[];
+  usage: Usage;
+}
+
+function parseArgs(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+/**
+ * One turn of a (optionally tool-enabled) chat against the agent's provider. Returns the
+ * assistant text, any tool calls, and normalised token usage. Used by both the comment-reply
+ * path (no tools) and the in-app command loop (with tools).
+ */
+export async function chatLLM(
   agent: FullAgentRow,
-  system: string,
-  userText: string,
+  messages: ChatMsg[],
+  tools: ToolDef[],
   allowPrivate: boolean,
-): Promise<string> {
+): Promise<ChatResult> {
   if (agent.kind === 'anthropic') {
     const url = `${(agent.endpoint || 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`;
+    const system = messages
+      .filter((m) => m.role === 'system')
+      .map((m) => (m as { content: string }).content)
+      .join('\n\n');
+    const amsgs = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => {
+        if (m.role === 'user') return { role: 'user', content: m.content };
+        if (m.role === 'tool')
+          return {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: m.toolCallId, content: m.content }],
+          };
+        // assistant
+        const blocks: unknown[] = [];
+        if (m.content) blocks.push({ type: 'text', text: m.content });
+        for (const tc of m.toolCalls ?? [])
+          blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.args });
+        return { role: 'assistant', content: blocks };
+      });
+    const body: Record<string, unknown> = {
+      model: agent.model || 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: amsgs,
+    };
+    if (system) body.system = system;
+    if (tools.length)
+      body.tools = tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+      }));
     const res = await safeFetch(url, allowPrivate, {
       method: 'POST',
       headers: {
@@ -198,37 +395,100 @@ async function callLLM(
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: agent.model || 'claude-sonnet-4-6',
-        max_tokens: 1024,
-        system,
-        messages: [{ role: 'user', content: userText }],
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new LLMHttpError(res.status, `POST ${url}: ${snippet(await res.text())}`);
-    const d = (await res.json()) as { content?: { text?: string }[] };
-    return d.content?.[0]?.text ?? '';
+    const d = (await res.json()) as {
+      content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    let text = '';
+    const toolCalls: ToolCall[] = [];
+    for (const block of d.content ?? []) {
+      if (block.type === 'text') text += block.text ?? '';
+      else if (block.type === 'tool_use')
+        toolCalls.push({ id: block.id ?? '', name: block.name ?? '', args: parseArgs(block.input) });
+    }
+    return {
+      text,
+      toolCalls,
+      usage: { input: d.usage?.input_tokens ?? 0, output: d.usage?.output_tokens ?? 0 },
+    };
   }
-  // openai-compatible (OpenAI, OpenRouter, LM Studio, …). Endpoint must be the base
-  // that exposes /chat/completions (usually ending in /v1).
+
+  // openai-compatible (OpenAI, OpenRouter, LM Studio, …). Endpoint = base exposing
+  // /chat/completions (usually ending in /v1).
   const url = `${(agent.endpoint || 'https://api.openai.com/v1').replace(/\/$/, '')}/chat/completions`;
+  const omsgs = messages.map((m) => {
+    if (m.role === 'tool')
+      return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+    if (m.role === 'assistant')
+      return {
+        role: 'assistant',
+        content: m.content || null,
+        ...(m.toolCalls?.length
+          ? {
+              tool_calls: m.toolCalls.map((tc) => ({
+                id: tc.id,
+                type: 'function',
+                function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+              })),
+            }
+          : {}),
+      };
+    return { role: m.role, content: m.content };
+  });
+  const body: Record<string, unknown> = { model: agent.model || 'gpt-4o-mini', messages: omsgs };
+  if (tools.length)
+    body.tools = tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
   const res = await safeFetch(url, allowPrivate, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${agent.api_key ?? ''}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: agent.model || 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: userText },
-      ],
-    }),
+    headers: { Authorization: `Bearer ${agent.api_key ?? ''}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new LLMHttpError(res.status, `POST ${url}: ${snippet(await res.text())}`);
-  const d = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-  return d.choices?.[0]?.message?.content ?? '';
+  const d = (await res.json()) as {
+    choices?: Array<{
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+      };
+    }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const msg = d.choices?.[0]?.message;
+  const toolCalls: ToolCall[] = (msg?.tool_calls ?? []).map((tc) => ({
+    id: tc.id ?? '',
+    name: tc.function?.name ?? '',
+    args: parseArgs(tc.function?.arguments),
+  }));
+  return {
+    text: msg?.content ?? '',
+    toolCalls,
+    usage: { input: d.usage?.prompt_tokens ?? 0, output: d.usage?.completion_tokens ?? 0 },
+  };
+}
+
+/** Single-shot text completion (no tools), with usage — the comment-reply path. */
+async function callLLM(
+  agent: FullAgentRow,
+  system: string,
+  userText: string,
+  allowPrivate: boolean,
+): Promise<{ text: string; usage: Usage }> {
+  const r = await chatLLM(
+    agent,
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: userText },
+    ],
+    [],
+    allowPrivate,
+  );
+  return { text: r.text, usage: r.usage };
 }
 
 /** Notify an agentic framework (webhook kind) of a trigger; it acts back via API. */
@@ -293,13 +553,13 @@ export async function testAgent(
         ? { ok: true, message: `Webhook reachable (${res.status})` }
         : { ok: false, message: `Webhook ${res.status}: ${snippet(await res.text())}` };
     }
-    const reply = await callLLM(
+    const { text } = await callLLM(
       agent,
       'You are a connectivity test.',
       'Reply with the word: ok',
       allowPrivate,
     );
-    return { ok: true, message: `Model replied: ${snippet(reply.trim(), 80) || '(empty)'}` };
+    return { ok: true, message: `Model replied: ${snippet(text.trim(), 80) || '(empty)'}` };
   } catch (e) {
     return { ok: false, message: (e as Error).message };
   }
@@ -317,6 +577,35 @@ Each item is a task with a title, optional notes, dates, a project, and a commen
 Work only from the details and discussion provided — you have limited information, so make reasonable \
 assumptions instead of asking for more. Be practical and specific. Reply with a single short paragraph \
 (a few sentences at most): no greeting, no sign-off, no markdown headings or bullet lists.`;
+
+/**
+ * System prompt for the natural-language agent flow (Stage 1+): a small LLM (e.g. Qwen
+ * 2.5 1.5B) driving the `/api/agent/*` primitives via Hermes. Unlike DEFAULT_SYSTEM_PROMPT
+ * (the comment-reply path), this teaches the call sequences for shopping-list-style task
+ * management. Example-driven on purpose — tiny models follow worked examples far better
+ * than rules. The server does fuzzy matching, so the model passes names, never ids.
+ */
+export const AGENT_API_SYSTEM_PROMPT = `You manage a user's tasks in Carbon through a small HTTP API. \
+The server resolves names to ids by fuzzy match, so always pass plain names (a list name, a tag, a task title) — never invent ids.
+
+Endpoints (base /api/agent):
+- POST /tasks/batch {list, titles:[...], tags:[...]}  → add tasks to a list (creates the list/tags if missing).
+- POST /tasks/complete {queries:[...], list}          → tick off tasks; returns matched + unmatched.
+- POST /tasks/tag {list, add:[...], remove:[...]}      → bulk add/remove tags on every task in a list (or by queries/ids/tag).
+- POST /resolve {kind:"list"|"tag"|"task", q}          → check a name; best.confident tells you if it's a sure match.
+- GET  /lists ; GET /tags ; GET /items?list=&tag=      → small lists of names (use when unsure).
+- GET  /nearby?tag=NAME                                → active tasks carrying a location tag.
+- POST /tags/geo {tag, geo:{lat,lng,radius,label}}     → set a tag's location.
+
+Rules:
+1. "Add X and Y to my LIST" → ONE call: POST /tasks/batch {list:"LIST", titles:["X","Y"]}.
+2. "Remind me to get X when I'm at PLACE" → add X to the shopping list AND attach a tag for PLACE: POST /tasks/batch {list:"shopping", tags:["PLACE"], titles:["X"]}. The tag carries the location.
+3. "Mark/tick/check off X and Y" → POST /tasks/complete {queries:["X","Y"]}. Then tell the user EXACTLY what came back: report each matched item as done and each unmatched item as "couldn't find". Never claim you completed something that is in unmatched.
+4. "What do I need at PLACE?" → GET /nearby?tag=PLACE. If empty, say so and offer the shopping list (GET /items?list=shopping).
+4b. "Tag everything in LIST with X" / "add the X tag to all items in LIST" → ONE call: POST /tasks/tag {list:"LIST", add:["X"]}. The server tags every task in the list — you do NOT need to list the items first.
+5. If a name is ambiguous or you're unsure, call /resolve first; if best.confident is false, ask the user which they meant instead of guessing.
+6. Write task titles cleanly: fix obvious spelling and capitalize normally (first word + proper nouns like "Coles"); keep just the item. Tags stay short and lowercase.
+7. Keep replies short and conversational. Do exactly what was asked — don't add or complete tasks that weren't mentioned.`;
 
 const PRIORITY_LABEL = ['None', 'Low', 'Medium', 'High'];
 
@@ -462,9 +751,9 @@ async function runAgent(
       return;
     }
     const userText = buildContext(db, agent, taskId, reason);
-    let reply = (
-      await callLLM(agent, agent.system_prompt || DEFAULT_SYSTEM_PROMPT, userText, allowPrivate)
-    ).trim();
+    const llm = await callLLM(agent, agent.system_prompt || DEFAULT_SYSTEM_PROMPT, userText, allowPrivate);
+    recordAgentUsage(db, agent.id, llm.usage, agent.model || '(default)', 'comment_reply');
+    let reply = llm.text.trim();
     let complete = false;
     if (reason === 'assigned' && /(^|\n)\s*COMPLETE\s*$/.test(reply)) {
       complete = true;

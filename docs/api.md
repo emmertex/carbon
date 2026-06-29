@@ -76,6 +76,41 @@ Common task fields: `title`, `note`, `due_date`, `defer_date`, `reminder_at` (al
 `flagged` (bool), `priority` (0–3), `parent_id`, `estimate_minutes`, `geo`
 (`{lat,lng,radius,label}`), `recurrence` (JSON rule).
 
+## Natural-language agent endpoints (`/api/agent/*`)
+
+A granular, context-small surface for a **small LLM** (driven via Hermes) to do
+natural-language task management — the server fuzzy-matches names and batches writes so the
+model just passes plain names. Same scopes as above. Full contract + worked call sequences:
+[`carbon-agent-api.md` §6](carbon-agent-api.md).
+
+| Method | Path | Scope | Purpose |
+|--------|------|-------|---------|
+| GET  | `/api/agent/lists` | `tasks:read` | Projects as `{id,name}` (`?detail=1` adds counts) |
+| GET  | `/api/agent/tags` | `tasks:read` | Tags as `{id,name,hasGeo}` |
+| GET  | `/api/agent/items` | `tasks:read` | Minimal `{id,title,tags,done}`; filter `?list=&tag=&q=&status=` |
+| GET  | `/api/agent/items/:id` | `tasks:read` | One item + tags + list |
+| POST | `/api/agent/resolve` | `tasks:read` | Fuzzy-resolve a `list`/`tag`/`task` name → ranked candidates |
+| POST | `/api/agent/tasks/batch` | `inbox:write` | Create many tasks; resolve/create list + tags by name |
+| POST | `/api/agent/tasks/complete` | `tasks:write` | Complete by id/fuzzy query → `{matched,unmatched}` |
+| POST | `/api/agent/tasks/update` | `tasks:write` | Batch patch by id/query |
+| POST | `/api/agent/tags/geo` | `tasks:write` | Set/clear a tag's geofence (explicit or geocoded) |
+| GET  | `/api/agent/nearby` | `tasks:read` | Tasks by `tag`/`zone`/`lat`+`lng` |
+| GET  | `/api/agent/config` | `tasks:read` | `{enabled, keywords}` — drives the in-app Add box |
+| POST | `/api/agent/command` | `inbox:write` | Run an in-app NL command (LLM tool-loop, acts as the user) → `{reply, executed, usage}` |
+| GET/PATCH | `/api/admin/nl-settings` | admin | Pick the NL agent, keyword list, enable flag |
+| GET  | `/api/admin/nl-usage` | admin | Aggregate token usage by request kind |
+
+**In-app NL commands (Stage 2):** when the Add box's first word matches a configured keyword
+(default `can, add, check off, mark off, mark as`), the entry posts to `/api/agent/command`
+instead of creating a literal task. The server runs the chosen direct-LLM agent in a tool loop
+(executing the `/api/agent/*` operations in-process), builds the reply from the results, tracks
+token usage, and the new/changed items sync back. Configure it in **Settings → Natural-language
+commands**.
+
+Geocoding for "nearest Coles" is pluggable (OpenStreetMap by default) and configured with
+`CARBON_GEOCODE_ENABLED` (on for single-tenant self-host, off under a base domain),
+`CARBON_NOMINATIM_URL`, `CARBON_OVERPASS_URL`, `CARBON_GEOCODE_UA`, `CARBON_GEOCODE_RADIUS_M`.
+
 ## Location / geofence endpoints
 
 ```bash

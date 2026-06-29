@@ -165,6 +165,18 @@ export async function openSnapshot(bytes: Uint8Array): Promise<Db> {
   return wrap(sdb);
 }
 
+/**
+ * Open a read-only snapshot of the persisted database straight from IndexedDB,
+ * without initializing the live DB. Returns null when nothing has been persisted
+ * yet. Used by the desktop quick-add window to read tags/users for autocomplete
+ * while leaving all writes to the main window (the single DB owner).
+ */
+export async function loadSnapshot(): Promise<Db | null> {
+  const saved = await localforage.getItem<Uint8Array>(STORE_KEY);
+  if (!saved) return null;
+  return openSnapshot(saved);
+}
+
 // ----- meta key/value helpers ----------------------------------------------
 
 export function getMeta(key: string): string | null {

@@ -46,6 +46,24 @@ Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/`, `rpm/
 Icons were generated from `CarbonIcon.png` with `npm run -w @carbon/desktop tauri --
 icon ../../CarbonIcon.png`. Re-run after changing the logo.
 
+### Quick-add (global hotkey + tray)
+
+The desktop shell runs a lightweight, always-available capture bar on top of the main
+window:
+
+- **Global hotkey** — `Ctrl/⌘ + Shift + A` from anywhere opens a spotlight-style quick-add
+  window. Type a task (inline `#tag @user !priority` tokens work, as do
+  [natural-language commands](usage-and-shortcuts.md#natural-language-commands)) and it's
+  filed without raising the full app.
+- **System tray** — a tray icon offers *Open Carbon*, *Quick Add*, and *Quit*; a left-click
+  opens the quick-add bar directly.
+- **Close-to-tray** — closing the main window hides it to the tray (so it keeps receiving
+  forwarded quick-add tasks) rather than quitting; only the tray's *Quit* exits.
+
+> On a pure Wayland session the compositor may refuse the global shortcut grab (X11, macOS
+> and Windows are fine); the tray icon still works. The hotkey and tray permissions are
+> declared narrowly in `apps/desktop/src-tauri/capabilities/default.json`.
+
 ---
 
 ## Android (Capacitor)

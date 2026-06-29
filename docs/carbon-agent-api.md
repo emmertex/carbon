@@ -203,7 +203,117 @@ Notes:
 
 ---
 
-## 6. Quick check (curl)
+## 6. Natural-language agent API (`/api/agent/*`)
+
+A second, **granular** surface designed for a *small* LLM (e.g. Qwen 2.5 1.5B) to drive
+natural-language task management — "add milk and eggs to my shopping list", "mark off
+bread and milk", "what do I need at Coles?". The model can't reliably fuzzy-match names
+or hold big contexts, so the **server does the matching and batching** and responses are
+**minimal by default**.
+
+> The in-app **Add box** and the built-in **[Telegram bot](telegram-bot.md)** both drive this
+> same tool layer server-side (you don't call these endpoints yourself for those) — the bot just
+> runs it in a conversational mode. This section documents the HTTP surface for *your own* skill.
+
+Same auth/scopes as the rest of the API (`tasks:read` for reads, `inbox:write` to create,
+`tasks:write` to complete/update). This is a **personal-assistant surface**: use a token
+that *acts as the user* (a human's token, a per-user token, or open mode). Writes are gated
+per item by the normal rule — a user can act on their own tasks; a pure bot token is still
+limited to tasks assigned to it. Batch ops never fail the whole request for one bad item;
+the failure is reported under `unmatched`.
+
+> **Names, not ids.** Every `list`/`tag`/`task` field accepts a plain name and is resolved
+> by fuzzy match (typos, word order, path leaf). Pass `{ "id": "…" }` for a list only when
+> you already have one.
+
+### Read (small payloads)
+```
+GET /api/agent/lists                 → { lists: [{ id, name }] }            (?detail=1 adds open_count)
+GET /api/agent/tags                  → { tags: [{ id, name, hasGeo }] }     (?detail=1 adds color/status/geo)
+GET /api/agent/items?list=&tag=&q=&status=active&limit=50
+                                     → { items: [{ id, title, tags:[names], done }] }   (?detail=1 expands)
+GET /api/agent/items/{id}            → full item + { tags, list }
+POST /api/agent/resolve  { kind:"list"|"tag"|"task", q, list? }
+                                     → { candidates:[{id,name,score,reason}], best:{id,confident} }
+```
+`status` is `active` (default), `done`, or `all`. `resolve` is the workhorse: call it when a
+name is uncertain — if `best.confident` is false, ask the user rather than guess.
+
+### Write (batch)
+```
+POST /api/agent/tasks/batch
+{ "list":"shopping list", "titles":["milk","eggs"],
+  "tags":["coles"],                       // optional, applied to all created tasks
+  "create_list_if_missing":true,          // default true
+  "create_tags_if_missing":true }         // default true
+→ 201 { list:{id,name,created}, tags:[{id,name,created}], created:[{id,title}] }
+```
+Resolves (or creates) the list and tags once, then creates the tasks under the list. Use
+`tasks:[{title,note,due_date,defer_date,flagged,priority,tags}]` instead of `titles` for
+per-task fields. A task's **location comes from its tag** (precedence task > tag > project),
+so "remind me at Coles" = add the task with `tags:["coles"]` and give the `coles` tag a geo.
+
+```
+POST /api/agent/tasks/complete
+{ "queries":["bread","milk"], "list":"shopping list", "done":true }   // and/or "ids":[...]
+→ { matched:[{query,id,title}], unmatched:[{query, reason:"no_match"|"ambiguous"|"forbidden"}] }
+```
+Tick off by fuzzy query and/or id. **Report the envelope back to the user verbatim** —
+"marked off milk, couldn't find bread". Unmatched queries do nothing.
+
+```
+POST /api/agent/tasks/tag
+{ "list":"shopping list", "add":["woolworths"], "remove":[] }   // tag EVERY task in the list
+   # or target specific tasks:  { "queries":["milk","bread"], "add":["woolworths"] }
+   # or tasks already carrying a tag:  { "tag":"coles", "add":["sale"] }
+→ { updated:[{id,title}], tags_added:[names], tags_removed:[names], unmatched:[...] }
+```
+Bulk add/remove tags on existing tasks. The server enumerates the targets, so a caller (or
+LLM) never has to list the items first — "add the woolworths tag to everything in the shopping
+list" is one call. Missing add-tags are created (unless `create_tags_if_missing:false`).
+
+```
+POST /api/agent/tasks/update
+{ "updates":[ { "query":"milk", "list":"shopping", "patch":{ "flagged":true, "due_date":"2026-07-01" } } ] }
+→ { matched:[...], unmatched:[...] }      // patch fields: title,note,due_date,defer_date,flagged,priority,status
+```
+
+```
+POST /api/agent/tags/geo
+{ "tag":"coles", "geo":{ "lat":-37.81, "lng":145.01, "radius":200, "label":"Coles Camberwell" } }
+   # or:  { "tag":"coles", "near_name":"coles", "near":{ "lat":-37.8, "lng":145.0 } }   (geocoded)
+   # or:  { "tag":"coles", "geo":null }                                                 (clear)
+→ { tag:{id,name}, geo:GeoReminder|null, source:"explicit"|"geocoded" }
+```
+Stamps a geofence on a tag so location reminders fire. `near_name` resolves the nearest
+matching place to `near` via the geocoder (see env below); if geocoding is disabled or finds
+nothing it returns `400` and you should pass explicit coords.
+
+### Geo query
+```
+GET /api/agent/nearby?tag=coles               → { items:[{id,title,tags}] }
+GET /api/agent/nearby?lat=&lng=[&near_name=]   → tasks whose location (task/tag/project) matches the point
+GET /api/agent/nearby?zone=Home               → tasks whose location label matches an HA zone
+```
+
+### Worked sequences (the four canonical utterances)
+- **"Add milk and eggs to my shopping list."** → `POST /tasks/batch {list:"shopping list", titles:["milk","eggs"]}`.
+- **"Remind me to get bread next time I'm at Coles."** → `POST /tasks/batch {list:"shopping", tags:["coles"], titles:["bread"]}` (+ once: `POST /tags/geo {tag:"coles", near_name:"coles", near:{lat,lng}}` to locate it).
+- **"Mark off bread and milk."** → `POST /tasks/complete {queries:["bread","milk"]}` → tell the user matched vs unmatched.
+- **"What did I need at Coles?"** → `GET /nearby?tag=coles`; if empty, say so and show `GET /items?list=shopping`.
+
+### Geocoding env (place lookup for "nearest Coles")
+Pluggable, OpenStreetMap by default, all outbound calls go through the SSRF guard.
+- `CARBON_GEOCODE_ENABLED` — `1`/`0`. Default **on** for single-tenant self-host, **off** under a base domain.
+- `CARBON_NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`), `CARBON_OVERPASS_URL`
+  (default `https://overpass-api.de/api/interpreter`) — point at a self-hosted instance to avoid public rate limits.
+- `CARBON_GEOCODE_UA` — the `User-Agent` sent (Nominatim's usage policy requires one).
+- `CARBON_GEOCODE_RADIUS_M` — brand-search radius (default 5000 m).
+
+A refined system prompt tuned for a 1.5B model lives in
+[`hermes.md`](hermes.md#natural-language-flows) (exported as `AGENT_API_SYSTEM_PROMPT`).
+
+## 7. Quick check (curl)
 
 ```bash
 CARBON_URL=https://carbon.etx.sx

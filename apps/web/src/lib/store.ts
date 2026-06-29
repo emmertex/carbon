@@ -81,6 +81,11 @@ interface AppState {
    *  QuickAdd watches this nonce and focuses itself; works regardless of which
    *  screen's QuickAdd is mounted. */
   quickAddFocusNonce: number;
+  /** NL-command settings from the server (GET /api/agent/config). Drives the Add box's
+   *  keyword detection + yellow border. `nlEnabled` is false until an admin configures an
+   *  agent. */
+  nlEnabled: boolean;
+  nlKeywords: string[];
   /** Transient snackbar (e.g. undoable delete). */
   toast: Toast | null;
   /** Prompt: a task was completed while a different project's session runs. */
@@ -120,6 +125,7 @@ interface AppState {
   showToast: (t: Omit<Toast, 'id'>) => void;
   dismissToast: () => void;
   setInterrupt: (v: { project: string } | null) => void;
+  setNlConfig: (c: { enabled: boolean; keywords: string[] }) => void;
 }
 
 const COLLAPSE_KEY = 'carbon.collapsed';
@@ -159,6 +165,8 @@ export const useStore = create<AppState>((set, get) => ({
   workspaceExpiresAt: null,
   uiPrefs: getUiPrefs(),
   quickAddFocusNonce: 0,
+  nlEnabled: false,
+  nlKeywords: ['can', 'add', 'check off', 'mark off', 'mark as'],
   toast: null,
   interrupt: null,
 
@@ -233,6 +241,7 @@ export const useStore = create<AppState>((set, get) => ({
   showToast: (t) => set((s) => ({ toast: { ...t, id: (s.toast?.id ?? 0) + 1 } })),
   dismissToast: () => set({ toast: null }),
   setInterrupt: (v) => set({ interrupt: v }),
+  setNlConfig: (c) => set({ nlEnabled: c.enabled, nlKeywords: c.keywords }),
 }));
 
 export function getCurrentUserId(): string | null {

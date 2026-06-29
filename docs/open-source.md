@@ -80,6 +80,16 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 - [Playwright](https://playwright.dev/) (`@playwright/test`) — end-to-end and performance tests.
 - [Prettier](https://prettier.io/) — code formatting.
 
+## External open-source services
+
+These are open-source projects Carbon calls at runtime as external services (not bundled as packages).
+
+- [OpenStreetMap](https://www.openstreetmap.org/) / [Nominatim](https://nominatim.org/) — geocoding
+  and reverse-geocoding for the location/where feature. The server uses the public Nominatim endpoint
+  by default (`https://nominatim.openstreetmap.org`), respecting its ≤1 req/s fair-use policy;
+  self-hosted instances are supported via `CARBON_NOMINATIM_URL`. The web client uses the same
+  endpoint for browser-side reverse geocoding. Data © OpenStreetMap contributors, [ODbL](https://www.openstreetmap.org/copyright).
+
 ---
 
 *Carbon is developed by [Emmertex P/L](https://emmertex.com).*

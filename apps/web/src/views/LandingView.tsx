@@ -12,6 +12,10 @@ import {
   WifiOff,
   MonitorSmartphone,
   Gauge,
+  Sparkles,
+  Send,
+  MapPin,
+  Command,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import {
@@ -49,7 +53,7 @@ const STRENGTHS: { icon: typeof ListChecks; title: string; body: string }[] = [
   {
     icon: Share2,
     title: "Share across workspaces",
-    body: "Share projects between workspaces on carbon.etx.sx today — with federation across self-hosted servers on the roadmap.",
+    body: "Share projects between workspaces on carbon.etx.sx today, or copy any project as a Markdown checklist to paste into a chat — with federation across self-hosted servers on the roadmap.",
   },
   {
     icon: WifiOff,
@@ -65,6 +69,26 @@ const STRENGTHS: { icon: typeof ListChecks; title: string; body: string }[] = [
     icon: Gauge,
     title: "High performance",
     body: "Every build runs 100, 1,000 and 10,000-task performance tests to keep memory and latency low. It stays snappy at any scale.",
+  },
+  {
+    icon: Sparkles,
+    title: "Natural-language commands",
+    body: 'Type "remind me to get milk and eggs at Coles" and your LLM agent adds, tags, completes and files tasks for you — in-app, or from Telegram, Hermes or any bot via the agent API.',
+  },
+  {
+    icon: Send,
+    title: "Telegram bot",
+    body: "Run one bot for your whole server. Link your account, then manage tasks from chat — \"what's due tomorrow in work?\", \"untick my weekly shopping items\" — answered conversationally by your own AI agent.",
+  },
+  {
+    icon: MapPin,
+    title: "Location-aware reminders",
+    body: 'Each signed-in device shares its own location as a toggleable source, and "nearest Coles"-style reminders geofence themselves to the closest match — no coordinates to look up.',
+  },
+  {
+    icon: Command,
+    title: "Desktop quick-add",
+    body: "A global hotkey and system-tray icon pop a spotlight capture bar from anywhere on Linux, Windows and Mac — jot a task without switching windows.",
   },
 ];
 
@@ -157,8 +181,9 @@ export function LandingView() {
           Carbon
         </h1>
         <p className="mt-4 text-lg text-text-muted">
-          A fast, offline-first task manager with serious GTD and built-in time
-          tracking. Open source, free to use, and yours to sync or self-host.
+          A fast, offline-first task manager with serious GTD, built-in time
+          tracking, natural-language capture and location-aware reminders. Open
+          source, free to use, and yours to sync or self-host.
         </p>
         <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <button
@@ -175,6 +200,14 @@ export function LandingView() {
             Use without signing in
           </button>
         </div>
+        <p className="mt-4 text-sm text-text-muted">
+          <button
+            onClick={() => navigate("/features")}
+            className="underline underline-offset-4 hover:text-text"
+          >
+            See what works with and without a sync server
+          </button>
+        </p>
       </header>
 
       {/* Strengths */}

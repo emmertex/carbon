@@ -101,8 +101,9 @@ Any task field works in the payload (`note`, `priority`, `flagged`, `defer_date`
 
 A task can carry a **location** (Scheduling section in Carbon): a place **name** that matches
 an HA zone (e.g. `Home`, `Office`), and/or **coordinates + radius** ("Use my location" fills
-these in). When you reach that place, Carbon pushes the task to you. There are two ways to
-feed your location to Carbon — use one or both.
+these in). When you reach that place, Carbon pushes the task to you. There are several ways to feed your
+location to Carbon — HA zones (§3b), HA GPS (§3c), each device reporting its own fix (§3d) —
+use any combination, and let a place name geocode itself (§3e).
 
 ### 3a. Link your Carbon user to an HA person
 
@@ -169,6 +170,31 @@ label.
 
 Reminder cadence is as fast as HA reports the device's location (the HA Companion app, set to
 "always" location, is typically far quicker than a zone crossing).
+
+### 3d. Per-device locations (no HA required)
+
+HA is only one location *source*. Each signed-in device can also report **its own** GPS fix:
+the browser/phone/desktop reports where it is, and every device on the account sees the
+others. In Carbon these appear as **toggleable source pills** in the location/Nearby view —
+the HA tracker, this device, and any other recently-seen device — and the freshest, most
+accurate active source wins. You can force a source on/off by tapping its pill, name this
+device under **Settings → This device**, and retire an old one from the device list (devices
+unseen for >24h age out automatically). This works with no Home Assistant at all; HA simply
+becomes one more (often the most reliable) source when present.
+
+> Cross-user reports stay safe: a named `person` GPS report can only update that user's
+> single HA fix — it can never inject a named device pill into someone else's source list.
+> Only a device reporting *its own* location (the signed-in client) registers a named source.
+
+### 3e. "Nearest place" reminders (geocoding)
+
+Beyond zones and fixed coordinates, a reminder can pin itself to the **nearest matching
+place**. Via a [natural-language command](usage-and-shortcuts.md#natural-language-commands)
+or the agent API ("remind me to get milk at Coles"), Carbon geocodes the place against your
+current location (OpenStreetMap Overpass/Nominatim by default) and stamps the closest match's
+coordinates onto the tag's geofence — no coordinates to look up. Geocoding is opt-in on
+multi-tenant hosts and on by default for single-tenant self-host; see the
+`CARBON_GEOCODE_*` knobs in `.env.example`.
 
 ---
 

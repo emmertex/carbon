@@ -12,11 +12,25 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Carbon",
         "width": 1100,
         "height": 800,
         "minWidth": 360,
         "minHeight": 480
+      },
+      {
+        "label": "quick",
+        "title": "Carbon Quick Add",
+        "url": "index.html?view=quick",
+        "width": 600,
+        "height": 72,
+        "decorations": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "center": true,
+        "skipTaskbar": true,
+        "visible": false
       }
     ],
     "security": {

@@ -23,9 +23,21 @@ import {
 } from './config';
 import { useStore } from './store';
 import { uploadPendingBlobs } from './blobs';
+import { getNlConfig } from './admin';
 
 function joinUrl(base: string, path: string): string {
   return base.replace(/\/$/, '') + path;
+}
+
+/** Refresh the Add box's NL keyword/enable state from the server (best-effort). */
+export async function loadNlConfig(): Promise<void> {
+  if (!getServerConfig().url) return;
+  try {
+    const cfg = await getNlConfig();
+    useStore.getState().setNlConfig(cfg);
+  } catch {
+    /* not configured / offline — keep defaults (disabled) */
+  }
 }
 
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -202,6 +214,8 @@ export async function fetchIdentity(): Promise<void> {
     saveCurrentUser(user);
     useStore.getState().setCurrentUser(user);
     useStore.getState().setAuthRequired(false); // signed in (or open mode)
+    void loadNlConfig(); // refresh the Add box's keyword/enable state
+
     // Claim local items only when signing in as a *real* account (not the open
     // server's synthetic 'local' identity).
     if (!user.open && (!prev || prev.id !== user.id)) {

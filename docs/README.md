@@ -7,8 +7,8 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 ## Guides
 
 ### Using Carbon
-- [**Usage & keyboard shortcuts**](usage-and-shortcuts.md) — quick capture, shortcuts,
-  gestures, views, offline & sync.
+- [**Usage & keyboard shortcuts**](usage-and-shortcuts.md) — quick capture, natural-language
+  commands, desktop quick-add, shortcuts, gestures, views, offline & sync.
 - [**Carbon vs Todoist / OmniFocus / Microsoft To Do**](comparison.md) — honest feature-by-feature
   comparison, including where Carbon falls short.
 
@@ -18,10 +18,13 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 
 ### Apps & integrations
 - [**Native apps (desktop + Android)**](native-apps.md) — building and running the Tauri desktop
-  and Capacitor Android apps.
-- [**Home Assistant integration**](home-assistant.md) — capture, geofencing, and two-way task
-  flows.
-- [**Hermes / agent integration**](hermes.md) — connecting an agentic framework or direct LLM.
+  and Capacitor Android apps, plus the desktop global-hotkey / tray quick-add.
+- [**Home Assistant integration**](home-assistant.md) — capture, geofencing, per-device
+  locations, "nearest place" reminders, and two-way task flows.
+- [**Telegram bot**](telegram-bot.md) — run a per-server bot so users can control Carbon from
+  Telegram in plain language (add/complete/tag tasks, ask what's due) via the same AI agent.
+- [**Hermes / agent integration**](hermes.md) — connecting an agentic framework or direct LLM
+  for natural-language task control.
 
 ### Developer / API reference
 - [**REST API guide**](api.md) — endpoints, authentication, scopes.

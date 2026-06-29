@@ -119,6 +119,32 @@ export function ensureServerTables(db: Db): void {
   if (!gpsCols.some((c) => c.name === 'accuracy')) {
     db.exec(`ALTER TABLE gps_history ADD COLUMN accuracy REAL`);
   }
+
+  // Per-device location store (multi-device Nearby). One row per (user, device):
+  // an HA device-tracker, a phone, a laptop browser, etc. all coexist instead of
+  // clobbering the single gps_history row. Read-time staleness filtering; a periodic
+  // sweep hard-deletes very old rows. gps_history stays as the HA single-row that
+  // drives background proximity push (a closed browser can't self-report anyway).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_locations (
+      user_id    TEXT NOT NULL,
+      device_id  TEXT NOT NULL,
+      name       TEXT,
+      lat        REAL NOT NULL,
+      lng        REAL NOT NULL,
+      accuracy   REAL,
+      source     TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, device_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_locations_user ON device_locations(user_id);
+  `);
+  // One-time migration: fold any existing single-row HA fix into device_locations so
+  // the new read path has it. Idempotent (OR IGNORE on the PK).
+  db.exec(`
+    INSERT OR IGNORE INTO device_locations (user_id, device_id, name, lat, lng, accuracy, source, updated_at)
+    SELECT user_id, 'ha:' || user_id, NULL, lat, lng, accuracy, 'ha', updated_at FROM gps_history
+  `);
 }
 
 // ----- sign-in sessions (browser / device tokens) ---------------------------
@@ -296,6 +322,122 @@ export function getGps(
   );
 }
 
+// ----- per-device location store --------------------------------------------
+
+export type LocationSource = 'device' | 'ha';
+
+export interface DeviceLocation {
+  deviceId: string;
+  name: string | null;
+  lat: number;
+  lng: number;
+  accuracy: number | null;
+  source: LocationSource;
+  updatedAt: string;
+}
+
+/** Devices older than this are omitted from reads (one pill per fresh device). */
+export const DEVICE_STALE_MS = 24 * 60 * 60 * 1000; // 1 day
+/** Rows older than this are hard-deleted by the periodic sweep. */
+export const DEVICE_HARD_DELETE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/** Upsert a device's latest fix, keyed by (user, device). */
+export function saveDeviceLocation(
+  db: Db,
+  p: {
+    userId: string;
+    deviceId: string;
+    name?: string | null;
+    lat: number;
+    lng: number;
+    accuracy?: number | null;
+    source: LocationSource;
+  },
+): void {
+  db.run(
+    `INSERT INTO device_locations (user_id, device_id, name, lat, lng, accuracy, source, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, device_id) DO UPDATE SET
+       name = COALESCE(excluded.name, device_locations.name),
+       lat = excluded.lat, lng = excluded.lng, accuracy = excluded.accuracy,
+       source = excluded.source, updated_at = excluded.updated_at`,
+    [
+      p.userId,
+      p.deviceId,
+      p.name ?? null,
+      p.lat,
+      p.lng,
+      p.accuracy ?? null,
+      p.source,
+      new Date().toISOString(),
+    ],
+  );
+}
+
+function rowToDevice(r: {
+  device_id: string;
+  name: string | null;
+  lat: number;
+  lng: number;
+  accuracy: number | null;
+  source: string;
+  updated_at: string;
+}): DeviceLocation {
+  return {
+    deviceId: r.device_id,
+    name: r.name,
+    lat: r.lat,
+    lng: r.lng,
+    accuracy: r.accuracy,
+    source: r.source === 'ha' ? 'ha' : 'device',
+    updatedAt: r.updated_at,
+  };
+}
+
+/** All of a user's device fixes, newest first; optionally only those within `maxAgeMs`. */
+export function listDeviceLocations(
+  db: Db,
+  userId: string,
+  maxAgeMs?: number,
+): DeviceLocation[] {
+  const rows = db
+    .all<Parameters<typeof rowToDevice>[0]>(
+      `SELECT device_id, name, lat, lng, accuracy, source, updated_at
+       FROM device_locations WHERE user_id = ? ORDER BY updated_at DESC`,
+      [userId],
+    )
+    .map(rowToDevice);
+  if (maxAgeMs == null) return rows;
+  const cutoff = Date.now() - maxAgeMs;
+  return rows.filter((d) => {
+    const t = Date.parse(d.updatedAt);
+    return Number.isFinite(t) && t >= cutoff;
+  });
+}
+
+/** The freshest fix across all of a user's devices (within `maxAgeMs` if given). */
+export function freshestDeviceLocation(
+  db: Db,
+  userId: string,
+  maxAgeMs?: number,
+): DeviceLocation | null {
+  return listDeviceLocations(db, userId, maxAgeMs)[0] ?? null;
+}
+
+/** Remove a specific device (e.g. a retired phone). */
+export function deleteDeviceLocation(db: Db, userId: string, deviceId: string): void {
+  db.run('DELETE FROM device_locations WHERE user_id = ? AND device_id = ?', [userId, deviceId]);
+}
+
+/** Hard-delete rows older than `maxAgeMs` (periodic sweep). Returns rows removed. */
+export function pruneStaleDeviceLocations(db: Db, maxAgeMs = DEVICE_HARD_DELETE_MS): number {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const before = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM device_locations')?.n ?? 0;
+  db.run('DELETE FROM device_locations WHERE updated_at < ?', [cutoff]);
+  const after = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM device_locations')?.n ?? 0;
+  return before - after;
+}
+
 /** Store the user's current HA zone (on a zone enter). Pass null on leave. */
 export function saveZone(db: Db, userId: string, zone: string | null): void {
   db.run(
@@ -377,12 +519,13 @@ function markSent(db: Db, itemId: string, kind: string, marker: string): void {
   );
 }
 
-/** Start a 1-minute GPS proximity check across all tenants. */
+/** Start a 1-minute GPS proximity check across all tenants (also sweeps stale devices). */
 export function startGpsScheduler(dbs: () => Db[]): void {
   setInterval(() => {
     for (const db of dbs()) {
       try {
         checkGpsProximity(db);
+        pruneStaleDeviceLocations(db);
       } catch (e) {
         console.error('[carbon] gps proximity check failed:', e);
       }

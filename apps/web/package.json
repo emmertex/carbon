@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@capacitor/core": "^6.2.1",
+    "@capacitor/device": "^6.0.3",
     "@capacitor/geolocation": "^6.1.0",
     "@capacitor/local-notifications": "^6.1.2",
     "@capacitor/push-notifications": "^6.0.5",

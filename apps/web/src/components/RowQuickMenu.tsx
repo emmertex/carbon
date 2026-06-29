@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { Check, Target, Eye, Flag, Trash2 } from 'lucide-react';
+import { Check, Target, Eye, Flag, Trash2, ClipboardList } from 'lucide-react';
 import {
   listUsers,
   listTags,
@@ -17,7 +17,8 @@ import {
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
-import { getCurrentUserId } from '@/lib/store';
+import { itemTreeToMarkdown } from '@/lib/exportMarkdown';
+import { getCurrentUserId, useStore } from '@/lib/store';
 import { useFocusItem } from '@/hooks/useFocusItem';
 import { flagTask, setPriority, deleteTaskWithUndo } from '@/lib/taskActions';
 import { TagMark } from './TagMark';
@@ -85,6 +86,17 @@ export function RowQuickMenu({
         if (!hasWriteAccess(db, itemId, userId)) shareItem(db, dev, itemId, userId, 'write');
       }
     });
+  }
+
+  async function copyMarkdown() {
+    const md = itemTreeToMarkdown(itemId);
+    try {
+      await navigator.clipboard.writeText(md);
+      useStore.getState().showToast({ message: 'Copied as Markdown' });
+    } catch {
+      useStore.getState().showToast({ message: 'Copy failed' });
+    }
+    onClose();
   }
 
   function toggleTag(tagId: string) {
@@ -180,12 +192,17 @@ export function RowQuickMenu({
           <div className="px-2 py-1 text-xs text-text-faint">No tags yet</div>
         )}
 
+        <button onClick={copyMarkdown} className={cn(itemCls, 'mt-1 border-t border-border')}>
+          <ClipboardList size={14} className="text-text-faint" />
+          <span className="flex-1 text-left">Copy as Markdown</span>
+        </button>
+
         <button
           onClick={() => {
             deleteTaskWithUndo(item);
             onClose();
           }}
-          className={cn(itemCls, 'mt-1 border-t border-border text-danger')}
+          className={cn(itemCls, 'text-danger')}
         >
           <Trash2 size={14} />
           <span className="flex-1 text-left">Delete</span>

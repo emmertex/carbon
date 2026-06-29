@@ -11,6 +11,7 @@ export const LINKS = {
   agentsApi: `${DOCS}/carbon-agent-api.md`,
   restApi: `${DOCS}/api.md`,
   homeAssistant: `${DOCS}/home-assistant.md`,
+  telegram: `${DOCS}/telegram-bot.md`,
   docs: `${DOCS}/README.md`,
   openSource: `${DOCS}/open-source.md`,
   emmertex: 'https://emmertex.com',

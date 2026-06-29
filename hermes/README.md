@@ -1,5 +1,13 @@
+   Skill: carbon-nl/SKILL.md   ← NEW: natural-language lists, used DIRECTLY from Hermes
+    - "add milk and eggs to my shopping list", "mark off bread and milk", "what do I need at Coles?"
+    - No webhook needed — the agent runs carbon-nl/carbon-cli.py, which calls /api/agent/*.
+    - The server fuzzy-matches names; the CLI prints a ready-to-relay line per command.
+    - Token (acting as the user) in carbon-nl/.credentials (see .credentials.example).
+    - Copy to ~/.hermes/skills/productivity/carbon-nl/.
+
    Skill: ~/.hermes/skills/productivity/carbon-agent/SKILL.md
     - Full API reference, webhook flow, bot permissions, error handling, pitfalls
+    - For the webhook/@mention trigger flow (acts as a bot on a task), not direct NL use.
     - Token stored in .credentials file
 
    Skill: carbon-home-assistant/SKILL.md
@@ -12,6 +20,24 @@
     - Verifies x-carbon-secret header (optional)
     - Responds 200 immediately, queues payloads to ~/.hermes/carbon-queue.jsonl
     - Includes full REST API helper functions (comment(), complete(), read_task(), list_tasks(), create_task(), update_task())
+    - Plus natural-language agent API (/api/agent/*) helpers: agent_lists(), agent_tags(),
+      agent_items(), agent_resolve(), agent_add(), agent_complete(), agent_update(),
+      agent_set_tag_geo(), agent_nearby() — the server fuzzy-matches names, so pass plain
+      names (never ids). See docs/carbon-agent-api.md §6.
+
+    Natural-language quick example (the server resolves/creates the list + tags):
+
+        from importlib import import_module
+        m = import_module("carbon-webhook-listener")   # or just paste the helpers
+        m.agent_add(list="shopping list", titles=["milk", "eggs"])
+        m.agent_add(list="shopping list", tags=["coles"], titles=["bread"])
+        r = m.agent_complete(queries=["bread", "butter"], list="shopping list")
+        # r == {"matched":[{"title":"bread",...}], "unmatched":[{"query":"butter","reason":"no_match"}]}
+        m.agent_nearby(tag="coles")                      # "what do I need at Coles?"
+
+    The model's system prompt for these flows is AGENT_API_SYSTEM_PROMPT in
+    apps/server/src/agents.ts (also summarised in docs/hermes.md). Geocoding for
+    "nearest Coles" is controlled by CARBON_GEOCODE_* env vars (OpenStreetMap default).
     
     Queue processor: carbon-process-queue.py
     - Pops items from the queue, formats them for the agent

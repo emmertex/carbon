@@ -74,12 +74,23 @@ export async function assertSafeEndpoint(
   }
 }
 
-/** fetch() that first refuses internal/loopback targets (see assertSafeEndpoint). */
+/** Default outbound request timeout. Without it a hung upstream (TCP accepted, no
+ *  response) would stall the caller indefinitely — the server-side `[timeout:..]` in an
+ *  Overpass QL is not a socket timeout. */
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+/**
+ * fetch() that first refuses internal/loopback targets (see assertSafeEndpoint) and
+ * applies a socket timeout. Pass `timeoutMs` to override (0 disables). If the caller
+ * supplies its own `init.signal` we respect it and skip the internal timeout.
+ */
 export async function safeFetch(
   url: string,
   allowPrivate: boolean,
   init?: RequestInit,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<Response> {
   await assertSafeEndpoint(url, allowPrivate);
-  return fetch(url, init);
+  if (init?.signal || timeoutMs <= 0) return fetch(url, init);
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
 }
