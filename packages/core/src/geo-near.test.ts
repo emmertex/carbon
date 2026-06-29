@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import type { Db, SqlParams } from './db';
 import { migrate } from './migrate';
-import { createItem, updateItem } from './repo';
+import { createItem, updateItem, createTag, updateTag, setItemTags, tagId } from './repo';
 import { tasksNearLocation } from './geo';
 
 // Minimal in-memory Db backed by node:sqlite (mirrors repo.test.ts).
@@ -114,6 +114,36 @@ test('tasksNearLocation returns nothing with no location and excludes non-matche
   // A different zone, and a point far from the geo.
   assert.deepEqual(tasksNearLocation(db, { zone: 'Home' }), []);
   assert.deepEqual(tasksNearLocation(db, { point: { lat: 0, lng: 0 } }), []);
+});
+
+test('tasksNearLocation matches via a TAG location when the task has none', () => {
+  const db = openMemoryDb();
+  createTag(db, DEVICE, 'Errands');
+  updateTag(db, DEVICE, tagId('Errands'), { geo: geo({ label: 'Coles' }) });
+  const task = createItem(db, DEVICE, { title: 'Milk' });
+  setItemTags(db, DEVICE, task.id, [tagId('Errands')]);
+  const untagged = createItem(db, DEVICE, { title: 'no tag' });
+
+  const hit = tasksNearLocation(db, { zone: 'coles' });
+  assert.deepEqual(hit.map((i) => i.id), [task.id]);
+  assert.ok(!hit.some((i) => i.id === untagged.id));
+});
+
+test('task location overrides its tag and project (task > tag > project)', () => {
+  const db = openMemoryDb();
+  const project = createItem(db, DEVICE, { type: 'project', title: 'Groceries' });
+  updateItem(db, DEVICE, project.id, { geo: geo({ label: 'Project' }) });
+  createTag(db, DEVICE, 'Errands');
+  updateTag(db, DEVICE, tagId('Errands'), { geo: geo({ label: 'Tag' }) });
+  const task = createItem(db, DEVICE, { title: 'Milk', parentId: project.id });
+  setItemTags(db, DEVICE, task.id, [tagId('Errands')]);
+  updateItem(db, DEVICE, task.id, { geo: geo({ label: 'Task' }) });
+
+  // The task's own location wins; the tag/project labels do not match it.
+  assert.deepEqual(tasksNearLocation(db, { zone: 'Task' }).map((i) => i.id), [task.id]);
+  // It still matches its tag's zone (tag overrides project) when the task has no own geo.
+  updateItem(db, DEVICE, task.id, { geo: null });
+  assert.deepEqual(tasksNearLocation(db, { zone: 'Tag' }).map((i) => i.id), [task.id]);
 });
 
 test('tasksNearLocation ignores done/deleted tasks', () => {

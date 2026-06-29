@@ -17,6 +17,9 @@
     "test": {
       "dependsOn": ["^build"]
     },
+    "bench": {
+      "dependsOn": ["^build"]
+    },
     "lint": {}
   }
 }

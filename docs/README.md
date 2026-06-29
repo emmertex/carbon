@@ -27,6 +27,9 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 - [**REST API guide**](api.md) — endpoints, authentication, scopes.
 - [**Agent API**](carbon-agent-api.md) — webhook contract + callbacks for building a skill.
 
+### Credits
+- [**Open source projects used**](open-source.md) — every direct library and tool Carbon is built on.
+
 ---
 
 *Engineering notes, design plans, and internal reviews live in [`internal/`](internal/README.md)

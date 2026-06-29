@@ -60,6 +60,7 @@ dist/
 build/
 *.tsbuildinfo
 release/
+docs/internal/
 
 .env
 .env.local

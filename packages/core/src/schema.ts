@@ -370,4 +370,16 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 16,
+  // Powerful tags: tags gain manual ordering (sort_order, like items) and an
+  // optional location (geo, same JSON shape as items.geo). sort_order lets the
+  // sidebar drag-reorder/reparent tags; geo lets a tag carry a location that a
+  // task without its own location falls back to (task > tag > project).
+  up: `
+    ALTER TABLE tags ADD COLUMN sort_order REAL NOT NULL DEFAULT 0;
+    ALTER TABLE tags ADD COLUMN geo TEXT;
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

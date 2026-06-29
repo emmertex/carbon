@@ -2,6 +2,7 @@ import {
   projectAncestor,
   getItemTags,
   effectiveTagColor,
+  heldTagIds,
   listAssigneesForItem,
   effectiveShares,
   getUser,
@@ -29,6 +30,7 @@ export function itemAssignees(db: Db, itemId: string): User[] {
 export function enrichItems(db: Db, items: Item[]): TaskRowData[] {
   const projectCache = new Map<string, Item | undefined>();
   const blockedCache = new Map<string, boolean>();
+  const held = heldTagIds(db);
   return items.map((item) => {
     // A task's project is the nearest project ancestor — `parent_id` may be
     // another task (a subtask), so resolve up the tree rather than reading it
@@ -46,17 +48,20 @@ export function enrichItems(db: Db, items: Item[]): TaskRowData[] {
     const hasComments = !!db.get('SELECT 1 AS x FROM comments WHERE item_id = ? AND deleted = 0', [
       item.id,
     ]);
+    const tags = itemTagsResolved(db, item.id);
     return {
       item,
       projectId: project?.id ?? null,
       projectName: project?.title ?? null,
       projectColor: project?.color ?? null,
-      tags: itemTagsResolved(db, item.id),
+      tags,
       assignees: itemAssignees(db, item.id),
       hasChildren,
       hasComments,
       shared: effectiveShares(db, item.id).length > 0,
       blocked: item.status === 'active' && isBlocked(db, item.id, blockedCache),
+      // On hold = carries an on-hold tag (or a descendant of one). Drives the faded row.
+      onHold: held.size > 0 && tags.some((t) => held.has(t.id)),
     };
   });
 }

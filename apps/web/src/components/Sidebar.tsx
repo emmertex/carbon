@@ -18,9 +18,9 @@ import {
   MapPin,
   Target,
   Clock,
-  GripVertical,
   Pencil,
   Trash2,
+  ChevronRight,
   X,
 } from 'lucide-react';
 import {
@@ -56,9 +56,18 @@ import {
   isOverdue,
   sharedRoots,
   tasksNearLocation,
+  listTags,
+  tagCounts,
+  effectiveTagColor,
+  createTag,
+  moveTag,
+  reorderTag,
+  tagId,
   type Item,
   type OrderMode,
 } from '@carbon/core';
+import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
+import { TagMark } from './TagMark';
 import { useQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
 import { useStore, getCurrentUserId } from '@/lib/store';
@@ -117,6 +126,7 @@ function FolderEditor({ folder, onClose }: { folder: Item; onClose: () => void }
     <div
       className="mb-1 ml-6 mr-2 rounded-lg border border-border bg-surface-2 p-2"
       onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
     >
       <input
         autoFocus
@@ -182,27 +192,20 @@ function SidebarRow({
   });
   const draggable = row.kind !== 'empty-folder-slot';
 
+  // Whole-row press-and-hold drag (matches the task list): no visible handle —
+  // holding ~200ms lifts the row, a quick tap still opens/toggles it. Reliable on
+  // touch where a tiny grip target was not.
   return (
     <div
       ref={setNodeRef}
+      {...(draggable ? attributes : {})}
+      {...(draggable ? listeners : {})}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={cn('group/srow relative flex items-start', isDragging && 'z-10 opacity-80')}
+      className={cn(
+        'group/srow relative flex select-none items-start',
+        isDragging && 'z-10 opacity-80',
+      )}
     >
-      <button
-        {...(draggable ? attributes : {})}
-        {...(draggable ? listeners : {})}
-        className={cn(
-          'flex h-8 w-4 shrink-0 items-center justify-center text-text-faint',
-          draggable
-            ? 'cursor-grab opacity-0 group-hover/srow:opacity-100'
-            : 'pointer-events-none opacity-0',
-        )}
-        aria-label="Drag to reorder"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <GripVertical size={13} />
-      </button>
-
       <div className="min-w-0 flex-1" style={{ paddingLeft: `${row.depth * 0.9}rem` }}>
         {row.kind === 'folder' && row.item && (
           <>
@@ -303,7 +306,11 @@ function ProjectsSection() {
 
   const rows = data ? buildFolderRows(data.folders, data.projects, data.openById, collapsed) : [];
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  // Press-and-hold to drag (~200ms), matching the task list. A quick tap/scroll
+  // (moving >5px before the delay) is never treated as a drag.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+  );
 
   function createProject(mode: OrderMode) {
     const project = mutate((db, dev) =>
@@ -432,7 +439,7 @@ function ProjectsSection() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2.5">
+      <div className="px-2.5">
         {rows.length === 0 && (
           <p className="px-2.5 py-1 text-xs text-text-faint">No projects yet</p>
         )}
@@ -463,13 +470,217 @@ function ProjectsSection() {
   );
 }
 
+/** One draggable tag row in the sidebar tag tree. */
+function TagRow({ node, onOpen }: { node: TagNode; onOpen: (id: string) => void }) {
+  const collapsed = useStore((s) => s.collapsed);
+  const toggleCollapsed = useStore((s) => s.toggleCollapsed);
+  const selectedId = useStore((s) => s.selectedId);
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: node.tag.id,
+  });
+  const hasChildren = node.children.length > 0;
+  const onHold = node.tag.status === 'on-hold';
+  const active = selectedId === node.tag.id;
+
+  // Whole-row press-and-hold drag (matches the task list): hold ~200ms to lift,
+  // a quick tap still opens the tag or toggles its collapse.
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn(
+        'group/trow relative flex select-none items-start',
+        isDragging && 'z-10 opacity-80',
+      )}
+    >
+      <div className="min-w-0 flex-1" style={{ paddingLeft: `${node.depth * 0.9}rem` }}>
+        <div
+          className={cn(
+            'flex items-center gap-1 rounded-lg pr-2 text-sm font-medium transition-colors',
+            active
+              ? 'bg-accent-soft text-accent'
+              : 'text-text-muted hover:bg-surface-2 hover:text-text',
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => toggleCollapsed(node.tag.id)}
+            className={cn(
+              'flex h-7 w-5 shrink-0 items-center justify-center text-text-faint',
+              !hasChildren && 'invisible',
+            )}
+            aria-label={collapsed.has(node.tag.id) ? 'Expand' : 'Collapse'}
+          >
+            <ChevronRight
+              size={14}
+              className={cn('transition-transform', !collapsed.has(node.tag.id) && 'rotate-90')}
+            />
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpen(node.tag.id)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 text-left"
+          >
+            <TagMark color={node.tag.color} />
+            <span className={cn('flex-1 truncate', onHold && 'italic text-text-faint')}>
+              {node.leaf}
+            </span>
+            {node.rollupCount > 0 && (
+              <span className="text-xs tabular-nums text-text-faint">{node.rollupCount}</span>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TagsSection() {
+  const navigate = useNavigate();
+  const select = useStore((s) => s.select);
+  const setSidebarOpen = useStore((s) => s.setSidebarOpen);
+  const collapsed = useStore((s) => s.collapsed);
+  const close = () => setSidebarOpen(false);
+
+  const data = useQuery((db) => {
+    const tags = listTags(db);
+    // Resolve display colour (own or inherited) so nested tags show their parent's hue.
+    const resolved = tags.map((t) => ({ ...t, color: effectiveTagColor(db, t.name) }));
+    return { roots: buildTagTree(resolved, tagCounts(db)) };
+  }, []);
+
+  const flat = data ? flattenTagTree(data.roots, collapsed) : [];
+
+  // Press-and-hold to drag (~200ms), matching the task list and Projects.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+  );
+
+  function openTag(id: string) {
+    select(id, 'tag');
+    navigate(`/tag/${id}`);
+    close();
+  }
+
+  function addTag() {
+    const tag = mutate((db, dev) => createTag(db, dev, 'New tag'));
+    openTag(tag.id);
+  }
+
+  function onDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const oldIndex = flat.findIndex((n) => n.tag.id === active.id);
+    const overIndex = flat.findIndex((n) => n.tag.id === over.id);
+    if (oldIndex < 0 || overIndex < 0) return;
+    const activeNode = flat[oldIndex]!;
+
+    const reordered = arrayMove(flat, oldIndex, overIndex);
+    const newIndex = reordered.findIndex((n) => n.tag.id === active.id);
+
+    // Target parent path is taken from the row directly above the new slot: an
+    // expanded parent means "drop inside it"; otherwise share that row's parent.
+    const above = newIndex > 0 ? reordered[newIndex - 1] : null;
+    let parentPath: string;
+    if (!above) parentPath = '';
+    else if (above.children.length && !collapsed.has(above.tag.id)) parentPath = above.tag.name;
+    else parentPath = above.parentPath;
+
+    // Never nest a tag inside itself or one of its own descendants.
+    if (parentPath === activeNode.tag.name || parentPath.startsWith(activeNode.tag.name + ':')) {
+      return;
+    }
+
+    // sort_order = midpoint of same-parent neighbours around the new slot.
+    let prev: number | undefined;
+    let next: number | undefined;
+    for (let i = newIndex - 1; i >= 0; i--) {
+      const n = reordered[i]!;
+      if (n.tag.id === activeNode.tag.id) continue;
+      if (n.parentPath === parentPath) {
+        prev = n.tag.sort_order;
+        break;
+      }
+    }
+    for (let i = newIndex + 1; i < reordered.length; i++) {
+      const n = reordered[i]!;
+      if (n.tag.id === activeNode.tag.id) continue;
+      if (n.parentPath === parentPath) {
+        next = n.tag.sort_order;
+        break;
+      }
+    }
+    let target: number;
+    if (prev === undefined && next === undefined) target = 0;
+    else if (prev === undefined) target = next! - 1;
+    else if (next === undefined) target = prev + 1;
+    else target = (prev + next) / 2;
+
+    const id = String(active.id);
+    if (parentPath !== activeNode.parentPath) {
+      // Reparent = rename the colon path (and the whole subtree); then place it.
+      const newName = parentPath ? `${parentPath}:${activeNode.leaf}` : activeNode.leaf;
+      mutate((db, dev) => {
+        moveTag(db, dev, id, newName);
+        reorderTag(db, dev, tagId(newName), target);
+      });
+    } else {
+      mutate((db, dev) => reorderTag(db, dev, id, target));
+    }
+  }
+
+  return (
+    <>
+      <div className="mt-5 flex items-center justify-between px-4 pb-1">
+        <button
+          onClick={() => {
+            navigate('/tags');
+            close();
+          }}
+          className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-text-faint hover:text-text"
+        >
+          <TagIcon size={12} /> Tags
+        </button>
+        <button
+          className="rounded p-1 text-text-faint hover:bg-surface-2 hover:text-text"
+          onClick={addTag}
+          aria-label="New tag"
+        >
+          <Plus size={15} />
+        </button>
+      </div>
+
+      <div className="px-2.5 pb-2">
+        {flat.length === 0 && <p className="px-2.5 py-1 text-xs text-text-faint">No tags yet</p>}
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToVerticalAxis]}
+          onDragEnd={onDragEnd}
+        >
+          <SortableContext
+            items={flat.map((n) => n.tag.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="flex flex-col">
+              {flat.map((node) => (
+                <TagRow key={node.tag.id} node={node} onOpen={openTag} />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      </div>
+    </>
+  );
+}
+
 export function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
-  const openTagsPanel = useStore((s) => s.openTagsPanel);
-  const tagsPanelOpen = useStore((s) => s.tagsPanelOpen);
 
   const [perspectives, setPerspectives] = useState<SavedPerspective[]>(getPerspectives);
   useEffect(() => setPerspectives(getPerspectives()), [location.pathname]);
@@ -516,7 +727,7 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'fixed inset-y-0 left-0 z-40 flex w-64 max-w-[85vw] flex-col border-r border-border bg-surface transition-transform lg:static lg:z-auto lg:translate-x-0',
+        'fixed inset-y-0 left-0 z-40 flex w-64 max-w-[85vw] flex-col overflow-hidden border-r border-border bg-surface transition-transform lg:static lg:z-auto lg:translate-x-0',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full',
       )}
     >
@@ -525,6 +736,9 @@ export function Sidebar() {
         <span className="text-[15px] font-semibold tracking-tight">Carbon</span>
       </div>
 
+      {/* Single scroll region: everything between the branding and the footer scrolls
+          together, so the quick-access views stay reachable on short mobile viewports. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <nav className="flex flex-col gap-0.5 px-2.5">
         <NavItem
           to="/today"
@@ -573,24 +787,6 @@ export function Sidebar() {
         />
         <NavItem to="/all" icon={<Layers size={17} />} label="All Tasks" onClick={close} />
         <NavItem to="/time" icon={<Clock size={17} />} label="Time tracked" onClick={close} />
-        <button
-          onClick={() => {
-            openTagsPanel();
-            navigate('/tags');
-            close();
-          }}
-          className={cn(
-            'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors',
-            tagsPanelOpen
-              ? 'bg-accent-soft text-accent'
-              : 'text-text-muted hover:bg-surface-2 hover:text-text',
-          )}
-        >
-          <span className="shrink-0">
-            <TagIcon size={17} />
-          </span>
-          <span className="flex-1 truncate text-left">Tags</span>
-        </button>
       </nav>
 
       {perspectives.length > 0 && (
@@ -641,6 +837,9 @@ export function Sidebar() {
       )}
 
       <ProjectsSection />
+
+      <TagsSection />
+      </div>
 
       <div className="flex items-center gap-1 border-t border-border px-2.5 py-2">
         <SyncIndicator />

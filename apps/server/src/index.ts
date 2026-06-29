@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, resolve, join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import {
   migrate,
@@ -80,6 +80,17 @@ import {
   triggerAgents,
 } from './agents';
 import {
+  ensureCaldavDeviceId,
+  getCaldavConfigRow,
+  upsertCaldavConfig,
+  deleteCaldavConfig,
+  publicCaldavConfig,
+  testCaldav,
+  runSync,
+  startCaldavScheduler,
+  type CaldavConfigPatch,
+} from './caldav';
+import {
   initTenantDb,
   createTenantRegistry,
   subdomainFromHost,
@@ -103,6 +114,7 @@ import {
   setTenantLock,
   setTenantBlobQuota,
   setTenantAdminEmail,
+  setTenantAllowPrivate,
   deleteTenant,
   provisionTenant,
   validateSubdomain,
@@ -185,6 +197,17 @@ function effectiveBlobQuota(rec: TenantRecord | null): number {
   return rec.blob_quota_bytes == null ? BLOB_QUOTA_DEFAULT_BYTES : rec.blob_quota_bytes;
 }
 
+/** Whether THIS tenant's agents may reach private/loopback/LAN endpoints (e.g. a
+ *  self-hosted LLM). Single-tenant self-host always may; in multi-tenant mode the SSRF
+ *  guard blocks private hosts unless a host admin opts the workspace in, or
+ *  ALLOW_PRIVATE_AGENT_ENDPOINTS=1 forces the allow globally. */
+function agentsAllowPrivate(rec: TenantRecord | null): boolean {
+  if (!BASE_DOMAIN) return true; // single-tenant self-host
+  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === '1') return true; // global override
+  if (!rec || rec.id === 'default') return true; // operator's own default tenant
+  return !!rec.allow_private_endpoints;
+}
+
 /** Total bytes stored in a (flat) content-addressed blobs directory. */
 function blobsDirBytes(dir: string): number {
   let total = 0;
@@ -207,6 +230,9 @@ function blobsDirBytes(dir: string): number {
 function buildTenantApp(ctx: TenantCtx): FetchApp {
   const { db, serverDeviceId, vapidPublicKey } = ctx;
   const BLOBS_DIR = ctx.blobsDir;
+  // Per-request: may this workspace's agents reach private/LAN endpoints? (host-admin flag)
+  const allowPrivate = (): boolean =>
+    agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id));
 
   const api = new Hono<Env>();
   // In multi-tenant mode never fall back to open/no-auth: a provisioned tenant
@@ -320,13 +346,18 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       displayName?: string;
       role?: UserRole;
       password?: string;
+      ha_person?: string | null;
     };
     updateUser(db, id, {
       ...(body.displayName !== undefined ? { display_name: body.displayName } : {}),
       ...(body.role !== undefined ? { role: body.role } : {}),
     });
     if (body.password) setPassword(db, id, hashPassword(body.password));
-    return c.json(publicUser(getUser(db, id)!));
+    // Admins may map any user to their Home Assistant `person.*` entity (the
+    // per-user PATCH /api/me only sets the caller's own mapping). This lets one
+    // admin token wire up household members' geofence/GPS reminders.
+    if ('ha_person' in body) setHaPerson(db, id, body.ha_person ?? null);
+    return c.json({ ...publicUser(getUser(db, id)!), ha_person: getHaPerson(db, id) });
   });
 
   api.delete('/admin/users/:id', requireAdmin, (c) => {
@@ -385,7 +416,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       body.recordOps = sanitizeRecordOps(db, userId, body.recordOps);
     if (Array.isArray(body.recordOps) && body.recordOps.length) {
       const fresh = ingestRecordOps(db, body.recordOps, true);
-      triggerAgents(db, serverDeviceId, fresh); // @mention / assignment -> agent run
+      triggerAgents(db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
     }
 
     const visible = open ? null : visibleItemIds(db, userId);
@@ -818,7 +849,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
   });
 
   api.post('/admin/agents/:id/test', requireAdmin, async (c) => {
-    const result = await testAgent(db, c.req.param('id'));
+    const result = await testAgent(db, c.req.param('id'), allowPrivate());
     return c.json(result);
   });
 
@@ -827,6 +858,52 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     deleteAgent(db, c.req.param('id'));
     if (agent) softDeleteUser(db, agent.user_id);
     return c.json({ ok: true });
+  });
+
+  // ----- admin: per-project CalDAV two-way sync --------------------------------
+  // Config is server-only (holds the CalDAV password) and keyed by the project's
+  // item id — deliberately NOT part of the CRDT sync. Requires a configured server.
+  const requireProject = (c: import('hono').Context) => {
+    const id = c.req.param('id');
+    if (!id) return null;
+    const proj = getItem(db, id);
+    return proj && proj.type === 'project' && !proj.deleted ? proj : null;
+  };
+
+  api.get('/projects/:id/caldav', requireAdmin, (c) => {
+    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+    const row = getCaldavConfigRow(db, c.req.param('id'));
+    return c.json({ config: row ? publicCaldavConfig(row) : null });
+  });
+
+  api.put('/projects/:id/caldav', requireAdmin, async (c) => {
+    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+    const b = (await c.req.json().catch(() => ({}))) as CaldavConfigPatch;
+    const row = upsertCaldavConfig(db, c.req.param('id'), b);
+    return c.json({ config: publicCaldavConfig(row) });
+  });
+
+  api.delete('/projects/:id/caldav', requireAdmin, (c) => {
+    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+    deleteCaldavConfig(db, c.req.param('id'));
+    return c.json({ ok: true });
+  });
+
+  api.post('/projects/:id/caldav/test', requireAdmin, async (c) => {
+    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+    return c.json(await testCaldav(db, c.req.param('id'), allowPrivate()));
+  });
+
+  api.post('/projects/:id/caldav/sync', requireAdmin, async (c) => {
+    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+    const r = await runSync(db, ensureCaldavDeviceId(db), c.req.param('id'), allowPrivate());
+    return c.json({
+      ok: r.errors.length === 0,
+      status: r.errors[0] ?? `ok (down ${r.pulled}, up ${r.pushed})`,
+      pulled: r.pulled,
+      pushed: r.pushed,
+      errors: r.errors,
+    });
   });
 
   // ----- Web Push -------------------------------------------------------------
@@ -868,6 +945,16 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return c.json({ ok: true });
   });
 
+  // Resolve the Carbon user a location report is about. A named HA `person` must
+  // map to a user (returns null if unmapped, so the caller can no-op rather than
+  // misattribute); an absent person falls back to the authenticated token's user.
+  // Returns null for the anonymous 'local' user too.
+  const resolvePerson = (c: Context<Env>, person: string | undefined): string | null => {
+    if (person) return resolveUserByHaPerson(db, person);
+    const uid = c.get('userId');
+    return uid === 'local' ? null : uid;
+  };
+
   // ----- GPS location feed (HA device-tracker tick) ---------------------------
   // Accepts a person's current GPS coordinates from HA.  HA should POST this
   // on a regular cadence (e.g. every 5 minutes) while the person is detected.
@@ -883,10 +970,12 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     if (typeof body.lat !== 'number' || typeof body.lng !== 'number') {
       return c.json({ error: 'lat and lng (numbers) required' }, 400);
     }
-    // Resolve which user: person mapping wins, else the token's user.
-    const userId =
-      (body.person ? resolveUserByHaPerson(db, body.person) : null) ?? c.get('userId');
-    if (userId === 'local') return c.json({ error: 'no user' }, 400);
+    // Resolve which user this is about. If a `person` is given it MUST map to a
+    // Carbon user — otherwise we'd misattribute (e.g. a household member's fix
+    // saved against the token owner). Only fall back to the token's user when no
+    // person is named at all.
+    const userId = resolvePerson(c, body.person);
+    if (!userId) return c.json({ ok: true, saved: false, reason: 'unmapped person' });
     saveGps(db, userId, body.lat, body.lng, body.accuracy ?? body.gps_accuracy ?? null);
     return c.json({ ok: true });
   });
@@ -903,10 +992,10 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       accuracy?: number;
       gps_accuracy?: number;
     };
-    // Resolve which user this is about: an HA person mapping wins, else the token's user.
-    const userId =
-      (body.person ? resolveUserByHaPerson(db, body.person) : null) ?? c.get('userId');
-    if (userId === 'local') return c.json({ error: 'no user' }, 400);
+    // Resolve which user this is about. A named `person` must map to a Carbon user
+    // (see /gps above); only an absent person falls back to the token's user.
+    const userId = resolvePerson(c, body.person);
+    if (!userId) return c.json({ ok: true, matched: 0, reason: 'unmapped person' });
 
     const isEnter = (body.event ?? 'enter') === 'enter';
     // Persist the user's current location so GET /where (and the Nearby view) can
@@ -943,6 +1032,25 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     const userId = c.get('userId');
     if (userId === 'local') return c.json({ zone: null, haGps: null });
     return c.json(getUserLocation(db, userId));
+  });
+
+  // Map a Carbon user to a Home Assistant `person.*` entity. Unlike Settings →
+  // HA person (which only maps the caller), this lets an admin wire up other
+  // household members so one HA token can drive everyone's geofence/GPS reminders.
+  // Token-usable (so HA automations / scripts can call it) but admin-gated:
+  // requireAdmin rejects all token auth, so we check the role directly instead.
+  // Body: { user: "<id|username>", person: "person.rachel" | null }.
+  api.post('/ha-person', requireScope('tasks:write'), async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'admin only' }, 403);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      user?: string;
+      person?: string | null;
+    };
+    if (!body.user) return c.json({ error: 'user (id or username) required' }, 400);
+    const target = getUser(db, body.user) ?? getUserByUsername(db, body.user);
+    if (!target || target.deleted) return c.json({ error: 'user not found' }, 404);
+    setHaPerson(db, target.id, body.person ?? null);
+    return c.json({ ok: true, user: target.username, ha_person: getHaPerson(db, target.id) });
   });
 
   // ----- billing (auto-renewing subscriptions) --------------------------------
@@ -1114,6 +1222,13 @@ const registry = createTenantRegistry({
 
 startReminderScheduler(() => registry.activeDbs());
 startGpsScheduler(() => registry.activeDbs());
+startCaldavScheduler(() =>
+  registry.activeCtxs().map((ctx) => ({
+    db: ctx.db,
+    deviceId: ensureCaldavDeviceId(ctx.db),
+    allowPrivate: agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
+  })),
+);
 
 // Lock is derived (no write fires at expiry — the dispatcher recomputes per request),
 // so the only control-plane housekeeping is GCing expired pending signups. Hourly.
@@ -1435,6 +1550,7 @@ host.patch('/tenants/:id', async (c) => {
     expiresAt?: string | null; // "Set Expiry" — when the workspace locks (null = never)
     locked?: boolean; // "Lock"/"Unlock" — manual operator lock (soft gate, still resolves)
     blobQuotaMb?: number | null; // storage cap in MB (null = server default, 0 = unlimited)
+    allowPrivateEndpoints?: boolean; // let this workspace's agents reach private/LAN hosts
   };
   if (b.status) {
     setTenantStatus(controlDb, id, b.status);
@@ -1450,6 +1566,9 @@ host.patch('/tenants/:id', async (c) => {
       id,
       b.blobQuotaMb == null ? null : Math.max(0, Math.round(b.blobQuotaMb)) * 1024 * 1024,
     );
+  }
+  if ('allowPrivateEndpoints' in b) {
+    setTenantAllowPrivate(controlDb, id, !!b.allowPrivateEndpoints);
   }
   return c.json({ ...getTenantById(controlDb, id) });
 });

@@ -161,6 +161,11 @@ export interface Tag {
   color: string | null;
   /** 'on-hold' tags defer their tasks out of Today/Available (OmniFocus-style). */
   status: TagStatus;
+  /** Manual order among same-parent siblings (sidebar drag-reorder). */
+  sort_order: number;
+  /** Optional location, JSON-encoded GeoReminder. A task without its own location
+   *  falls back to its tag's location, then its project's (task > tag > project). */
+  geo: string | null;
   created_at: string;
   updated_at: string;
   deleted: boolean;

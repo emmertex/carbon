@@ -7,9 +7,10 @@ import {
   getUser,
   getUserByUsername,
   createUser,
-  allItems,
-  tasksAtLocation,
+  tasksNearLocation,
   visibleItemIds,
+  heldTagIds,
+  itemHasHeldTag,
 } from '@carbon/core';
 import { notifyTask } from './push';
 
@@ -338,11 +339,15 @@ export function checkGpsProximity(db: Db): void {
     'SELECT user_id, lat, lng FROM gps_history',
   );
 
+  const held = heldTagIds(db);
   for (const pos of rows) {
     const visible = visibleItemIds(db, pos.user_id);
-    const items = allItems(db).filter((i) => visible.has(i.id));
     const point = { lat: pos.lat, lng: pos.lng };
-    const near = tasksAtLocation(items, point);
+    // Tag/project locations count as fallbacks (task > tag > project); on-hold
+    // tagged tasks are muted like deferred ones.
+    const near = tasksNearLocation(db, { point }).filter(
+      (t) => visible.has(t.id) && !itemHasHeldTag(db, t.id, held),
+    );
     for (const t of near) {
       const marker = `gps:${t.id}`;
       if (alreadySent(db, t.id, 'gps', marker)) continue;

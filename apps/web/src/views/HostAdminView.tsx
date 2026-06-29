@@ -140,6 +140,12 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
     await hostPatchTenant(creds, t.id, { blobQuotaMb }).catch((e) => setError((e as Error).message));
     void refresh();
   }
+  async function setAllowPrivate(t: TenantRecord, allowPrivateEndpoints: boolean) {
+    await hostPatchTenant(creds, t.id, { allowPrivateEndpoints }).catch((e) =>
+      setError((e as Error).message),
+    );
+    void refresh();
+  }
   async function remove(t: TenantRecord) {
     if (!confirm(`Delete workspace "${t.subdomain}"? This erases all its data.`)) return;
     await hostDeleteTenant(creds, t.id).catch((e) => setError((e as Error).message));
@@ -189,6 +195,7 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
               onLocked={setLocked}
               onExpiry={setExpiry}
               onQuota={setQuota}
+              onAllowPrivate={setAllowPrivate}
               onRemove={remove}
             />
           ))}
@@ -205,6 +212,7 @@ function TenantRow({
   onLocked,
   onExpiry,
   onQuota,
+  onAllowPrivate,
   onRemove,
 }: {
   t: TenantRecord;
@@ -213,6 +221,7 @@ function TenantRow({
   onLocked: (t: TenantRecord, locked: boolean) => void;
   onExpiry: (t: TenantRecord, expiresAt: string | null) => void;
   onQuota: (t: TenantRecord, blobQuotaMb: number | null) => void;
+  onAllowPrivate: (t: TenantRecord, allow: boolean) => void;
   onRemove: (t: TenantRecord) => void;
 }) {
   const locked = isLocked(t);
@@ -280,6 +289,20 @@ function TenantRow({
           className="w-16 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
         />
         MB
+      </label>
+
+      {/* Allow this workspace's agents to reach private/loopback/LAN endpoints. */}
+      <label
+        className="flex items-center gap-1 text-xs text-text-muted"
+        title="Allow this workspace's agents to reach private/loopback/LAN endpoints (e.g. a self-hosted LLM). Off by default to prevent SSRF."
+      >
+        <input
+          type="checkbox"
+          checked={!!t.allow_private_endpoints}
+          onChange={(e) => onAllowPrivate(t, e.target.checked)}
+          className="accent-accent"
+        />
+        Private LLM
       </label>
 
       {/* Expiry: set the date the workspace locks, or clear for "never". */}

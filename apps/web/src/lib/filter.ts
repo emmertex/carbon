@@ -62,8 +62,10 @@ export function applyFilters(db: Db, items: Item[], f: Filters): Item[] {
   // ALL is per-selected-tag: each chosen tag (or one of its descendants) must be present.
   const allSets = f.tagAll.length ? f.tagAll.map((id) => expandTagIds(db, [id])) : null;
   const needTags = anySet || noneSet || allSets || f.noTags;
-  // When hiding deferred, an on-hold tag also makes a task "deferred".
-  const heldSet = f.hideDeferred ? heldTagIds(db) : null;
+  // When hiding deferred — or when the list is set to hide on-hold tasks — an
+  // on-hold tag drops the task. (In the default 'fade' mode it stays, just dimmed.)
+  const hideHeld = f.hideDeferred || f.onHoldMode === 'hide';
+  const heldSet = hideHeld ? heldTagIds(db) : null;
   const projSet = f.projectIds.length ? projectDescendants(db, f.projectIds) : null;
   const now = Date.now();
   const held = pendingHideIds();
@@ -87,11 +89,10 @@ export function applyFilters(db: Db, items: Item[], f: Filters): Item[] {
     if (f.dueAfter && (!due || due < f.dueAfter)) return false;
     if (f.dueBefore && (!due || due > f.dueBefore)) return false;
 
-    if (f.hideDeferred) {
-      const deferredFuture = i.defer_date && new Date(i.defer_date).getTime() > now;
-      const onHold = heldSet && heldSet.size > 0 && tagIdsOf().some((id) => heldSet.has(id));
-      if (deferredFuture || onHold) return false;
-    }
+    const onHold = !!heldSet && heldSet.size > 0 && tagIdsOf().some((id) => heldSet.has(id));
+    if (f.hideDeferred && i.defer_date && new Date(i.defer_date).getTime() > now) return false;
+    // 'hide' on-hold mode (and the Hide-deferred toggle) drop on-hold-tagged tasks.
+    if (hideHeld && onHold) return false;
     if (blockedCache && isBlocked(db, i.id, blockedCache)) return false;
     if (projSet && !projSet.has(i.id)) return false;
     if (f.noProject && hasProjectAncestor(db, i)) return false;

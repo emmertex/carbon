@@ -1,6 +1,11 @@
    Skill: ~/.hermes/skills/productivity/carbon-agent/SKILL.md
     - Full API reference, webhook flow, bot permissions, error handling, pitfalls
     - Token stored in .credentials file
+
+   Skill: carbon-home-assistant/SKILL.md
+    - Wiring Home Assistant to Carbon: HA event → task, zone/GPS location reminders,
+      multi-person (person.* → Carbon user) mapping. Operator/setup side.
+    - Mirrors docs/home-assistant.md.
     
     Webhook listener: carbon-webhook-listener.py
     - Listens on port 9192 (doesn't conflict with your existing 9191 Uptime Kuma listener)

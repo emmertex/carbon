@@ -12,5 +12,7 @@ export const LINKS = {
   restApi: `${DOCS}/api.md`,
   homeAssistant: `${DOCS}/home-assistant.md`,
   docs: `${DOCS}/README.md`,
+  openSource: `${DOCS}/open-source.md`,
+  emmertex: 'https://emmertex.com',
   releases: `${REPO}/releases`,
 } as const;

@@ -101,8 +101,8 @@ function Shot({ src, label }: { src: string; label: string }) {
 }
 
 const PLANS = [
-  { label: "3 months", price: "$5" },
-  { label: "1 year", price: "$15", highlight: true },
+  { label: "3 months", price: "$7.50" },
+  { label: "1 year", price: "$20", highlight: true },
 ];
 
 /**
@@ -241,7 +241,10 @@ export function LandingView() {
                     : "border-border")
                 }
               >
-                <div className="text-2xl font-bold">{p.price}</div>
+                <div className="text-2xl font-bold">
+                  {p.price}
+                  <span className="ml-1 text-xs font-normal text-text-muted">AUD</span>
+                </div>
                 <div className="text-xs text-text-muted">{p.label}</div>
               </div>
             ))}

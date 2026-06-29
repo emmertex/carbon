@@ -11,9 +11,24 @@ export function AboutSection() {
         <span className="font-mono text-text-faint">({__GIT_HASH__})</span>
       </p>
       <p className="mt-1 text-xs text-text-faint">Device ID: {getDeviceId()}</p>
-      <div className="mt-3">
-        <DocLink href={LINKS.docs}>Carbon documentation</DocLink>
+      <div className="mt-3 space-y-1.5">
+        <div>
+          <DocLink href={LINKS.docs}>Carbon documentation</DocLink>
+        </div>
+        <div>
+          <DocLink href={LINKS.openSource}>Thanks to the following OSS Projects</DocLink>
+        </div>
       </div>
+      <p className="mt-4 text-sm text-text-muted">
+        <a
+          href={LINKS.emmertex}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent hover:underline"
+        >
+          Emmertex P/L
+        </a>
+      </p>
     </SettingsSection>
   );
 }

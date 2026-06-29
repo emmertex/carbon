@@ -60,6 +60,8 @@ export interface TaskRowData {
   shared?: boolean;
   /** Blocked/unavailable: a sequential earlier sibling or a predecessor is unmet. */
   blocked?: boolean;
+  /** Carries an on-hold tag — rendered faded (OmniFocus "on hold"). */
+  onHold?: boolean;
 }
 
 /** Indentation: subtle, capped, and tighter on phones so deep trees don't run
@@ -99,6 +101,7 @@ export function TaskRow({
   hasComments,
   shared,
   blocked,
+  onHold,
   showProject = false,
   indent = 0,
   collapsed,
@@ -212,6 +215,7 @@ export function TaskRow({
         expanded ? 'py-3' : 'py-2',
         selected ? 'bg-accent-soft' : 'hover:bg-surface-2',
         focused && 'ring-2 ring-inset ring-accent',
+        onHold && !done && 'opacity-50',
       )}
     >
       <button

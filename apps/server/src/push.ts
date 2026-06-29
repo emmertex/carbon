@@ -1,5 +1,5 @@
 import webpush from 'web-push';
-import { type Db, getItem, listAssigneesForItem } from '@carbon/core';
+import { type Db, getItem, listAssigneesForItem, heldTagIds, itemHasHeldTag } from '@carbon/core';
 import { sendFcmToUser } from './fcm';
 
 function getMeta(db: Db, key: string): string | null {
@@ -168,7 +168,10 @@ export async function checkReminders(db: Db): Promise<void> {
          OR (reminder_at IS NOT NULL AND reminder_at <= ?))`,
     [nowIso, nowIso, nowIso],
   );
+  // Tasks carrying an on-hold tag behave like deferred — all their alerts are muted.
+  const held = heldTagIds(db);
   for (const t of due) {
+    if (itemHasHeldTag(db, t.id, held)) continue;
     if (t.reminder_at && t.reminder_at <= nowIso && !alreadySent(db, t.id, 'reminder', t.reminder_at)) {
       await notifyTask(db, t.id, {
         title: 'Reminder',

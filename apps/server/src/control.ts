@@ -27,6 +27,9 @@ export interface TenantRecord {
   /** Per-workspace blob storage cap in bytes. Null = use the server default;
    *  0 = unlimited. Enforced before accepting new blob uploads. */
   blob_quota_bytes: number | null;
+  /** 1 = this workspace's agents may target private/loopback/LAN endpoints (e.g. a
+   *  self-hosted LLM); null/0 = blocked by the SSRF guard. Host-admin controlled. */
+  allow_private_endpoints: number | null;
 }
 
 /** Lock = derived state. A workspace is "locked" (soft gate) when it is operationally
@@ -109,6 +112,7 @@ export function openControlDb(path: string): Db {
   ensureColumn(db, 'tenants', 'locked_at', 'TEXT');
   ensureColumn(db, 'tenants', 'admin_email', 'TEXT');
   ensureColumn(db, 'tenants', 'blob_quota_bytes', 'INTEGER');
+  ensureColumn(db, 'tenants', 'allow_private_endpoints', 'INTEGER');
   // Subscription columns added for Square auto-renewing subscriptions.
   ensureColumn(db, 'subscriptions', 'square_customer_id', 'TEXT');
   ensureColumn(db, 'subscriptions', 'square_subscription_id', 'TEXT');
@@ -247,6 +251,12 @@ export function setTenantBlobQuota(db: Db, id: string, bytes: number | null): vo
  *  host-admin-created tenant had none). Used for receipts + the Square customer. */
 export function setTenantAdminEmail(db: Db, id: string, email: string | null): void {
   db.run('UPDATE tenants SET admin_email = ? WHERE id = ?', [email, id]);
+}
+
+/** Host-admin "Allow private endpoints": let this workspace's agents reach
+ *  private/loopback/LAN hosts despite the multi-tenant SSRF guard. */
+export function setTenantAllowPrivate(db: Db, id: string, allow: boolean): void {
+  db.run('UPDATE tenants SET allow_private_endpoints = ? WHERE id = ?', [allow ? 1 : 0, id]);
 }
 
 /** Soft-delete then remove the tenant's data dir. Caller handles export/grace first. */

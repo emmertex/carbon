@@ -46,7 +46,7 @@ export function buildTagTree(tags: Tag[], counts: Record<string, number>): TagNo
     }
   }
   const sortNodes = (nodes: TagNode[]) => {
-    nodes.sort((a, b) => a.leaf.localeCompare(b.leaf));
+    nodes.sort((a, b) => a.tag.sort_order - b.tag.sort_order || a.leaf.localeCompare(b.leaf));
     nodes.forEach((n) => sortNodes(n.children));
   };
   sortNodes(roots);

@@ -117,14 +117,43 @@ async function nativeFix(): Promise<GpsFix | null> {
   return p ? { lat: p.lat, lng: p.lng, accuracy: p.accuracy ?? null, updatedAt: Date.now() } : null;
 }
 
+interface NominatimAddress {
+  house_number?: string;
+  road?: string;
+  neighbourhood?: string;
+  suburb?: string;
+  village?: string;
+  town?: string;
+  city?: string;
+  municipality?: string;
+  state?: string;
+  postcode?: string;
+}
+
+/** Build a concise street-level label, e.g. "55 Named St, Michigan, NSW, 4000". */
+function formatAddress(addr: NominatimAddress): string | null {
+  const street = [addr.house_number, addr.road].filter(Boolean).join(' ');
+  const locality =
+    addr.suburb ?? addr.neighbourhood ?? addr.village ?? addr.town ?? addr.city ?? addr.municipality;
+  const parts = [street, locality, addr.state, addr.postcode].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
+
 /** Best-effort reverse geocode via OpenStreetMap Nominatim (no key). Never blocks. */
 async function reverseGeocode(point: { lat: number; lng: number }): Promise<string | null> {
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=json&zoom=14&lat=${point.lat}&lon=${point.lng}`;
+    // zoom=18 resolves to building/street-number level; addressdetails gives the
+    // structured fields we assemble into a short label instead of the verbose
+    // display_name (or the bare POI `name`, which is often empty for a house).
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&lat=${point.lat}&lon=${point.lng}`;
     const res = await fetch(url, { headers: { Accept: 'application/json' } });
     if (!res.ok) return null;
-    const body = (await res.json()) as { name?: string; display_name?: string };
-    return body.name || body.display_name || null;
+    const body = (await res.json()) as {
+      name?: string;
+      display_name?: string;
+      address?: NominatimAddress;
+    };
+    return (body.address && formatAddress(body.address)) || body.name || body.display_name || null;
   } catch {
     return null;
   }
@@ -133,7 +162,14 @@ async function reverseGeocode(point: { lat: number; lng: number }): Promise<stri
 /** Recompute the merged convenience fields (zone/point) from the three sources.
  *  Server HA GPS wins over the native device fix; the zone drives task matching. */
 function merge(sources: Pick<WhereState, 'haZone' | 'haGps' | 'deviceGps'>): Partial<WhereState> {
-  const gps = sources.haGps ?? sources.deviceGps;
+  // HA GPS still wins over the native fix, but only while it's fresh: a stale HA
+  // device-tracker fix must not override a live device position (it would put the
+  // merged point — and the reverse-geocoded place + task matching — somewhere the
+  // user no longer is). Same staleness window as the source icons.
+  const haGps = sources.haGps && !isFixStale(sources.haGps.updatedAt) ? sources.haGps : null;
+  const deviceGps =
+    sources.deviceGps && !isFixStale(sources.deviceGps.updatedAt) ? sources.deviceGps : null;
+  const gps = haGps ?? deviceGps;
   return {
     ...sources,
     zone: sources.haZone?.name ?? null,

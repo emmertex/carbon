@@ -9,7 +9,6 @@ import {
   Play,
   Square,
   Lock,
-  MapPin,
   Bell,
   Target,
 } from "lucide-react";
@@ -32,7 +31,6 @@ import {
   setCompleted,
   deleteItem,
   parseRecurrence,
-  parseGeo,
   getTimeLogs,
   getTimeContext,
   sessionAnchor,
@@ -58,6 +56,9 @@ import {
   type Item,
 } from "@carbon/core";
 import { ColorSwatches } from "./ColorSwatches";
+import { GeoEditor } from "./GeoEditor";
+import { CalDavSettings } from "./CalDavSettings";
+import { getServerConfig } from "@/lib/config";
 import { Comments } from "./Comments";
 import { Attachments } from "./Attachments";
 import { Section } from "./Section";
@@ -362,10 +363,6 @@ export function TaskDetail({ id }: { id: string }) {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const seededId = useRef<string | null>(null);
   const [tagInput, setTagInput] = useState("");
-  const [geoLabel, setGeoLabel] = useState("");
-  const [geoLat, setGeoLat] = useState("");
-  const [geoLng, setGeoLng] = useState("");
-  const [geoRadius, setGeoRadius] = useState("");
 
   useEffect(() => {
     if (!data?.item) return;
@@ -381,16 +378,7 @@ export function TaskDetail({ id }: { id: string }) {
       (!editingNote && document.activeElement !== noteRef.current)
     )
       setNote(data.item.note ?? "");
-    // Geo inputs only reseed on task switch — they're edited as a set, so live-patching
-    // one from a remote change mid-edit would be jarring; reopen to pull remote geo.
-    if (switching) {
-      const g = parseGeo(data.item.geo);
-      setGeoLabel(g?.label ?? "");
-      setGeoLat(g ? String(g.lat) : "");
-      setGeoLng(g ? String(g.lng) : "");
-      setGeoRadius(g ? String(g.radius) : "");
-    }
-  }, [id, data?.item.title, data?.item.note, data?.item.geo, editingNote]);
+  }, [id, data?.item.title, data?.item.note, editingNote]);
 
   // Leave note-edit mode when switching tasks; focus the textarea when entering it.
   useEffect(() => setEditingNote(false), [id]);
@@ -457,6 +445,31 @@ export function TaskDetail({ id }: { id: string }) {
     else mutate((db, dev) => startTask(db, dev, id, uid));
   }
 
+  // Move the item between the three lifecycle states. `done` runs the full
+  // completion path (recurrence spawn, session-interrupt prompt, grace-window
+  // hold); `active` un-completes; `dropped` abandons without completing — no
+  // recurrence, and any stale completed_at is cleared.
+  function setStatus(next: Item["status"]) {
+    const uid = currentUser?.id ?? null;
+    mutate((db, dev) => {
+      if (next === "done") {
+        setCompleted(db, dev, id, true);
+        const ctx = getTimeContext(db, uid);
+        if (ctx.session && ctx.session.item_id !== sessionAnchor(db, id)) {
+          useStore.getState().setInterrupt({
+            project: getItem(db, ctx.session.item_id)?.title || "project",
+          });
+        }
+      } else if (next === "active") {
+        setCompleted(db, dev, id, false);
+      } else {
+        updateItem(db, dev, id, { status: "dropped", completed_at: null });
+      }
+    });
+    if (next === "done") holdCompleted(id);
+    else releaseCompleted(id);
+  }
+
   const patch = (p: Parameters<typeof updateItem>[3]) =>
     mutate((db, dev) => updateItem(db, dev, id, p));
 
@@ -515,47 +528,6 @@ export function TaskDetail({ id }: { id: string }) {
 
   function setRecurrence(next: RecurrenceRule | null) {
     patch({ recurrence: next ? JSON.stringify(next) : null });
-  }
-
-  function commitGeo() {
-    if (!geoLat && !geoLng && !geoLabel) {
-      if (item.geo) patch({ geo: null });
-      return;
-    }
-    patch({
-      geo: JSON.stringify({
-        lat: Number(geoLat) || 0,
-        lng: Number(geoLng) || 0,
-        radius: Number(geoRadius) || 150,
-        label: geoLabel.trim() || undefined,
-      }),
-    });
-  }
-  function useMyLocation() {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition((pos) => {
-      const lat = Number(pos.coords.latitude.toFixed(6));
-      const lng = Number(pos.coords.longitude.toFixed(6));
-      const radius = Number(geoRadius) || 150;
-      setGeoLat(String(lat));
-      setGeoLng(String(lng));
-      setGeoRadius(String(radius));
-      patch({
-        geo: JSON.stringify({
-          lat,
-          lng,
-          radius,
-          label: geoLabel.trim() || undefined,
-        }),
-      });
-    });
-  }
-  function clearGeo() {
-    setGeoLabel("");
-    setGeoLat("");
-    setGeoLng("");
-    setGeoRadius("");
-    patch({ geo: null });
   }
 
   function remove() {
@@ -667,28 +639,7 @@ export function TaskDetail({ id }: { id: string }) {
         {/* Always-visible essentials */}
         <div className="flex items-start gap-2.5">
           <button
-            onClick={() => {
-              const uid = currentUser?.id ?? null;
-              mutate((db, dev) => {
-                setCompleted(db, dev, id, !done);
-                if (!done) {
-                  const ctx = getTimeContext(db, uid);
-                  if (
-                    ctx.session &&
-                    ctx.session.item_id !== sessionAnchor(db, id)
-                  ) {
-                    useStore
-                      .getState()
-                      .setInterrupt({
-                        project:
-                          getItem(db, ctx.session.item_id)?.title || "project",
-                      });
-                  }
-                }
-              });
-              if (!done) holdCompleted(id);
-              else releaseCompleted(id);
-            }}
+            onClick={() => setStatus(done ? "active" : "done")}
             className={cn(
               "mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
               done
@@ -699,25 +650,55 @@ export function TaskDetail({ id }: { id: string }) {
           >
             <Check size={13} strokeWidth={3} />
           </button>
-          <textarea
-            ref={titleRef}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={commitTitle}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commitTitle();
-                e.currentTarget.blur();
-              }
-            }}
-            rows={1}
-            placeholder="Title"
-            className={cn(
-              "flex-1 resize-none bg-transparent text-lg font-semibold outline-none",
-              done && "text-text-faint line-through",
-            )}
-          />
+          <div className="flex-1">
+            <textarea
+              ref={titleRef}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={commitTitle}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitTitle();
+                  e.currentTarget.blur();
+                }
+              }}
+              rows={1}
+              placeholder="Title"
+              className={cn(
+                "w-full resize-none bg-transparent text-lg font-semibold outline-none",
+                done && "text-text-faint line-through",
+              )}
+            />
+            {/* Lifecycle status — three-state segmented pill directly under the
+                title. The complete-checkbox (left) toggles active↔done; this also
+                exposes "dropped". */}
+            <div className="mt-1 inline-flex overflow-hidden rounded-full border border-border text-xs">
+              {(
+                [
+                  ["active", "Active", "bg-accent text-accent-fg"],
+                  ["done", "Done", "bg-success text-white"],
+                  ["dropped", "Dropped", "bg-surface-2 text-text-muted line-through"],
+                ] as [Item["status"], string, string][]
+              ).map(([s, label, selCls], i) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStatus(s)}
+                  aria-pressed={item.status === s}
+                  className={cn(
+                    "px-3 py-1 font-medium transition-colors",
+                    i > 0 && "border-l border-border",
+                    item.status === s
+                      ? selCls
+                      : "text-text-muted hover:bg-surface-2 hover:text-text",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div>
@@ -774,6 +755,14 @@ export function TaskDetail({ id }: { id: string }) {
                 onChange={(c) => patch({ color: c })}
               />
             </div>
+            {/* CalDAV two-way sync is server-side and holds secrets, so it's
+                admin-only and hidden in local-only/offline mode (no server). */}
+            {currentUser?.role === "admin" && !!getServerConfig().url && (
+              <div>
+                <Label>Calendar sync</Label>
+                <CalDavSettings projectId={id} />
+              </div>
+            )}
           </>
         )}
 
@@ -1164,59 +1153,11 @@ export function TaskDetail({ id }: { id: string }) {
               )}
             </div>
           )}
-          <div>
-            <Label>
-              <span className="inline-flex items-center gap-1">
-                <MapPin size={12} /> Location reminder
-              </span>
-            </Label>
-            <input
-              className={inputCls}
-              placeholder="Place or HA zone name (e.g. Home)"
-              value={geoLabel}
-              onChange={(e) => setGeoLabel(e.target.value)}
-              onBlur={commitGeo}
-            />
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              <input
-                className={inputCls}
-                placeholder="lat"
-                value={geoLat}
-                onChange={(e) => setGeoLat(e.target.value)}
-                onBlur={commitGeo}
-              />
-              <input
-                className={inputCls}
-                placeholder="lng"
-                value={geoLng}
-                onChange={(e) => setGeoLng(e.target.value)}
-                onBlur={commitGeo}
-              />
-              <input
-                className={inputCls}
-                placeholder="radius m"
-                value={geoRadius}
-                onChange={(e) => setGeoRadius(e.target.value)}
-                onBlur={commitGeo}
-              />
-            </div>
-            <div className="mt-2 flex gap-2">
-              <button
-                onClick={useMyLocation}
-                className="rounded-lg border border-border px-2.5 py-1 text-xs hover:bg-surface-2"
-              >
-                Use my location
-              </button>
-              {(geoLat || geoLabel) && (
-                <button
-                  onClick={clearGeo}
-                  className="rounded-lg border border-border px-2.5 py-1 text-xs text-text-muted hover:bg-surface-2"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
+          <GeoEditor
+            value={item.geo}
+            resetKey={id}
+            onChange={(geo) => patch({ geo })}
+          />
         </Section>
 
         {/* Dependencies — explicit predecessor/successor links (Gantt-style). */}

@@ -768,6 +768,8 @@ interface TagRow extends Row {
   name: string;
   color: string | null;
   status: string | null;
+  sort_order: number;
+  geo: string | null;
   created_at: string;
   updated_at: string;
   deleted: number;
@@ -786,6 +788,8 @@ function rowToTag(t: TagRow): Tag {
     name: t.name,
     color: t.color,
     status: (t.status as TagStatus) || 'active',
+    sort_order: t.sort_order ?? 0,
+    geo: t.geo ?? null,
     created_at: t.created_at,
     updated_at: t.updated_at,
     deleted: !!t.deleted,
@@ -832,7 +836,19 @@ export function tagId(name: string): string {
 const itemTagRowId = (itemId: string, tag: string): string => `it:${itemId}:${tag}`;
 
 export function listTags(db: Db): Tag[] {
-  return db.all<TagRow>('SELECT * FROM tags WHERE deleted = 0 ORDER BY name').map(rowToTag);
+  return db
+    .all<TagRow>('SELECT * FROM tags WHERE deleted = 0 ORDER BY sort_order, name')
+    .map(rowToTag);
+}
+
+/** Next sort_order after the last sibling sharing the given parent path. */
+function nextTagSortOrder(db: Db, parentPath: string): number {
+  const rows = db.all<{ name: string; sort_order: number }>(
+    'SELECT name, sort_order FROM tags WHERE deleted = 0',
+  );
+  let max = 0;
+  for (const r of rows) if (tagParentPath(r.name) === parentPath) max = Math.max(max, r.sort_order ?? 0);
+  return max + 1;
 }
 
 /** Emit a tag record-op from a fully-formed Tag (stamps a fresh updated_at). */
@@ -855,6 +871,8 @@ function ensureAncestors(db: Db, deviceId: string, name: string): void {
         name: path,
         color: null,
         status: 'active',
+        sort_order: nextTagSortOrder(db, tagParentPath(path)),
+        geo: null,
         created_at: new Date().toISOString(),
         deleted: false,
       });
@@ -873,6 +891,8 @@ export function createTag(db: Db, deviceId: string, rawName: string, color: stri
     name,
     color: color ?? existing?.color ?? null,
     status: (existing?.status as TagStatus) || 'active',
+    sort_order: existing?.sort_order ?? nextTagSortOrder(db, tagParentPath(name)),
+    geo: existing?.geo ?? null,
     created_at: existing?.created_at ?? new Date().toISOString(),
     deleted: false,
   });
@@ -882,7 +902,7 @@ export function updateTag(
   db: Db,
   deviceId: string,
   id: string,
-  patch: { color?: string | null; status?: TagStatus },
+  patch: { color?: string | null; status?: TagStatus; geo?: string | null; sort_order?: number },
 ): void {
   const existing = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [id]);
   if (!existing) return;
@@ -890,8 +910,16 @@ export function updateTag(
     ...rowToTag(existing),
     color: patch.color !== undefined ? patch.color : existing.color,
     status: patch.status ?? ((existing.status as TagStatus) || 'active'),
+    geo: patch.geo !== undefined ? patch.geo : existing.geo ?? null,
+    sort_order: patch.sort_order ?? existing.sort_order ?? 0,
     deleted: false,
   });
+}
+
+/** Set a tag's position among its siblings (web computes the fractional midpoint,
+ *  mirroring reorderItem). */
+export function reorderTag(db: Db, deviceId: string, id: string, sortOrder: number): void {
+  updateTag(db, deviceId, id, { sort_order: sortOrder });
 }
 
 /**
@@ -921,14 +949,20 @@ export function moveTag(db: Db, deviceId: string, id: string, newRawName: string
     if (targetId === node.id) continue; // path unchanged for this node
 
     const existingTarget = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [targetId]);
+    const liveTarget = existingTarget && !existingTarget.deleted ? existingTarget : null;
+    // The dragged node itself lands at the end of its new sibling list; deeper
+    // descendants keep their relative order.
+    const sort_order =
+      liveTarget?.sort_order ??
+      (node.id === id ? nextTagSortOrder(db, tagParentPath(targetName)) : node.sort_order ?? 0);
     emitTag(db, deviceId, {
       id: targetId,
       name: targetName,
-      // Prefer a live target's own colour/status; otherwise carry the node's.
-      color: existingTarget && !existingTarget.deleted ? existingTarget.color : node.color,
-      status:
-        ((existingTarget && !existingTarget.deleted ? existingTarget.status : node.status) as TagStatus) ||
-        'active',
+      // Prefer a live target's own colour/status/geo; otherwise carry the node's.
+      color: liveTarget ? liveTarget.color : node.color,
+      status: ((liveTarget ? liveTarget.status : node.status) as TagStatus) || 'active',
+      sort_order,
+      geo: liveTarget ? liveTarget.geo ?? null : node.geo ?? null,
       created_at: existingTarget?.created_at ?? node.created_at,
       deleted: false,
     });
@@ -999,6 +1033,19 @@ export function onHoldTagIds(db: Db): Set<string> {
       .all<{ id: string }>("SELECT id FROM tags WHERE deleted = 0 AND status = 'on-hold'")
       .map((r) => r.id),
   );
+}
+
+/** The expanded on-hold tag set (on-hold tags plus all their descendants). */
+export function heldTagIds(db: Db): Set<string> {
+  return expandTagIds(db, [...onHoldTagIds(db)]);
+}
+
+/** True if `itemId` carries any tag in `held` (defaults to the live held set).
+ *  Used to suppress reminders for tasks tagged on-hold. */
+export function itemHasHeldTag(db: Db, itemId: string, held?: Set<string>): boolean {
+  const set = held ?? heldTagIds(db);
+  if (set.size === 0) return false;
+  return getItemTags(db, itemId).some((t) => set.has(t.id));
 }
 
 export function deleteTag(db: Db, deviceId: string, id: string): void {
@@ -1082,16 +1129,19 @@ export function upsertTag(db: Db, tag: Tag): void {
   ]);
   if (existing && existing.updated_at > tag.updated_at) return;
   db.run(
-    `INSERT INTO tags (id, name, color, status, created_at, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO tags (id, name, color, status, sort_order, geo, created_at, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name, color = excluded.color, status = excluded.status,
+       sort_order = excluded.sort_order, geo = excluded.geo,
        updated_at = excluded.updated_at, deleted = excluded.deleted`,
     [
       tag.id,
       tag.name,
       tag.color,
       tag.status || 'active',
+      tag.sort_order ?? 0,
+      tag.geo ?? null,
       tag.created_at,
       tag.updated_at,
       tag.deleted ? 1 : 0,

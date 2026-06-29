@@ -33,8 +33,8 @@ In **Settings → AI agents** create an agent of kind **Agentic webhook
 On creation Carbon issues a **one-time API token** (shown once). This token belongs
 to the bot user, so anything you post appears authored by the bot and is correctly
 permissioned. **Save it** and configure your skill with:
-
-- `CARBON_URL` — base URL, e.g. `https://carbon.etx.sx`
+Configure your skill with:
+- `CARBON_URL` — base URL with workspace subdomain (e.g. `https://my.carbon.etx.sx`), or `https://carbon.etx.sx` for self-hosted without subdomains
 - `CARBON_TOKEN` — the issued agent token
 
 > You *can* instead use a human's token (e.g. your Home Assistant token). It works,

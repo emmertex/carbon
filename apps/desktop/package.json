@@ -5,9 +5,10 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "NO_STRIP=true tauri build"
+    "build": "cross-env NO_STRIP=true tauri build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "cross-env": "^10.1.0"
   }
 }

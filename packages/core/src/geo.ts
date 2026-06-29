@@ -1,6 +1,6 @@
 import type { GeoReminder, Item } from './types';
 import type { Db } from './db';
-import { allItems, getItem, projectAncestor } from './repo';
+import { allItems, getItem, getItemTags, projectAncestor } from './repo';
 
 export function parseGeo(json: string | null): GeoReminder | null {
   if (!json) return null;
@@ -90,11 +90,23 @@ export function tasksNearLocation(db: Db, loc: CurrentLocation): Item[] {
     return hit;
   };
 
+  // A tag-geo cache keyed by tag id, so each tag's location is parsed/tested once.
+  const tagCache = new Map<string, boolean>();
+  const taskTagMatches = (taskId: string): boolean =>
+    getItemTags(db, taskId).some((tag) => {
+      const cached = tagCache.get(tag.id);
+      if (cached !== undefined) return cached;
+      const g = parseGeo(tag.geo);
+      const hit = !!g && geoMatches(g, loc);
+      tagCache.set(tag.id, hit);
+      return hit;
+    });
+
   const out: Item[] = [];
   for (const t of allItems(db)) {
     if (t.type !== 'task' || t.status !== 'active' || t.deleted) continue;
 
-    // The task itself, then every ancestor up the parent chain.
+    // Precedence: the task (and its parents), then its tags, then its project.
     let matched = itemMatches(t.id);
     if (!matched) {
       const seen = new Set<string>([t.id]);
@@ -108,6 +120,8 @@ export function tasksNearLocation(db: Db, loc: CurrentLocation): Item[] {
         pid = getItem(db, pid)?.parent_id ?? null;
       }
     }
+    // A tag location the task carries (overrides the project's location).
+    if (!matched && taskTagMatches(t.id)) matched = true;
     // Finally the nearest project ancestor (cheap if already walked above).
     if (!matched) {
       const proj = projectAncestor(db, t.id);

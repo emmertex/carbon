@@ -7,6 +7,7 @@ import {
   SlidersHorizontal,
   Ban,
   CalendarClock,
+  Pause,
   X,
 } from "lucide-react";
 import {
@@ -105,6 +106,18 @@ export function ViewControls({
         ))}
 
         <Chip
+          active={f.onHoldMode === "hide"}
+          onClick={() =>
+            setFilters({ onHoldMode: f.onHoldMode === "hide" ? "fade" : "hide" })
+          }
+          aria-label="Hide on-hold"
+          title="Hide on-hold tasks (default: faded)"
+          className="px-1.5"
+        >
+          <Pause size={14} />
+        </Chip>
+
+        <Chip
           active={open || anyFilterActive(f)}
           onClick={() => setOpen((o) => !o)}
           aria-label="Filters"
@@ -160,6 +173,16 @@ export function ViewControls({
                 <Icon size={12} /> {label}
               </Chip>
             ))}
+            <Chip
+              active={f.onHoldMode === "hide"}
+              onClick={() =>
+                setFilters({
+                  onHoldMode: f.onHoldMode === "hide" ? "fade" : "hide",
+                })
+              }
+            >
+              <Pause size={12} /> Hide on-hold
+            </Chip>
           </Group>
 
           {tags.length > 0 && (

@@ -15,6 +15,8 @@ export interface TenantRecord {
   locked_at: string | null;
   admin_email: string | null;
   blob_quota_bytes: number | null;
+  /** 1 = agents may target private/loopback/LAN endpoints; null/0 = blocked. */
+  allow_private_endpoints: number | null;
   url: string;
 }
 
@@ -113,6 +115,7 @@ export async function hostPatchTenant(
     expiresAt?: string | null;
     locked?: boolean;
     blobQuotaMb?: number | null;
+    allowPrivateEndpoints?: boolean;
   },
 ): Promise<void> {
   const res = await fetch(`${base()}/host/tenants/${id}`, {

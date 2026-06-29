@@ -7,6 +7,7 @@ import { ensureServerTables } from './auth';
 import { ensurePushTables, initVapid } from './push';
 import { ensureFcmTable } from './fcm';
 import { ensureAgentTables } from './agents';
+import { ensureCaldavTables } from './caldav';
 
 /** Everything a single tenant's request handlers close over. One per family DB. */
 export interface TenantCtx {
@@ -43,6 +44,7 @@ export function initTenantDb(opts: {
   ensurePushTables(db);
   ensureFcmTable(db);
   ensureAgentTables(db);
+  ensureCaldavTables(db);
   const vapidPublicKey = initVapid(db);
   return {
     id: opts.id,
@@ -74,6 +76,9 @@ export interface TenantRegistry {
   getCtx(subdomain: string | null): TenantCtx | null;
   /** DBs that the reminder scheduler must sweep: default + every active tenant. */
   activeDbs(): Db[];
+  /** Full ctxs (db + serverDeviceId + id) for jobs that need more than the DB
+   *  handle — e.g. the CalDAV connector needs each tenant's allow-private flag. */
+  activeCtxs(): TenantCtx[];
   /** Drop a tenant from the cache and close its DB handle (suspend/delete). */
   evict(id: string): void;
 }
@@ -142,6 +147,11 @@ export function createTenantRegistry(opts: {
         dbs.push(entry.ctx.db);
       }
       return dbs;
+    },
+    activeCtxs() {
+      const ctxs: TenantCtx[] = [opts.defaultCtx];
+      for (const loc of opts.listActive()) ctxs.push(load(loc).ctx);
+      return ctxs;
     },
     evict(id) {
       const entry = cache.get(id);

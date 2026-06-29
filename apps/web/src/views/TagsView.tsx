@@ -1,5 +1,6 @@
+import { useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Pencil, Pause } from 'lucide-react';
+import { Pause } from 'lucide-react';
 import {
   listTags,
   getItemsByTag,
@@ -19,8 +20,13 @@ import { abbreviateTagPath } from '@/lib/tagLabel';
 
 export function TagsView() {
   const { id } = useParams();
-  const openTagsPanel = useStore((s) => s.openTagsPanel);
-  const tagsPanelOpen = useStore((s) => s.tagsPanelOpen);
+  const select = useStore((s) => s.select);
+  const openDetail = useStore((s) => s.openDetail);
+
+  // Deep-link / refresh on /tag/:id opens the tag's detail pane.
+  useEffect(() => {
+    if (id) select(id, 'tag');
+  }, [id, select]);
 
   const data = useQuery(
     (db) => {
@@ -55,16 +61,9 @@ export function TagsView() {
       <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
         <h1 className="text-2xl font-bold tracking-tight">Tags</h1>
         <p className="mt-2 text-sm text-text-muted">
-          Pick a tag from the Tags panel to see everything filed under it (including nested tags).
+          Pick a tag from the sidebar to see everything filed under it (including nested tags), or
+          to edit its colour, hold status, and location.
         </p>
-        {!tagsPanelOpen && (
-          <button
-            onClick={openTagsPanel}
-            className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-          >
-            <Pencil size={15} /> Open Tags panel
-          </button>
-        )}
       </div>
     );
   }
@@ -76,9 +75,18 @@ export function TagsView() {
     <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div>
-          <h1 className="flex items-center gap-1.5 text-2xl font-bold tracking-tight">
+          {/* Tapping the title opens the tag detail pane (on compact screens the
+              overlay only renders on detailOpen). */}
+          <h1
+            onClick={() => {
+              select(selected.id, 'tag');
+              openDetail();
+            }}
+            className="flex cursor-pointer items-center gap-1.5 text-2xl font-bold tracking-tight hover:text-accent"
+            title="Tag details"
+          >
             <TagMark color={color} className="text-xl" />
-            <span title={selected.name}>{abbreviateTagPath(selected.name)}</span>
+            <span>{abbreviateTagPath(selected.name)}</span>
           </h1>
           <p className="mt-0.5 flex items-center gap-2 text-sm text-text-muted">
             {rows.length} {rows.length === 1 ? 'task' : 'tasks'} (incl. nested)
@@ -89,15 +97,6 @@ export function TagsView() {
             )}
           </p>
         </div>
-        {!tagsPanelOpen && (
-          <button
-            onClick={openTagsPanel}
-            title="Manage tags"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm text-text-muted hover:bg-surface-2"
-          >
-            <Pencil size={14} /> Manage
-          </button>
-        )}
       </div>
 
       <div className="mb-3">

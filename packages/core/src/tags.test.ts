@@ -22,6 +22,9 @@ import {
   expandTagIds,
   effectiveTagColor,
   onHoldTagIds,
+  heldTagIds,
+  itemHasHeldTag,
+  reorderTag,
 } from './repo';
 
 function openMemoryDb(): Db {
@@ -150,4 +153,52 @@ test('tag status: defaults active, settable to on-hold', () => {
   assert.ok(held.has(tagId('Waiting')));
   // status survives a round-trip through the row
   assert.equal(listTags(db).find((x) => x.id === tagId('Waiting'))!.status, 'on-hold');
+});
+
+test('tags get an incrementing sort_order and reorderTag repositions them', () => {
+  const db = openMemoryDb();
+  const a = createTag(db, DEV, 'Alpha');
+  const b = createTag(db, DEV, 'Bravo');
+  const c = createTag(db, DEV, 'Charlie');
+  assert.ok(b.sort_order > a.sort_order);
+  assert.ok(c.sort_order > b.sort_order);
+  // listTags is ordered by sort_order, so creation order is preserved.
+  assert.deepEqual(listTags(db).map((t) => t.name), ['Alpha', 'Bravo', 'Charlie']);
+  // Move Charlie between Alpha and Bravo via a fractional midpoint.
+  reorderTag(db, DEV, tagId('Charlie'), (a.sort_order + b.sort_order) / 2);
+  assert.deepEqual(listTags(db).map((t) => t.name), ['Alpha', 'Charlie', 'Bravo']);
+});
+
+test('tag location: stored, updatable, cleared, and preserved across moveTag', () => {
+  const db = openMemoryDb();
+  createTag(db, DEV, 'Home:Garage');
+  assert.equal(listTags(db).find((t) => t.id === tagId('Home'))!.geo, null);
+  const geo = JSON.stringify({ lat: -37.8, lng: 144.9, radius: 150, label: 'Home' });
+  updateTag(db, DEV, tagId('Home'), { geo });
+  assert.equal(listTags(db).find((t) => t.id === tagId('Home'))!.geo, geo);
+  // Reparenting Home → Errands:Home carries the location with it.
+  moveTag(db, DEV, tagId('Home'), 'Errands:Home');
+  assert.equal(listTags(db).find((t) => t.id === tagId('Errands:Home'))!.geo, geo);
+  // Clearing sets it back to null.
+  updateTag(db, DEV, tagId('Errands:Home'), { geo: null });
+  assert.equal(listTags(db).find((t) => t.id === tagId('Errands:Home'))!.geo, null);
+});
+
+test('itemHasHeldTag is true when a task carries an on-hold tag or its descendant', () => {
+  const db = openMemoryDb();
+  const onTask = createItem(db, DEV, { title: 'blocked' });
+  const offTask = createItem(db, DEV, { title: 'free' });
+  createTag(db, DEV, 'Waiting:Reply');
+  updateTag(db, DEV, tagId('Waiting'), { status: 'on-hold' });
+  // Descendant of an on-hold tag counts as held.
+  setItemTags(db, DEV, onTask.id, [tagId('Waiting:Reply')]);
+  createTag(db, DEV, 'Active');
+  setItemTags(db, DEV, offTask.id, [tagId('Active')]);
+
+  const held = heldTagIds(db);
+  assert.ok(held.has(tagId('Waiting:Reply'))); // expansion includes descendants
+  assert.ok(itemHasHeldTag(db, onTask.id, held));
+  assert.ok(!itemHasHeldTag(db, offTask.id, held));
+  // Works without passing a precomputed set, too.
+  assert.ok(itemHasHeldTag(db, onTask.id));
 });

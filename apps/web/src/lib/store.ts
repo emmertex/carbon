@@ -29,12 +29,12 @@ interface AppState {
   /** Bumped after every mutation/sync so `useQuery` re-runs. */
   dbRevision: number;
   selectedId: string | null;
+  /** What the selected id refers to — a task/project item, or a tag. Drives which
+   *  detail pane (TaskDetail vs TagDetail) the right column renders. */
+  selectedKind: 'item' | 'tag';
   /** Whether the detail pane is *open*. On desktop the docked pane shows whenever
    *  a task is selected; on mobile this gates the overlay (2nd tap opens it). */
   detailOpen: boolean;
-  /** Whether the right-side Tags management panel is open (mutually exclusive with
-   *  the task/project detail pane). */
-  tagsPanelOpen: boolean;
   sidebarOpen: boolean;
   /** Collapsed tree nodes (children hidden); persisted across sessions. */
   collapsed: Set<string>;
@@ -102,11 +102,9 @@ interface AppState {
   setWorkspaceLock: (locked: boolean, expiresAt: string | null) => void;
   setLocalOnly: (v: boolean) => void;
   bump: () => void;
-  select: (id: string | null) => void;
+  select: (id: string | null, kind?: 'item' | 'tag') => void;
   openDetail: () => void;
   closeDetail: () => void;
-  openTagsPanel: () => void;
-  closeTagsPanel: () => void;
   setSidebarOpen: (v: boolean) => void;
   focusQuickAdd: () => void;
   toggleCollapsed: (id: string) => void;
@@ -138,8 +136,8 @@ export const useStore = create<AppState>((set, get) => ({
   ready: false,
   dbRevision: 0,
   selectedId: null,
+  selectedKind: 'item',
   detailOpen: false,
-  tagsPanelOpen: false,
   sidebarOpen: false,
   collapsed: loadIdSet(COLLAPSE_KEY),
   expanded: loadIdSet(EXPAND_KEY),
@@ -181,17 +179,14 @@ export const useStore = create<AppState>((set, get) => ({
   // Panes are mutually exclusive on compact screens: opening one closes the other.
   // Selecting does NOT auto-open the overlay (mobile needs a 2nd tap); the docked
   // desktop pane shows on selectedId regardless of detailOpen.
-  select: (id) =>
+  select: (id, kind = 'item') =>
     set(
       id
-        ? { selectedId: id, sidebarOpen: false, tagsPanelOpen: false }
+        ? { selectedId: id, selectedKind: kind, sidebarOpen: false }
         : { selectedId: null, detailOpen: false },
     ),
   openDetail: () => set({ detailOpen: true }),
   closeDetail: () => set({ detailOpen: false }),
-  openTagsPanel: () =>
-    set({ tagsPanelOpen: true, selectedId: null, detailOpen: false, sidebarOpen: false }),
-  closeTagsPanel: () => set({ tagsPanelOpen: false }),
   setSidebarOpen: (v) =>
     set(v ? { sidebarOpen: true, selectedId: null, detailOpen: false } : { sidebarOpen: false }),
   focusQuickAdd: () => set((s) => ({ quickAddFocusNonce: s.quickAddFocusNonce + 1 })),

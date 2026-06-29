@@ -96,10 +96,12 @@ export default function App() {
     if (location.pathname === prevPath.current) return;
     prevPath.current = location.pathname;
     const s = useStore.getState();
-    const routeId = location.pathname.match(/^\/(?:project|focus)\/(.+)$/)?.[1] ?? null;
+    // Keep a selection that matches the destination container/tag route; clear it
+    // otherwise (so opening item A's detail then navigating away dismisses it).
+    // Tag ids contain ':' and spaces, so decode the path segment before comparing.
+    const rawRouteId = location.pathname.match(/^\/(?:project|focus|tag)\/(.+)$/)?.[1] ?? null;
+    const routeId = rawRouteId ? decodeURIComponent(rawRouteId) : null;
     if (s.selectedId && s.selectedId !== routeId) s.select(null);
-    const onTagsRoute = location.pathname === '/tags' || location.pathname.startsWith('/tag/');
-    if (s.tagsPanelOpen && !onTagsRoute) s.closeTagsPanel();
   }, [location.pathname]);
 
   // Pane gestures (compact only). Zones are decided by the touch-start X: the left

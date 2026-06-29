@@ -36,8 +36,8 @@ so anything Hermes posts is authored by the bot and correctly permissioned. Save
 ## 2. Configure Hermes
 
 Point a Hermes profile/skill at:
-
-- `CARBON_URL` — base URL, e.g. `https://carbon.etx.sx` (or the tenant subdomain).
+Point a Hermes profile/skill at:
+- `CARBON_URL` — base URL with workspace subdomain, e.g. `https://my.carbon.etx.sx`. For self-hosted deployments without subdomains, use `https://carbon.etx.sx`.
 - `CARBON_TOKEN` — the issued agent token.
 
 Have Hermes's webhook handler verify `x-carbon-secret`, do its work, then call back:

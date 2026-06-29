@@ -26,6 +26,9 @@ export interface Filters {
   hideDeferred: boolean;
   /** Hide tasks that are blocked/unavailable (sequential gating or unmet deps). */
   hideBlocked: boolean;
+  /** How tasks carrying an on-hold tag appear: 'fade' (visible but dimmed, the
+   *  default) or 'hide' (dropped from the list). Today always hides them. */
+  onHoldMode: 'fade' | 'hide';
 }
 
 export interface ViewPrefs {
@@ -48,6 +51,7 @@ export const DEFAULT_FILTERS: Filters = {
   dueAfter: null,
   hideDeferred: false,
   hideBlocked: false,
+  onHoldMode: 'fade',
 };
 
 export const DEFAULT_PREFS: ViewPrefs = { sort: 'manual', filters: { ...DEFAULT_FILTERS } };
@@ -93,7 +97,8 @@ export function anyFilterActive(f: Filters): boolean {
     !!f.dueBefore ||
     !!f.dueAfter ||
     f.hideDeferred ||
-    f.hideBlocked
+    f.hideBlocked ||
+    f.onHoldMode === 'hide'
   );
 }
 
