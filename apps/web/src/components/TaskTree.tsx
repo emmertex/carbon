@@ -2,9 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import {
   DndContext,
   closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
   type DragStartEvent,
   type DragMoveEvent,
   type DragOverEvent,
@@ -32,6 +29,7 @@ import {
 } from '@carbon/core';
 import { Plus } from 'lucide-react';
 import { useQuery } from '@/hooks/useQuery';
+import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { itemAssignees } from '@/lib/enrich';
 import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
@@ -433,9 +431,7 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
 
   // Press-and-hold to drag: hold ~200ms to lift a row (reorder or nest); moving
   // >5px before then is a tap/scroll. The whole row is the handle — no grip.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
-  );
+  const sensors = useReorderSensors();
 
   function reset() {
     setActiveId(null);

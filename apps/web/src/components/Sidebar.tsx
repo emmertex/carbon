@@ -23,14 +23,7 @@ import {
   ChevronRight,
   X,
 } from 'lucide-react';
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
+import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
   SortableContext,
@@ -67,6 +60,7 @@ import {
   type OrderMode,
 } from '@carbon/core';
 import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
+import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { TagMark } from './TagMark';
 import { useQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
@@ -306,11 +300,9 @@ function ProjectsSection() {
 
   const rows = data ? buildFolderRows(data.folders, data.projects, data.openById, collapsed) : [];
 
-  // Press-and-hold to drag (~200ms), matching the task list. A quick tap/scroll
-  // (moving >5px before the delay) is never treated as a drag.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
-  );
+  // Press-and-hold to drag (~200ms), matching every other list in the app. A
+  // quick tap/scroll (moving >5px before the delay) is never treated as a drag.
+  const sensors = useReorderSensors();
 
   function createProject(mode: OrderMode) {
     const project = mutate((db, dev) =>
@@ -554,9 +546,7 @@ function TagsSection() {
   const flat = data ? flattenTagTree(data.roots, collapsed) : [];
 
   // Press-and-hold to drag (~200ms), matching the task list and Projects.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
-  );
+  const sensors = useReorderSensors();
 
   function openTag(id: string) {
     select(id, 'tag');

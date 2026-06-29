@@ -1,11 +1,4 @@
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
+import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
   SortableContext,
@@ -16,6 +9,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { reorderItem, getChildren } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
+import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { enrichItems } from '@/lib/enrich';
 import { useStore } from '@/lib/store';
 import { mutate } from '@/lib/mutate';
@@ -165,9 +159,7 @@ export function TaskList({
 }) {
   // Press-and-hold to drag: hold ~200ms to lift a row; moving >5px before then
   // is treated as a tap/scroll, not a drag. Lets the whole row be the handle.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
-  );
+  const sensors = useReorderSensors();
 
   function onDragEnd(e: DragEndEvent) {
     const { active, over } = e;
