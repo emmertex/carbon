@@ -21,9 +21,11 @@ import { TimeTrackedView } from '@/views/TimeTrackedView';
 import { TagsView } from '@/views/TagsView';
 import { SettingsView } from '@/views/SettingsView';
 import { SignupView } from '@/views/SignupView';
+import { DeleteAccountView } from '@/views/DeleteAccountView';
 import { HostAdminView } from '@/views/HostAdminView';
 import { LandingView } from '@/views/LandingView';
 import { FeaturesComparisonView } from '@/views/FeaturesComparisonView';
+import { PrivacyView } from '@/views/PrivacyView';
 import { SignInGate } from '@/components/SignInGate';
 import { RenewGate } from '@/components/RenewGate';
 
@@ -163,8 +165,10 @@ export default function App() {
 
   // Standalone full-page routes that bypass the app chrome.
   if (location.pathname === '/signup') return <SignupView />;
+  if (location.pathname === '/delete-account') return <DeleteAccountView />;
   if (location.pathname === '/host-admin') return <HostAdminView />;
   if (location.pathname === '/features') return <FeaturesComparisonView />;
+  if (location.pathname === '/privacy') return <PrivacyView />;
 
   // Apex (marketing/landing host): offer signup / local-only / go-to-workspace,
   // unless the visitor already chose to use Carbon without an account.

@@ -3,8 +3,13 @@
 #
 # Toolchain notes (CachyOS / g1-cachy):
 #   - System Java defaults to 26, which AGP 8.2.1 rejects. We force Java 17.
-#   - SDK lives at /opt/android-sdk, populated via AUR:
-#       paru -S --needed android-sdk-platform-tools android-sdk-build-tools-34 android-platform-34
+#   - SDK lives at /opt/android-sdk (root-owned, read-only to the user), populated via AUR:
+#       paru -S --needed android-sdk-platform-tools android-sdk-build-tools android-platform-35
+#     compileSdk/targetSdk is 35 (Play Store requirement); build-tools is pinned to the
+#     installed version in variables.gradle because AGP can't auto-install into the RO SDK.
+#   - Because the SDK is read-only, Gradle can't write license-acceptance files itself.
+#     Create them once (root): /opt/android-sdk/licenses/android-sdk-license with the
+#     standard accepted SHA hashes, else builds fail with "license not accepted".
 #   - android/local.properties (gitignored) points Gradle at the SDK.
 #   - Push/FCM is wired via google-services.json + @capacitor/push-notifications;
 #     the firebase-adminsdk service-account key is server-side only, NOT in the app.
@@ -42,6 +47,7 @@ case "$MODE" in
   release)
     echo "==> Gradle assembleRelease (Java 17)"
     ( cd "$ANDROID_DIR" && ./gradlew assembleRelease --no-daemon )
+    ( cd "$ANDROID_DIR" && ./gradlew bundleRelease --no-daemon )
     echo "==> Release APK(s):"
     find "$ANDROID_DIR/app/build/outputs/apk/release" -name '*.apk'
     ;;

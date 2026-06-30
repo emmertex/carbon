@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { syncNow, signOut as doSignOut } from '@/lib/sync';
 import { type ServerConfig } from '@/lib/config';
 import { LINKS } from '@/lib/links';
@@ -21,6 +22,7 @@ export function SyncSection({
 }) {
   const currentUser = useStore((s) => s.currentUser);
   const openLogin = useStore((s) => s.openLogin);
+  const baseDomain = useStore((s) => s.baseDomain);
   const signedIn = !!currentUser && !currentUser.open;
 
   function signOut() {
@@ -73,6 +75,16 @@ export function SyncSection({
             <button onClick={signOut} className={btnSecondary}>
               Sign out
             </button>
+          )}
+          {/* Workspace deletion is a hosted (multi-tenant) concept and runs its own
+              email-OTC flow, so it's reachable here regardless of sign-in state. */}
+          {baseDomain && (
+            <Link
+              to="/delete-account"
+              className="flex items-center gap-2 rounded-lg border border-red-500/40 px-4 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10"
+            >
+              Delete account
+            </Link>
           )}
         </div>
 

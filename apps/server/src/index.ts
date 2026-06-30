@@ -141,10 +141,15 @@ import {
   verifyPendingSignup,
   deletePendingSignup,
   gcPendingSignups,
+  createPendingDelete,
+  verifyPendingDelete,
+  resolveDeleteToken,
+  deletePendingDelete,
+  gcPendingDeletes,
   type HostVars,
   type TenantRecord,
 } from './control';
-import { sendOtcCode, sendBillingReceipt } from './email';
+import { sendOtcCode, sendBillingReceipt, sendDeleteOtcCode } from './email';
 // Version is single-sourced from the repo-root package.json. esbuild inlines this JSON
 // into the bundle at build time; tsx resolves it directly in dev.
 import rootPkg from '../../../package.json';
@@ -1420,6 +1425,7 @@ startTelegramBot({
 setInterval(() => {
   try {
     gcPendingSignups(controlDb);
+    gcPendingDeletes(controlDb);
   } catch (e) {
     console.error('[carbon] pending-signup gc failed:', e);
   }
@@ -1524,6 +1530,13 @@ const emailStartHits = new Map<string, number[]>();
 const SIGNUP_PER_EMAIL_HOUR = Math.max(1, Number(process.env.SIGNUP_PER_EMAIL_HOUR) || 3);
 const verifyHits = new Map<string, number[]>();
 const VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.VERIFY_PER_IP_HOUR) || 30);
+
+// Deletion OTC: a per-workspace cap on requesting a code (can't code-bomb a contact
+// address) and a per-IP cap on verifying it (bounds brute-forcing the 6-digit code).
+const deleteStartHits = new Map<string, number[]>();
+const DELETE_START_PER_WS_HOUR = Math.max(1, Number(process.env.DELETE_START_PER_WS_HOUR) || 3);
+const deleteVerifyHits = new Map<string, number[]>();
+const DELETE_VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.DELETE_VERIFY_PER_IP_HOUR) || 30);
 
 // Per-user cap on the LLM-backed NL command endpoint (each call = up to MAX_ITERS
 // provider round-trips). Keyed on the resolved user id, not IP.
@@ -1695,6 +1708,130 @@ host.post('/signup/verify', async (c) => {
     // Keep the pending row so the user can retry (e.g. pick a free subdomain).
     return c.json({ error: (e as Error).message }, 400);
   }
+});
+
+// ----- self-service workspace deletion (public, email-OTC verified) ----------
+// Reachable without a session: identity is proven by receiving the workspace's
+// contact email, not by being signed in. Mirrors the signup OTC flow in reverse.
+
+/** Resolve a deletable workspace whose contact email matches `email`, else null.
+ *  The default/self-host tenant has no control-plane row, so it is never deletable. */
+function deletableTenant(workspace: string, email: string): TenantRecord | null {
+  const sub = workspace.trim().toLowerCase();
+  if (!sub) return null;
+  const rec = getTenantBySubdomain(controlDb, sub);
+  if (!rec || rec.status === 'deleted') return null;
+  if (!rec.admin_email || rec.admin_email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+    return null;
+  }
+  return rec;
+}
+
+/** Build the portable `carbon-backup` bundle for a workspace: the SQLite bytes plus
+ *  every attachment blob, base64-encoded — the same format the web Import accepts. */
+function buildWorkspaceBundle(rec: TenantRecord): string {
+  // Fold the WAL into the main db file so the on-disk bytes are current before we read
+  // them (the tenant may have unflushed writes). Best-effort: skip if not loadable.
+  try {
+    registry.getCtx(rec.subdomain)?.db.raw.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch {
+    /* not loaded / locked — fall back to whatever is on disk */
+  }
+  const blobs: Record<string, string> = {};
+  try {
+    for (const name of readdirSync(rec.blobs_dir)) {
+      try {
+        blobs[name] = readFileSync(join(rec.blobs_dir, name)).toString('base64');
+      } catch {
+        /* file vanished mid-scan — skip */
+      }
+    }
+  } catch {
+    /* no blobs dir yet */
+  }
+  return JSON.stringify({
+    format: 'carbon-backup',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    db: readFileSync(rec.db_path).toString('base64'),
+    blobs,
+  });
+}
+
+// Step 1: stage a deletion + email a one-time code — but only if the workspace exists
+// and the supplied email is its contact address. Always answers 200 with the same
+// generic body so the endpoint can't be used to probe which workspaces/emails exist.
+host.post('/delete/start', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { workspace?: string; email?: string };
+  const workspace = (b.workspace ?? '').trim().toLowerCase();
+  const email = (b.email ?? '').trim().toLowerCase();
+  const generic = { ok: true } as const;
+  if (!workspace || !email) return c.json({ error: 'workspace and email required' }, 400);
+  if (!hitAllowed(deleteStartHits, workspace, DELETE_START_PER_WS_HOUR)) {
+    return c.json({ error: 'too many codes requested for this workspace, try later' }, 429);
+  }
+  const rec = deletableTenant(workspace, email);
+  if (!rec) return c.json(generic); // no match — say nothing, send nothing
+  try {
+    const { code } = createPendingDelete(controlDb, { tenantId: rec.id, email: rec.admin_email! });
+    await sendDeleteOtcCode(rec.admin_email!, code, rec.subdomain);
+  } catch (e) {
+    console.error('[carbon] delete/start failed:', e);
+  }
+  return c.json(generic);
+});
+
+// Step 2: verify the code, returning a short-lived token that authorizes the export
+// and the final delete. The workspace+email must still match (the code alone is scoped
+// to the tenant, but re-checking keeps the contract obvious and tolerates email reuse).
+host.post('/delete/verify', async (c) => {
+  const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  if (!hitAllowed(deleteVerifyHits, ip, DELETE_VERIFY_PER_IP_HOUR)) {
+    return c.json({ error: 'too many attempts, try later' }, 429);
+  }
+  const b = (await c.req.json().catch(() => ({}))) as {
+    workspace?: string;
+    email?: string;
+    code?: string;
+  };
+  if (!b.workspace || !b.email || !b.code) {
+    return c.json({ error: 'workspace, email and code required' }, 400);
+  }
+  const rec = deletableTenant(b.workspace, b.email);
+  if (!rec) return c.json({ error: 'invalid code' }, 400);
+  const result = verifyPendingDelete(controlDb, rec.id, String(b.code));
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ token: result.token });
+});
+
+// Download a full backup of the workspace. Authorized by the verified delete token, so
+// the same proof-of-email that allows deletion lets the owner take their data first.
+host.post('/delete/export', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { token?: string };
+  const row = resolveDeleteToken(controlDb, b.token ?? '');
+  if (!row) return c.json({ error: 'session expired — request a new code' }, 401);
+  const rec = getTenantById(controlDb, row.tenant_id);
+  if (!rec || rec.status === 'deleted') return c.json({ error: 'workspace not found' }, 404);
+  const bundle = buildWorkspaceBundle(rec);
+  return new Response(bundle, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="carbon-${rec.subdomain}-backup.json"`,
+    },
+  });
+});
+
+// Step 3: permanently delete the workspace (and its data dir). Irreversible.
+host.post('/delete/confirm', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { token?: string };
+  const row = resolveDeleteToken(controlDb, b.token ?? '');
+  if (!row) return c.json({ error: 'session expired — request a new code' }, 401);
+  const rec = getTenantById(controlDb, row.tenant_id);
+  deletePendingDelete(controlDb, row.id);
+  if (!rec || rec.status === 'deleted') return c.json({ ok: true }); // already gone
+  registry.evict(rec.id); // close the open handle before removing files
+  deleteTenant(controlDb, rec.id);
+  return c.json({ ok: true });
 });
 
 host.use('/tenants', hostAdminAuth(controlDb));

@@ -9,12 +9,13 @@
 #   Windows : desktop  -> .msi, .exe (NSIS setup)     (run under Git Bash / MSYS)
 #
 # All artifacts are copied (renamed where needed) into ./release/ at the repo root.
-# The Android debug APK is renamed to Carbon_<version>_android.apk to match the
-# versioned naming of the desktop bundles.
+# The Android APK is renamed to Carbon_<version>_android.apk to match the versioned
+# naming of the desktop bundles. In release mode the signed AAB (the Play Store
+# upload) is also collected as Carbon_<version>_android.aab.
 #
 # Usage:
 #   ./build-all.sh                 # build everything for this OS (Android = debug)
-#   ./build-all.sh release         # Android APK in release mode (needs signing config)
+#   ./build-all.sh release         # Android signed APK + AAB (needs signing config)
 #   ./build-all.sh --no-android    # desktop only
 #
 set -euo pipefail
@@ -104,6 +105,19 @@ if [[ "$DO_ANDROID" == 1 && "$OS" != "windows" ]]; then
       echo "    + apk: $(basename "$DEST")"
     else
       echo "    ! apk: no APK found in $APK_SRC"
+    fi
+
+    # In release mode build-android.sh also produces the signed AAB — the Play
+    # Store upload artifact. Collect it alongside the APK.
+    if [[ "$ANDROID_MODE" == "release" ]]; then
+      AAB_FILE="$REPO_ROOT/apps/mobile/android/app/build/outputs/bundle/release/app-release.aab"
+      if [[ -f "$AAB_FILE" ]]; then
+        DEST="$RELEASE_DIR/Carbon_${VERSION}_android.aab"
+        cp -f "$AAB_FILE" "$DEST"
+        echo "    + aab: $(basename "$DEST")"
+      else
+        echo "    ! aab: no AAB found at $AAB_FILE"
+      fi
     fi
   else
     echo "==> Skipping Android (apps/mobile/build-android.sh not executable/found)"

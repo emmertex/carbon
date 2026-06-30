@@ -87,6 +87,63 @@ export async function signupVerify(email: string, code: string): Promise<SignupR
   return (await res.json()) as SignupResult;
 }
 
+// ----- self-service workspace deletion (public, email-OTC verified) ----------
+
+/** Delete step 1: request a one-time code to the workspace's contact email. Always
+ *  resolves (the server is deliberately non-committal about whether it matched). */
+export async function deleteAccountStart(workspace: string, email: string): Promise<void> {
+  const res = await fetch(`${base()}/host/delete/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, email }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+}
+
+/** Delete step 2: verify the code, returning a short-lived token for export + delete. */
+export async function deleteAccountVerify(
+  workspace: string,
+  email: string,
+  code: string,
+): Promise<string> {
+  const res = await fetch(`${base()}/host/delete/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, email, code }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return ((await res.json()) as { token: string }).token;
+}
+
+/** Download a full backup of the workspace (authorized by the verified delete token). */
+export async function deleteAccountExport(token: string): Promise<void> {
+  const res = await fetch(`${base()}/host/delete/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition') || '';
+  const name = /filename="([^"]+)"/.exec(cd)?.[1] || 'carbon-backup.json';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Delete step 3: permanently delete the workspace and all its data. Irreversible. */
+export async function deleteAccountConfirm(token: string): Promise<void> {
+  const res = await fetch(`${base()}/host/delete/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+}
+
 export async function hostListTenants(creds: HostCreds): Promise<TenantRecord[]> {
   const res = await fetch(`${base()}/host/tenants`, { headers: hostAuthHeaders(creds) });
   if (!res.ok) throw new Error(await parseError(res));

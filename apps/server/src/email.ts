@@ -62,6 +62,18 @@ export async function sendOtcCode(to: string, code: string): Promise<void> {
   await sendEmail(to, subject, text);
 }
 
+/** Email a one-time code for confirming workspace deletion. */
+export async function sendDeleteOtcCode(to: string, code: string, workspace: string): Promise<void> {
+  const subject = `Confirm deleting your ${APP_NAME} workspace`;
+  const text =
+    `Someone requested to permanently delete the ${APP_NAME} workspace "${workspace}".\n\n` +
+    `Your confirmation code is:\n\n  ${code}\n\n` +
+    `Enter it on the delete-account page to download a backup and permanently remove ` +
+    `the workspace and all its data. This cannot be undone. The code expires shortly.\n\n` +
+    `If you didn't request this, ignore this email — nothing will be deleted.`;
+  await sendEmail(to, subject, text);
+}
+
 /** Email a billing receipt after a successful subscription/renewal. */
 export async function sendBillingReceipt(
   to: string,

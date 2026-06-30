@@ -24,6 +24,10 @@ import {
   verifyPendingSignup,
   deletePendingSignup,
   gcPendingSignups,
+  createPendingDelete,
+  verifyPendingDelete,
+  resolveDeleteToken,
+  gcPendingDeletes,
 } from './control';
 
 let tenantsDir: string;
@@ -316,5 +320,82 @@ describe('pending signup flow', () => {
     );
     gcPendingSignups(db);
     assert.ok(!db.get('SELECT 1 FROM pending_signups WHERE id = ?', ['gc-test']));
+  });
+});
+
+// ─── pending workspace deletion (email-OTC) ──────────────────────────────────
+
+describe('pending delete flow', () => {
+  function makeTenant(db: ReturnType<typeof openControlDb>, subdomain: string, email: string) {
+    return provisionTenant(db, tenantsDir, {
+      subdomain,
+      adminUsername: 'admin',
+      adminPassword: 'pw',
+      adminEmail: email,
+    });
+  }
+
+  test('createPendingDelete returns a 6-digit code', () => {
+    const db = openControlDb(':memory:');
+    const rec = makeTenant(db, 'delco', 'owner@example.com');
+    const { id, code } = createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    assert.ok(id, 'pending delete id returned');
+    assert.match(code, /^\d{6}$/, '6-digit code');
+  });
+
+  test('verifyPendingDelete accepts the correct code and mints a token', () => {
+    const db = openControlDb(':memory:');
+    const rec = makeTenant(db, 'delco2', 'owner@example.com');
+    const { code } = createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    const result = verifyPendingDelete(db, rec.id, code);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.match(result.token, /^carbondel_/, 'delete token minted');
+  });
+
+  test('verifyPendingDelete rejects a wrong code', () => {
+    const db = openControlDb(':memory:');
+    const rec = makeTenant(db, 'delco3', 'owner@example.com');
+    createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    const result = verifyPendingDelete(db, rec.id, '000000');
+    assert.equal(result.ok, false);
+  });
+
+  test('re-starting reissues a code and invalidates the prior token', () => {
+    const db = openControlDb(':memory:');
+    const rec = makeTenant(db, 'delco4', 'owner@example.com');
+    const first = createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    const v = verifyPendingDelete(db, rec.id, first.code);
+    assert.equal(v.ok, true);
+    const oldToken = v.ok ? v.token : '';
+    // A fresh start replaces the row (one pending delete per tenant) and clears the token.
+    createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    assert.equal(resolveDeleteToken(db, oldToken), null, 'old token no longer valid');
+  });
+
+  test('resolveDeleteToken resolves a verified token to its tenant', () => {
+    const db = openControlDb(':memory:');
+    const rec = makeTenant(db, 'delco5', 'owner@example.com');
+    const { code } = createPendingDelete(db, { tenantId: rec.id, email: 'owner@example.com' });
+    const v = verifyPendingDelete(db, rec.id, code);
+    assert.ok(v.ok);
+    const row = resolveDeleteToken(db, v.ok ? v.token : '');
+    assert.ok(row, 'token resolves');
+    assert.equal(row?.tenant_id, rec.id);
+  });
+
+  test('resolveDeleteToken returns null for an unknown token', () => {
+    const db = openControlDb(':memory:');
+    assert.equal(resolveDeleteToken(db, 'carbondel_nope'), null);
+  });
+
+  test('gcPendingDeletes removes expired entries', () => {
+    const db = openControlDb(':memory:');
+    db.run(
+      `INSERT INTO pending_deletes (id, tenant_id, email, code_hash, token_hash, expires_at, attempts, created_at)
+       VALUES ('gc-del', 'tenant-x', 'gc@example.com', 'chash', NULL, ?, 0, ?)`,
+      [new Date(Date.now() - 3_600_000).toISOString(), new Date().toISOString()],
+    );
+    gcPendingDeletes(db);
+    assert.ok(!db.get('SELECT 1 FROM pending_deletes WHERE id = ?', ['gc-del']));
   });
 });

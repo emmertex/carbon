@@ -321,6 +321,16 @@ export function LandingView() {
           You'll sign in on your workspace's own address.
         </p>
       </section>
+
+      {/* Footer */}
+      <footer className="mt-16 border-t border-border pt-8 text-center text-sm text-text-muted">
+        <button
+          onClick={() => navigate("/privacy")}
+          className="underline underline-offset-4 hover:text-text"
+        >
+          Privacy Policy
+        </button>
+      </footer>
     </div>
   );
 }

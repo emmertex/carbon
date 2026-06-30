@@ -106,6 +106,20 @@ export function openControlDb(path: string): Db {
       created_at     TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_pending_email ON pending_signups(email);
+    -- Email-verified workspace self-deletion. One pending row per tenant (re-starting
+    -- reissues the code). token_hash is null until the OTC is verified; once set it
+    -- authorizes the data export + the final delete until expires_at.
+    CREATE TABLE IF NOT EXISTS pending_deletes (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL UNIQUE,
+      email       TEXT NOT NULL,
+      code_hash   TEXT NOT NULL,
+      token_hash  TEXT,
+      expires_at  TEXT NOT NULL,
+      attempts    INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_delete_token ON pending_deletes(token_hash);
   `);
   // Additive migrations for control DBs created before the billing/expiry feature.
   ensureColumn(db, 'tenants', 'expires_at', 'TEXT');
@@ -501,6 +515,113 @@ export function deletePendingSignup(db: Db, id: string): void {
 /** Sweep expired pending signups (called from the maintenance scheduler). */
 export function gcPendingSignups(db: Db): void {
   db.run('DELETE FROM pending_signups WHERE expires_at < ?', [new Date().toISOString()]);
+}
+
+// ----- OTC email-verified workspace deletion --------------------------------
+// Mirrors the signup OTC flow, but for tearing a workspace down. Anyone who can
+// receive the workspace's contact email can delete it — being signed in is neither
+// required nor sufficient (the page is reachable without a session). The verified
+// OTC mints a short-lived token that authorizes both the data export and the final
+// irreversible delete.
+
+/** How long a verified delete token stays valid (export + confirm window). */
+const DELETE_TOKEN_TTL_MIN = Math.max(1, Number(process.env.DELETE_TOKEN_TTL_MIN) || 30);
+
+export interface PendingDeleteRow {
+  id: string;
+  tenant_id: string;
+  email: string;
+  code_hash: string;
+  token_hash: string | null;
+  expires_at: string;
+  attempts: number;
+  created_at: string;
+}
+
+/**
+ * Stage a workspace deletion pending email verification: (re)insert a pending row for
+ * the tenant with a fresh 6-digit code. Returns the plaintext code for the caller to
+ * email. The caller is responsible for confirming the email matches the workspace
+ * before invoking this (so an unrelated address can't trigger a delete code).
+ */
+export function createPendingDelete(
+  db: Db,
+  input: { tenantId: string; email: string },
+): { id: string; code: string } {
+  const id = randomUUID();
+  const code = generateOtc();
+  const now = Date.now();
+  const expiresAt = new Date(now + OTC_TTL_MIN * 60_000).toISOString();
+  const email = input.email.trim().toLowerCase();
+  // One pending row per tenant; re-requesting reissues a code and clears any prior token.
+  db.run(
+    `INSERT INTO pending_deletes (id, tenant_id, email, code_hash, token_hash, expires_at, attempts, created_at)
+     VALUES (?, ?, ?, ?, NULL, ?, 0, ?)
+     ON CONFLICT(tenant_id) DO UPDATE SET
+       id = excluded.id, email = excluded.email, code_hash = excluded.code_hash,
+       token_hash = NULL, expires_at = excluded.expires_at, attempts = 0,
+       created_at = excluded.created_at`,
+    [id, input.tenantId, email, sha256Hex(code), expiresAt, new Date(now).toISOString()],
+  );
+  return { id, code };
+}
+
+/**
+ * Verify a delete code for a tenant. On success, mint and store a short-lived token
+ * (returned plaintext to the caller) that authorizes the export + final delete, and
+ * return it. On mismatch the attempt is counted and the row dropped at the cap.
+ */
+export function verifyPendingDelete(
+  db: Db,
+  tenantId: string,
+  code: string,
+): { ok: true; token: string } | { ok: false; error: string } {
+  const row = db.get<PendingDeleteRow>('SELECT * FROM pending_deletes WHERE tenant_id = ?', [tenantId]);
+  if (!row) return { ok: false, error: 'code expired or not found' };
+  if (Date.now() > Date.parse(row.expires_at)) {
+    db.run('DELETE FROM pending_deletes WHERE id = ?', [row.id]);
+    return { ok: false, error: 'code expired or not found' };
+  }
+  const expected = Buffer.from(row.code_hash, 'hex');
+  const actual = Buffer.from(sha256Hex(String(code ?? '')), 'hex');
+  const match = expected.length === actual.length && timingSafeEqual(expected, actual);
+  if (!match) {
+    const attempts = row.attempts + 1;
+    if (attempts >= OTC_MAX_ATTEMPTS) db.run('DELETE FROM pending_deletes WHERE id = ?', [row.id]);
+    else db.run('UPDATE pending_deletes SET attempts = ? WHERE id = ?', [attempts, row.id]);
+    return { ok: false, error: 'invalid code' };
+  }
+  const token = `carbondel_${randomBytes(24).toString('hex')}`;
+  const tokenExpiry = new Date(Date.now() + DELETE_TOKEN_TTL_MIN * 60_000).toISOString();
+  db.run('UPDATE pending_deletes SET token_hash = ?, expires_at = ? WHERE id = ?', [
+    sha256Hex(token),
+    tokenExpiry,
+    row.id,
+  ]);
+  return { ok: true, token };
+}
+
+/** Resolve a verified delete token to its pending row (tenant_id), or null if the
+ *  token is unknown/expired. Used by both the export and the confirm-delete routes
+ *  (it does not delete the row, so the same token serves both steps). */
+export function resolveDeleteToken(db: Db, token: string): PendingDeleteRow | null {
+  if (!token) return null;
+  const row = db.get<PendingDeleteRow>('SELECT * FROM pending_deletes WHERE token_hash = ?', [sha256Hex(token)]);
+  if (!row) return null;
+  if (Date.now() > Date.parse(row.expires_at)) {
+    db.run('DELETE FROM pending_deletes WHERE id = ?', [row.id]);
+    return null;
+  }
+  return row;
+}
+
+export function deletePendingDelete(db: Db, id: string): void {
+  db.run('DELETE FROM pending_deletes WHERE id = ?', [id]);
+}
+
+/** Sweep expired pending deletes (called from the maintenance scheduler). */
+export function gcPendingDeletes(db: Db): void {
+  db.run('DELETE FROM pending_deletes WHERE expires_at < ?', [new Date().toISOString()]);
 }
 
 export { rowToRecord };
