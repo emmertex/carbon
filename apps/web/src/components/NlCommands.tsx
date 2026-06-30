@@ -11,11 +11,9 @@ import {
 import { loadNlConfig } from '@/lib/sync';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText } from './settings/controls';
+import { ErrorText, SettingsToggle, btnPrimary, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 
-const inputCls =
-  'rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm outline-none focus:border-accent';
 const DEFAULT_KEYWORDS = ['can', 'add', 'check off', 'mark off', 'mark as'];
 
 export function NlCommands() {
@@ -83,10 +81,11 @@ export function NlCommands() {
       }
     >
       <div className="space-y-4">
-        <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          <span>Enable natural-language commands</span>
-        </label>
+        <SettingsToggle
+          label="Enable natural-language commands"
+          checked={enabled}
+          onChange={setEnabled}
+        />
 
         <label className="block">
           <span className="mb-1 block text-xs text-text-muted">Agent that runs commands</span>
@@ -169,10 +168,7 @@ export function NlCommands() {
         )}
 
         <div className="flex items-center gap-3">
-          <button
-            onClick={save}
-            className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
-          >
+          <button onClick={save} className={btnPrimary}>
             Save
           </button>
           {saved && <span className="text-xs text-success">Saved</span>}

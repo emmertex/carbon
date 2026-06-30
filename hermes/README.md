@@ -22,8 +22,10 @@
     - Includes full REST API helper functions (comment(), complete(), read_task(), list_tasks(), create_task(), update_task())
     - Plus natural-language agent API (/api/agent/*) helpers: agent_lists(), agent_tags(),
       agent_items(), agent_resolve(), agent_add(), agent_complete(), agent_update(),
-      agent_set_tag_geo(), agent_nearby() — the server fuzzy-matches names, so pass plain
-      names (never ids). See docs/carbon-agent-api.md §6.
+      agent_set_tag_geo(), agent_nearby(), agent_users(), agent_share(), agent_assign(),
+      agent_start_timer(), agent_stop_timer() — the server fuzzy-matches names, so pass plain
+      names (never ids). agent_add() also takes scheduling fields (due_date/reminder_at/
+      recurrence) via tasks=[{...}]. See docs/carbon-agent-api.md §6.
 
     Natural-language quick example (the server resolves/creates the list + tags):
 

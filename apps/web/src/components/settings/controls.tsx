@@ -14,6 +14,17 @@ export const btnPrimary =
 export const btnSecondary =
   'flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-50';
 
+/** Compact icon-only button (edit / delete / copy row actions). */
+export const btnIcon =
+  'rounded-lg p-1.5 text-text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50';
+
+/** Canonical container chrome for grouped lists/forms within a settings section. */
+export function Card({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <div className={cn('rounded-xl border border-border bg-surface', className)}>{children}</div>
+  );
+}
+
 /** A labelled field: bold caption, the control, and an optional helper line. */
 export function Field({
   label,
@@ -66,17 +77,29 @@ export function SettingsToggle({
   onChange,
   hint,
   className,
+  disabled,
 }: {
   label: ReactNode;
   checked: boolean;
   onChange: (checked: boolean) => void;
   hint?: ReactNode;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className={className}>
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <label
+        className={cn(
+          'flex items-center gap-2 text-sm',
+          disabled && 'cursor-not-allowed opacity-50',
+        )}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+        />
         {label}
       </label>
       {hint && <p className="mt-1 text-xs text-text-faint">{hint}</p>}

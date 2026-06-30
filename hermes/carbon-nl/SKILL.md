@@ -1,7 +1,7 @@
 ---
 name: carbon-nl
-description: Use when the user wants to manage their Carbon to-do/shopping lists in plain language — add tasks ("add milk and eggs to my shopping list"), check things off ("mark off bread and milk"), or ask what they need somewhere ("what do I need at Coles?"). Drives the Carbon natural-language API via the carbon-cli.py helper. NOT for webhook/mention triggers — that's the carbon-agent skill.
-version: 1.0.0
+description: Use when the user wants to manage their Carbon to-do/shopping lists in plain language — add tasks ("add milk and eggs to my shopping list"), check things off ("mark off bread and milk"), ask what they need somewhere ("what do I need at Coles?"), set reminders/due dates/repeats ("remind me to take my son to swimming every Tuesday at 5pm, an hour before"), share or assign a task to someone, or start/stop a time-tracking timer. Drives the Carbon natural-language API via the carbon-cli.py helper. NOT for webhook/mention triggers — that's the carbon-agent skill.
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -47,17 +47,29 @@ CARBON_TOKEN=carbon_xxxxxxxx
 |--------|---------|
 | Who am I acting as | `whoami` |
 | Add tasks | `add <title> [<title> …] --list "<list>" [--tag <tag> …]` |
+| Add with schedule | `add <title> [--due <ISO>] [--defer <ISO>] [--remind <ISO>] [--repeat <spec>]` |
 | Check off | `done <title> [<title> …] [--list "<list>"]`  (alias: `complete`, `check-off`) |
-| Re-open | `done <title> --undo` |
+| Re-open | `done <title> --undo`  (finds the completed task) |
 | What's at a place | `nearby --tag <tag>`  (or `--zone <name>`, or `--lat <n> --lng <n>`) |
 | Show lists | `lists` |
 | Show tags | `tags` |
-| Show a list's tasks | `items --list "<list>" [--all]` |
+| Show a list's tasks | `items --list "<list>" [--all]`  (`--all` includes completed) |
 | Check a name | `resolve list\|tag\|task "<name>"` |
 | Give a tag a location | `tag-geo <tag> --lat <n> --lng <n> [--radius <m>] [--label "<text>"]` |
 | Locate nearest place | `tag-geo <tag> --near-name "<place>" --lat <n> --lng <n>` |
+| List people | `users` |
+| Share a task | `share "<task>" --to <name> [--to <name>] [--read] [--remove]` |
+| Assign a task | `assign "<task>" --to <name> [--remove]` |
+| Time tracking | `timer start "<task>"`  /  `timer stop` |
 
 Add `--json` to any command to get the raw response instead of the friendly line.
+
+**Scheduling.** `--due`/`--defer`/`--remind` take an ISO datetime (e.g. `2026-07-07T17:00`). For
+"remind me an hour before", set `--due` to the event time and `--remind` an hour earlier.
+`--repeat` is `daily|weekly|monthly|yearly`, optionally `weekly:tue` (or `mon,tue`) / `monthly:15`.
+
+**People.** `share`/`assign` resolve names fuzzily and only work on tasks you own or can write to
+(others are reported as skipped). Bots can't be shared/assigned to — run `users` to see who's valid.
 
 ## Map intents → commands
 
@@ -78,6 +90,18 @@ Add `--json` to any command to get the raw response instead of the friendly line
   `python3 carbon-cli.py nearby --tag coles`
   → if it says *Nothing marked for coles*, tell the user, then optionally show the list:
   `python3 carbon-cli.py items --list shopping`.
+
+- **"Remind me to take my son to swimming every Tuesday at 5pm, an hour before, and share it with Rachel."**
+  (resolve the next Tuesday yourself from today's date)
+  `python3 carbon-cli.py add "Take son to swimming" --due 2026-07-07T17:00 --remind 2026-07-07T16:00 --repeat weekly:tue`
+  then `python3 carbon-cli.py share "Take son to swimming" --to rachel`.
+
+- **"Assign the campsite booking to Rachel."**
+  `python3 carbon-cli.py assign "campsite booking" --to rachel` → relay *Assigned … to rachel* (or
+  *Skipped*/​*No such user* if it couldn't).
+
+- **"Start a timer on the report"** / **"stop the timer."**
+  `python3 carbon-cli.py timer start "report"` / `python3 carbon-cli.py timer stop`.
 
 ## Rules
 

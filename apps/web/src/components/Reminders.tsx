@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { Bell, MapPin, Smartphone } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { getServerConfig } from '@/lib/config';
 import {
@@ -18,8 +17,8 @@ import {
 import { startGeofencing, stopGeofencing, geofencePref, geofencingSupported } from '@/lib/geo';
 import { requestNativePermission } from '@/lib/nativeReminders';
 import { isCapacitor } from '@/lib/platform';
-import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
+import { SettingsToggle } from './settings/controls';
 
 // Ensure an OS-level notification permission for foreground geofence alerts: the
 // native channel on Capacitor, else the browser Notification API.
@@ -93,74 +92,43 @@ export function Reminders() {
     }
   }
 
+  const remindersSupported = pushMode ? pushSupported() : localRemindersSupported();
+  const remindersHint = !pushSupported() ? (
+    "Notifications aren't supported in this browser."
+  ) : pushMode ? (
+    pushDeliversWhenClosed() ? (
+      'Push reminders are sent by the server, so they arrive even when the app is closed.'
+    ) : (
+      'Notifications show on this device while the app is running.'
+    )
+  ) : (
+    <>
+      Reminders fire on this device while the app is open — no server needed.
+      {hasServer && ' Sign in to a server for push reminders that arrive when it is closed.'}
+    </>
+  );
+
   return (
     <SettingsSection id="reminders" title="Reminders & location">
-      <div className="space-y-3">
-        <div className="flex items-center gap-3">
-          {pushMode ? (
-            <button
-              onClick={togglePush}
-              disabled={!pushSupported()}
-              className={cn(
-                'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50',
-                pushOn
-                  ? 'border border-border hover:bg-surface-2'
-                  : 'bg-accent text-accent-fg hover:bg-accent-hover',
-              )}
-            >
-              <Bell size={15} /> {pushOn ? 'Disable push reminders' : 'Enable push reminders'}
-            </button>
-          ) : (
-            <button
-              onClick={toggleLocal}
-              disabled={!localRemindersSupported()}
-              className={cn(
-                'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50',
-                localOn
-                  ? 'border border-border hover:bg-surface-2'
-                  : 'bg-accent text-accent-fg hover:bg-accent-hover',
-              )}
-            >
-              <Smartphone size={15} />{' '}
-              {localOn ? 'Disable reminders (this device)' : 'Enable reminders (this device)'}
-            </button>
-          )}
-          {msg && <span className="text-sm text-text-muted">{msg}</span>}
+      <div className="space-y-4">
+        <div>
+          <SettingsToggle
+            label={pushMode ? 'Push reminders (this device)' : 'Reminders (this device)'}
+            checked={pushMode ? pushOn : localOn}
+            disabled={!remindersSupported}
+            onChange={() => (pushMode ? togglePush() : toggleLocal())}
+            hint={remindersHint}
+          />
+          {msg && <p className="mt-1 text-xs text-text-muted">{msg}</p>}
         </div>
 
-        {!pushSupported() && (
-          <p className="text-xs text-text-faint">Notifications aren't supported in this browser.</p>
-        )}
-        {pushMode ? (
-          <p className="text-xs text-text-faint">
-            {pushDeliversWhenClosed()
-              ? 'Push reminders are sent by the server, so they arrive even when the app is closed.'
-              : 'Notifications show on this device while the app is running.'}
-          </p>
-        ) : (
-          <p className="text-xs text-text-faint">
-            Reminders fire on this device while the app is open — no server needed.
-            {hasServer && ' Sign in to a server for push reminders that arrive when it is closed.'}
-          </p>
-        )}
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleGeo}
-            disabled={!geofencingSupported()}
-            className={cn(
-              'flex items-center gap-2 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-50',
-              geoOn && 'border-accent bg-accent-soft text-accent',
-            )}
-          >
-            <MapPin size={15} /> Location reminders (this device): {geoOn ? 'On' : 'Off'}
-          </button>
-        </div>
-        <p className="text-xs text-text-faint">
-          Uses this device's location while the app is open — no server needed. For background
-          geofencing, link your Home Assistant person (under Home Assistant below) and let HA call
-          the server on zone changes.
-        </p>
+        <SettingsToggle
+          label="Location reminders (this device)"
+          checked={geoOn}
+          disabled={!geofencingSupported()}
+          onChange={() => toggleGeo()}
+          hint="Uses this device's location while the app is open — no server needed. For background geofencing, link your Home Assistant person (under Home Assistant below) and let HA call the server on zone changes."
+        />
       </div>
     </SettingsSection>
   );

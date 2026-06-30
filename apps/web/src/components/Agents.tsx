@@ -11,11 +11,19 @@ import {
 } from '@/lib/admin';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText } from './settings/controls';
+import {
+  ErrorText,
+  Card,
+  btnPrimary,
+  btnSecondary,
+  btnIcon,
+  inputCls as baseInputCls,
+} from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 
-const inputCls =
-  'w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm outline-none focus:border-accent';
+// These admin forms are full-width; derive from the shared base so the styling
+// stays in one place.
+const inputCls = cn(baseInputCls, 'w-full');
 
 interface FormState {
   name: string;
@@ -277,7 +285,7 @@ export function Agents() {
         </>
       }
     >
-      <div className="mb-3 divide-y divide-border rounded-xl border border-border">
+      <Card className="mb-3 divide-y divide-border">
         {agents.length === 0 && <p className="px-3 py-2 text-sm text-text-faint">No agents yet.</p>}
         {agents.map((a) => (
           <div key={a.id} className="px-3 py-2 text-sm">
@@ -308,14 +316,14 @@ export function Agents() {
               <button
                 onClick={() => test(a.id)}
                 disabled={testing === a.id}
-                className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-accent"
+                className={cn(btnIcon, 'hover:text-accent')}
                 title="Test connection"
               >
                 <FlaskConical size={15} />
               </button>
               <button
                 onClick={() => (editId === a.id ? setEditId(null) : startEdit(a))}
-                className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-text"
+                className={btnIcon}
                 title="Edit"
               >
                 <Pencil size={15} />
@@ -332,7 +340,7 @@ export function Agents() {
                     await reload();
                   }
                 }}
-                className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-danger"
+                className={cn(btnIcon, 'hover:text-danger')}
                 title="Delete"
               >
                 <Trash2 size={15} />
@@ -347,14 +355,8 @@ export function Agents() {
               <form onSubmit={saveEdit} className="mt-2 space-y-2 border-t border-border pt-2">
                 <AgentFields form={editForm} set={(p) => setEditForm({ ...editForm, ...p })} editing />
                 <div className="flex gap-2">
-                  <button className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg">
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditId(null)}
-                    className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-                  >
+                  <button className={btnPrimary}>Save</button>
+                  <button type="button" onClick={() => setEditId(null)} className={btnSecondary}>
                     Cancel
                   </button>
                 </div>
@@ -362,12 +364,12 @@ export function Agents() {
             )}
           </div>
         ))}
-      </div>
+      </Card>
 
       {createdToken && <TokenReveal token={createdToken} />}
 
       {creating ? (
-        <form onSubmit={create} className="mt-3 space-y-2 rounded-xl border border-border p-3">
+        <form onSubmit={create} className="mt-3 space-y-2 rounded-xl border border-border bg-surface p-3">
           <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className="mb-1 block text-xs text-text-muted">Display name</span>
@@ -391,15 +393,11 @@ export function Agents() {
             <button
               type="submit"
               disabled={!createForm.name || !createForm.username}
-              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
+              className={btnPrimary}
             >
               Create agent
             </button>
-            <button
-              type="button"
-              onClick={() => setCreating(false)}
-              className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-            >
+            <button type="button" onClick={() => setCreating(false)} className={btnSecondary}>
               Cancel
             </button>
           </div>
@@ -410,7 +408,7 @@ export function Agents() {
             setCreating(true);
             setCreatedToken(null);
           }}
-          className="mt-3 flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+          className={cn(btnPrimary, 'mt-3')}
         >
           <Bot size={15} /> Add agent
         </button>

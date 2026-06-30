@@ -156,9 +156,12 @@ def agent_complete(queries=None, ids=None, done=True, list=None, tag=None):
     return _api("POST", "/api/agent/tasks/complete", {k: v for k, v in body.items() if v is not None})
 
 
-def agent_update(updates):
-    """updates=[{id|query, list?, tag?, patch:{...}}]. Returns matched/unmatched."""
-    return _api("POST", "/api/agent/tasks/update", {"updates": updates})
+def agent_update(updates, include_done=False):
+    """updates=[{id|query, list?, tag?, patch:{...}}]. patch may set note, flagged, priority,
+    due_date/defer_date/reminder_at (ISO), recurrence (rule object or null), status. Set
+    include_done=True to match a completed task. Returns matched/unmatched."""
+    body = {"updates": updates, "include_done": include_done}
+    return _api("POST", "/api/agent/tasks/update", {k: v for k, v in body.items() if v})
 
 
 def agent_set_tag_geo(tag, geo=None, near_name=None, near=None, create_if_missing=False):
@@ -170,6 +173,38 @@ def agent_set_tag_geo(tag, geo=None, near_name=None, near=None, create_if_missin
 
 def agent_nearby(tag=None, zone=None, lat=None, lng=None, near_name=None):
     return _api("GET", f"/api/agent/nearby{_qs(tag=tag, zone=zone, lat=lat, lng=lng, near_name=near_name)}")
+
+
+def agent_users():
+    """People a task can be shared with or assigned to (bots excluded)."""
+    return _api("GET", "/api/agent/users")
+
+
+def agent_share(users, query=None, queries=None, ids=None, list=None, tag=None,
+                permission=None, remove=False):
+    """Share task(s) with users (by name). Target by query/queries/ids or a whole list/tag.
+    permission defaults to 'write'; remove=True unshares. Write-gated per task."""
+    body = {"query": query, "queries": queries, "ids": ids, "list": list, "tag": tag,
+            "users": users, "permission": permission, "remove": remove or None}
+    return _api("POST", "/api/agent/tasks/share", {k: v for k, v in body.items() if v is not None})
+
+
+def agent_assign(users, query=None, queries=None, ids=None, list=None, tag=None, remove=False):
+    """Assign task(s) to users (by name). remove=True unassigns. Write-gated per task."""
+    body = {"query": query, "queries": queries, "ids": ids, "list": list, "tag": tag,
+            "users": users, "remove": remove or None}
+    return _api("POST", "/api/agent/tasks/assign", {k: v for k, v in body.items() if v is not None})
+
+
+def agent_start_timer(query=None, id=None, list=None):
+    """Start a timer on a task (resolved by query/id). Auto-stops any running timer."""
+    body = {"query": query, "id": id, "list": list}
+    return _api("POST", "/api/agent/timer/start", {k: v for k, v in body.items() if v is not None})
+
+
+def agent_stop_timer():
+    """Stop the currently running timer. Returns {stopped:{id,title}|null}."""
+    return _api("POST", "/api/agent/timer/stop", {})
 
 
 # ── Webhook HTTP server ──────────────────────────────────────────────

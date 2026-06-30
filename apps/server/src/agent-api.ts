@@ -86,6 +86,26 @@ export function registerAgentApi(api: App, deps: AgentApiDeps): void {
     return send(c, await ops.tagGeo(c.get('userId'), b));
   });
 
+  // The assignable/shareable roster (real users).
+  api.get('/agent/users', requireScope('tasks:read'), (c) => send(c, ops.users(c.get('userId'))));
+
+  api.post('/agent/tasks/share', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.share>[1];
+    return send(c, ops.share(c.get('userId'), b));
+  });
+
+  api.post('/agent/tasks/assign', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.assign>[1];
+    return send(c, ops.assign(c.get('userId'), b));
+  });
+
+  api.post('/agent/timer/start', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.startTimer>[1];
+    return send(c, ops.startTimer(c.get('userId'), b));
+  });
+
+  api.post('/agent/timer/stop', requireScope('tasks:write'), (c) => send(c, ops.stopTimer(c.get('userId'))));
+
   // Read-only place lookup: returns nearby candidates for the location editor. No mutation,
   // so tasks:read; browser sessions pass requireScope automatically.
   api.post('/agent/geocode', requireScope('tasks:read'), async (c) => {

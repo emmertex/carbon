@@ -104,7 +104,7 @@ export function ListView({
         projects={projects}
       />
 
-      {count > 0 && <ViewRow grouping className="mb-3" />}
+      <ViewRow grouping className="mb-3" />
 
       {quickAdd && (
         <div className="mb-3">

@@ -15,6 +15,8 @@ import {
   type Db,
   type Item,
   type Tag,
+  type User,
+  type Permission,
   type GeoReminder,
   getItem,
   getChildren,
@@ -33,11 +35,20 @@ import {
   tagId,
   projectAncestor,
   parseGeo,
+  parseRecurrence,
   tasksNearLocation,
   visibleItemIds,
   hasWriteAccess,
   getUser,
+  listUsers,
   listAssigneesForItem,
+  shareItem,
+  unshareItem,
+  assignItem,
+  unassignItem,
+  startTimer,
+  stopTimer,
+  getRunningTimer,
   type ItemPatch,
 } from '@carbon/core';
 import { bestMatch, rankBy } from './fuzzy';
@@ -89,6 +100,15 @@ const MAX_TITLE_LEN = 2000;
 const tooMany = (...arrs: Array<unknown[] | undefined>): boolean =>
   arrs.reduce((n, a) => n + (a?.length ?? 0), 0) > MAX_BATCH;
 
+/** Accept a RecurrenceRule object (the model's natural form) or a JSON string; store as the
+ *  JSON string the Item column expects. null/empty clears the rule. */
+function normalizeRecurrence(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') return JSON.stringify(value);
+  return null;
+}
+
 // ----- input shapes (shared by routes and the command loop) -----------------
 
 export interface ItemsInput {
@@ -104,12 +124,19 @@ export interface ResolveInput {
   q?: string;
   list?: ListRef;
   limit?: number;
+  /** Include completed tasks when resolving kind:'task'. */
+  include_done?: boolean;
 }
 export interface TaskInput {
   title: string;
   note?: string;
   due_date?: string;
   defer_date?: string;
+  /** ISO datetime for a push reminder. */
+  reminder_at?: string;
+  /** A RecurrenceRule object or its JSON string. */
+  recurrence?: unknown;
+  estimate_minutes?: number;
   flagged?: boolean;
   priority?: number;
   tags?: string[];
@@ -128,8 +155,12 @@ export interface CompleteInput {
   queries?: string[];
   list?: ListRef;
   tag?: string;
+  /** Search completed tasks too (implied when done:false reopens one). */
+  include_done?: boolean;
 }
 export interface UpdateInput {
+  /** Search completed tasks when matching queries. */
+  include_done?: boolean;
   updates?: Array<{
     id?: string;
     query?: string;
@@ -148,6 +179,37 @@ export interface TagItemsInput {
   add?: string[];
   remove?: string[];
   create_tags_if_missing?: boolean;
+  /** Include completed tasks when matching queries / a whole list or tag. */
+  include_done?: boolean;
+}
+/** Share or unshare task(s) with one or more users (by name). */
+export interface ShareInput {
+  id?: string;
+  query?: string;
+  queries?: string[];
+  list?: ListRef;
+  tag?: string;
+  users?: string[];
+  permission?: Permission;
+  /** Remove the share instead of adding it. */
+  remove?: boolean;
+}
+/** Assign or unassign task(s) to one or more users (by name). */
+export interface AssignInput {
+  id?: string;
+  query?: string;
+  queries?: string[];
+  list?: ListRef;
+  tag?: string;
+  users?: string[];
+  /** Unassign instead of assign. */
+  remove?: boolean;
+}
+/** Start a timer on a single task (resolved by id or fuzzy query). */
+export interface TimerInput {
+  id?: string;
+  query?: string;
+  list?: ListRef;
 }
 export interface TagGeoInput {
   tag?: string;
@@ -198,6 +260,9 @@ export function createAgentOps(deps: AgentApiDeps) {
     status: it.status,
     due_date: it.due_date,
     defer_date: it.defer_date,
+    reminder_at: it.reminder_at,
+    recurrence: parseRecurrence(it.recurrence),
+    estimate_minutes: it.estimate_minutes,
     flagged: it.flagged,
     priority: it.priority,
   });
@@ -228,6 +293,18 @@ export function createAgentOps(deps: AgentApiDeps) {
     return bestMatch(ref, tags, [(t) => t.name, (t) => tagLeaf(t.name)]).matched?.item ?? null;
   };
 
+  // Assignable/shareable people: real (non-bot, non-deleted) users. Matched by id first, then
+  // fuzzily on display name / username so "Rachel" resolves.
+  const assignable = (): User[] => listUsers(db).filter((u) => !u.is_bot);
+  const findUser = (ref: string | undefined): User | null => {
+    if (!ref) return null;
+    const users = assignable();
+    const byId = users.find((u) => u.id === ref || u.username === ref);
+    if (byId) return byId;
+    return bestMatch(ref, users, [(u) => u.display_name ?? u.username, (u) => u.username]).matched?.item ?? null;
+  };
+  const userName = (u: User): string => u.display_name ?? u.username;
+
   const resolveOrCreateList = (
     userId: string,
     ref: ListRef | undefined,
@@ -251,13 +328,25 @@ export function createAgentOps(deps: AgentApiDeps) {
     return { id: t.id, name: t.name, created: true };
   };
 
-  const taskPool = (userId: string, list: Item | null, tag: Tag | null): Item[] => {
+  // includeDone surfaces completed tasks too (for reopening/re-tagging/reporting). Default
+  // off keeps the active-only pool the action ops have always used.
+  const taskPool = (
+    userId: string,
+    list: Item | null,
+    tag: Tag | null,
+    opts: { includeDone?: boolean } = {},
+  ): Item[] => {
     const scope = scopeItems(userId);
     let items: Item[];
     if (list) items = getChildren(db, list.id).filter((i) => i.type === 'task');
     else if (tag) items = getItemsByTag(db, tag.id);
-    else items = queryItems(db, { tasksOnly: true, activeOnly: true });
-    return items.filter((i) => !i.deleted && (!scope || scope.has(i.id)));
+    else items = queryItems(db, { tasksOnly: true, activeOnly: !opts.includeDone });
+    return items.filter(
+      (i) =>
+        !i.deleted &&
+        (opts.includeDone || i.status !== 'done') &&
+        (!scope || scope.has(i.id)),
+    );
   };
 
   // ----- operations ----------------------------------------------------------
@@ -295,7 +384,8 @@ export function createAgentOps(deps: AgentApiDeps) {
     const limit = Math.min(input.limit || 50, 200);
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
-    let pool = taskPool(userId, list, tag);
+    // 'done'/'all' need the done-inclusive pool; 'active' keeps the default.
+    let pool = taskPool(userId, list, tag, { includeDone: status !== 'active' });
     if (status === 'active') pool = pool.filter((i) => i.status === 'active');
     else if (status === 'done') pool = pool.filter((i) => i.status === 'done');
     const q = input.q?.trim();
@@ -332,7 +422,12 @@ export function createAgentOps(deps: AgentApiDeps) {
       nameOf = (x) => (x as Tag).name;
     } else if (input.kind === 'task') {
       const list = findList(userId, input.list);
-      ranked = rankBy(q, taskPool(userId, list, null), [(i) => i.title], { limit });
+      ranked = rankBy(
+        q,
+        taskPool(userId, list, null, { includeDone: input.include_done === true }),
+        [(i) => i.title],
+        { limit },
+      );
       nameOf = (x) => (x as Item).title;
     } else {
       return fail('kind must be list, tag, or task', 400);
@@ -398,6 +493,12 @@ export function createAgentOps(deps: AgentApiDeps) {
         flagged: !!t.flagged,
         priority: typeof t.priority === 'number' ? t.priority : 0,
       });
+      // Scheduling fields createItem doesn't take: patch them on after creation.
+      const sched: ItemPatch = {};
+      if (t.reminder_at) sched.reminder_at = t.reminder_at;
+      if (t.recurrence != null) sched.recurrence = normalizeRecurrence(t.recurrence);
+      if (typeof t.estimate_minutes === 'number') sched.estimate_minutes = t.estimate_minutes;
+      if (Object.keys(sched).length) updateItem(db, deviceId, it.id, sched);
       const tagIds = new Set(sharedTagOut.map((x) => x.id));
       for (const name of t.tags ?? []) {
         const id = perTaskTagById.get(name);
@@ -431,7 +532,10 @@ export function createAgentOps(deps: AgentApiDeps) {
       matched.push({ query: id, id, title: it.title });
     }
 
-    const pool = taskPool(userId, list, tag);
+    // Reopening (done:false) must find already-completed tasks, so include them; also honour
+    // an explicit include_done for "untick X" style queries that omit the flag.
+    const includeDone = !done || input.include_done === true;
+    const pool = taskPool(userId, list, tag, { includeDone });
     for (const query of input.queries ?? []) {
       const m = bestMatch(query, pool, [(i) => i.title]);
       if (!m.matched) {
@@ -454,6 +558,9 @@ export function createAgentOps(deps: AgentApiDeps) {
     'note',
     'due_date',
     'defer_date',
+    'reminder_at',
+    'recurrence',
+    'estimate_minutes',
     'flagged',
     'priority',
     'status',
@@ -461,6 +568,7 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   function update(userId: string, input: UpdateInput) {
     if (tooMany(input.updates)) return fail(`too many updates (max ${MAX_BATCH})`, 400);
+    const includeDone = input.include_done === true;
     const matched: Array<{ query: string; id: string; title: string }> = [];
     const unmatched: Array<{ query: string; reason: string }> = [];
     for (const u of input.updates ?? []) {
@@ -470,7 +578,7 @@ export function createAgentOps(deps: AgentApiDeps) {
         const it = getItem(db, u.id);
         target = it && !it.deleted && canSee(userId, it.id) ? it : null;
       } else if (u.query) {
-        const pool = taskPool(userId, findList(userId, u.list), findTag(u.tag));
+        const pool = taskPool(userId, findList(userId, u.list), findTag(u.tag), { includeDone });
         target = bestMatch(u.query, pool, [(i) => i.title]).matched?.item ?? null;
       }
       if (!target) {
@@ -485,6 +593,8 @@ export function createAgentOps(deps: AgentApiDeps) {
       for (const k of PATCH_FIELDS) {
         if (u.patch && k in u.patch) (patch as Record<string, unknown>)[k] = u.patch[k];
       }
+      // recurrence is stored as a JSON string; accept the model's object form.
+      if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
       updateItem(db, deviceId, target.id, patch);
       matched.push({ query: label, id: target.id, title: target.title });
     }
@@ -502,6 +612,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     const removeTags = (input.remove ?? []).map((n) => findTag(n)).filter((t): t is Tag => !!t);
     if (!add.length && !removeTags.length) return fail('specify add[] and/or remove[] tag names', 400);
 
+    const includeDone = input.include_done === true;
     const unmatched: Array<{ query: string; reason: string }> = [];
     let targets: Item[];
     if (input.ids?.length || input.queries?.length) {
@@ -511,7 +622,7 @@ export function createAgentOps(deps: AgentApiDeps) {
         if (it && !it.deleted && canSee(userId, id)) targets.push(it);
         else unmatched.push({ query: id, reason: 'no_match' });
       }
-      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag));
+      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), { includeDone });
       for (const q of input.queries ?? []) {
         const hit = bestMatch(q, pool, [(i) => i.title]).matched?.item;
         if (hit) targets.push(hit);
@@ -521,7 +632,7 @@ export function createAgentOps(deps: AgentApiDeps) {
       const list = findList(userId, input.list);
       const tag = findTag(input.tag);
       if (!list && !tag) return fail('specify list, tag, ids, or queries', 404);
-      targets = taskPool(userId, list, tag);
+      targets = taskPool(userId, list, tag, { includeDone });
     }
 
     const updated: Array<{ id: string; title: string }> = [];
@@ -629,6 +740,171 @@ export function createAgentOps(deps: AgentApiDeps) {
     });
   }
 
+  // ----- users, sharing, assigning, time tracking ----------------------------
+
+  /** People a task can be shared with or assigned to. */
+  function users(_userId: string) {
+    return ok({ users: assignable().map((u) => ({ id: u.id, name: userName(u), username: u.username })) });
+  }
+
+  // Resolve the task target(s) for share/assign from id, queries, or a whole list/tag. Dedupes
+  // and reports misses, mirroring the complete/tag envelope. Completed tasks are included so a
+  // just-finished task can still be shared/assigned.
+  type TargetInput = { id?: string; query?: string; queries?: string[]; list?: ListRef; tag?: string };
+  const collectTargets = (
+    userId: string,
+    input: TargetInput,
+  ): { targets: Item[]; unmatched: Array<{ query: string; reason: string }> } => {
+    const seen = new Set<string>();
+    const targets: Item[] = [];
+    const unmatched: Array<{ query: string; reason: string }> = [];
+    const push = (it: Item) => {
+      if (!seen.has(it.id)) {
+        seen.add(it.id);
+        targets.push(it);
+      }
+    };
+    if (input.id) {
+      const it = getItem(db, input.id);
+      if (it && !it.deleted && canSee(userId, it.id)) push(it);
+      else unmatched.push({ query: input.id, reason: 'no_match' });
+    }
+    const queries = input.queries ?? (input.query ? [input.query] : []);
+    if (queries.length) {
+      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), { includeDone: true });
+      for (const q of queries) {
+        const hit = bestMatch(q, pool, [(i) => i.title]).matched?.item;
+        if (hit) push(hit);
+        else unmatched.push({ query: q, reason: 'no_match' });
+      }
+    }
+    // No explicit task → act on a whole list/tag (e.g. "share my Groceries list with Rachel").
+    if (!input.id && !queries.length && (input.list !== undefined || input.tag)) {
+      const list = findList(userId, input.list);
+      const tag = findTag(input.tag);
+      if (list || tag) for (const it of taskPool(userId, list, tag, { includeDone: true })) push(it);
+    }
+    return { targets, unmatched };
+  };
+
+  // Resolve the user names once; report any that don't match a real person.
+  const resolveUsers = (names: string[]): { users: User[]; unknown: string[] } => {
+    const out: User[] = [];
+    const seen = new Set<string>();
+    const unknown: string[] = [];
+    for (const n of names) {
+      const u = findUser(n);
+      if (u && !seen.has(u.id)) {
+        seen.add(u.id);
+        out.push(u);
+      } else if (!u) unknown.push(n);
+    }
+    return { users: out, unknown };
+  };
+
+  function share(userId: string, input: ShareInput) {
+    const names = input.users ?? [];
+    if (!names.length) return fail('specify users[] (names)', 400);
+    if (tooMany(input.queries, names)) return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
+    const { users: people, unknown } = resolveUsers(names);
+    if (!people.length) return fail(`no such user${unknown.length ? `: ${unknown.join(', ')}` : ''}`, 404);
+    const permission: Permission = input.permission === 'read' ? 'read' : 'write';
+    const remove = input.remove === true;
+
+    const { targets, unmatched } = collectTargets(userId, input);
+    if (!targets.length && !unmatched.length) return fail('specify a task by id, query, list, or tag', 404);
+    const updated: Array<{ id: string; title: string }> = [];
+    for (const t of targets) {
+      if (!canWrite(userId, t.id)) {
+        unmatched.push({ query: t.title, reason: 'forbidden' });
+        continue;
+      }
+      for (const u of people) {
+        if (remove) unshareItem(db, deviceId, t.id, u.id);
+        else shareItem(db, deviceId, t.id, u.id, permission);
+      }
+      updated.push({ id: t.id, title: t.title });
+    }
+    return ok({
+      updated,
+      users: people.map((u) => ({ id: u.id, name: userName(u) })),
+      unknown_users: unknown,
+      permission,
+      removed: remove,
+      unmatched,
+    });
+  }
+
+  function assign(userId: string, input: AssignInput) {
+    const names = input.users ?? [];
+    if (!names.length) return fail('specify users[] (names)', 400);
+    if (tooMany(input.queries, names)) return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
+    const { users: people, unknown } = resolveUsers(names);
+    if (!people.length) return fail(`no such user${unknown.length ? `: ${unknown.join(', ')}` : ''}`, 404);
+    const remove = input.remove === true;
+
+    const { targets, unmatched } = collectTargets(userId, input);
+    if (!targets.length && !unmatched.length) return fail('specify a task by id, query, list, or tag', 404);
+    const updated: Array<{ id: string; title: string }> = [];
+    for (const t of targets) {
+      if (!canWrite(userId, t.id)) {
+        unmatched.push({ query: t.title, reason: 'forbidden' });
+        continue;
+      }
+      for (const u of people) {
+        if (remove) unassignItem(db, deviceId, t.id, u.id);
+        else assignItem(db, deviceId, t.id, u.id);
+      }
+      updated.push({ id: t.id, title: t.title });
+    }
+    return ok({
+      updated,
+      users: people.map((u) => ({ id: u.id, name: userName(u) })),
+      unknown_users: unknown,
+      removed: remove,
+      unmatched,
+    });
+  }
+
+  // Resolve a single task from id or a fuzzy query (completed included), for the timer ops.
+  const findOneTask = (userId: string, input: TimerInput): Item | null => {
+    if (input.id) {
+      const it = getItem(db, input.id);
+      return it && !it.deleted && canSee(userId, it.id) ? it : null;
+    }
+    if (input.query) {
+      const pool = taskPool(userId, findList(userId, input.list), null, { includeDone: true });
+      return bestMatch(input.query, pool, [(i) => i.title]).matched?.item ?? null;
+    }
+    return null;
+  };
+
+  function startTimer_(userId: string, input: TimerInput) {
+    const target = findOneTask(userId, input);
+    if (!target) return fail('task not found', 404);
+    if (!canWrite(userId, target.id)) return fail('forbidden', 403);
+    // One running timer per user: stop any in-flight one before starting the new one.
+    const running = getRunningTimer(db, ownerOf(userId) ?? undefined);
+    let stopped: { id: string; title: string } | null = null;
+    if (running && running.item_id !== target.id) {
+      stopTimer(db, deviceId, running.id);
+      const prev = getItem(db, running.item_id);
+      stopped = prev ? { id: prev.id, title: prev.title } : null;
+    }
+    if (!running || running.item_id !== target.id) {
+      startTimer(db, deviceId, target.id, ownerOf(userId));
+    }
+    return ok({ started: { id: target.id, title: target.title }, stopped });
+  }
+
+  function stopTimer_(userId: string) {
+    const running = getRunningTimer(db, ownerOf(userId) ?? undefined);
+    if (!running) return ok({ stopped: null });
+    stopTimer(db, deviceId, running.id);
+    const it = getItem(db, running.item_id);
+    return ok({ stopped: it ? { id: it.id, title: it.title } : { id: running.item_id, title: '' } });
+  }
+
   return {
     lists,
     tags,
@@ -642,5 +918,10 @@ export function createAgentOps(deps: AgentApiDeps) {
     tagGeo,
     nearby,
     geocodeSearch,
+    users,
+    share,
+    assign,
+    startTimer: startTimer_,
+    stopTimer: stopTimer_,
   };
 }

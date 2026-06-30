@@ -249,9 +249,17 @@ POST /api/agent/tasks/batch
 → 201 { list:{id,name,created}, tags:[{id,name,created}], created:[{id,title}] }
 ```
 Resolves (or creates) the list and tags once, then creates the tasks under the list. Use
-`tasks:[{title,note,due_date,defer_date,flagged,priority,tags}]` instead of `titles` for
-per-task fields. A task's **location comes from its tag** (precedence task > tag > project),
-so "remind me at Coles" = add the task with `tags:["coles"]` and give the `coles` tag a geo.
+`tasks:[{title,note,due_date,defer_date,reminder_at,recurrence,estimate_minutes,flagged,priority,tags}]`
+instead of `titles` for per-task fields (`due_date`/`defer_date`/`reminder_at` are ISO datetimes;
+`recurrence` is the rule object below). A task's **location comes from its tag** (precedence
+task > tag > project), so "remind me at Coles" = add the task with `tags:["coles"]` and give the
+`coles` tag a geo.
+
+**Scheduling fields.** A specific event time → `due_date`. "Remind me N before" → `reminder_at`
+(= due − N; it fires on its own, a due date isn't required). Repeats → `recurrence`, a rule object:
+`{ "type":"daily"|"weekly"|"monthly"|"yearly", "interval":1, "daysOfWeek":[0-6 Sun-Sat]?, "dayOfMonth":1-31? }`
+— e.g. weekly on Tuesday is `{ "type":"weekly", "interval":1, "daysOfWeek":[2] }`. On completion the
+next occurrence carries the same defer/due/reminder offsets forward automatically.
 
 ```
 POST /api/agent/tasks/complete
@@ -259,7 +267,9 @@ POST /api/agent/tasks/complete
 → { matched:[{query,id,title}], unmatched:[{query, reason:"no_match"|"ambiguous"|"forbidden"}] }
 ```
 Tick off by fuzzy query and/or id. **Report the envelope back to the user verbatim** —
-"marked off milk, couldn't find bread". Unmatched queries do nothing.
+"marked off milk, couldn't find bread". Unmatched queries do nothing. Re-opening (`done:false`)
+searches completed tasks automatically; pass `include_done:true` to reach a finished task in any
+other call.
 
 ```
 POST /api/agent/tasks/tag
@@ -274,9 +284,13 @@ list" is one call. Missing add-tags are created (unless `create_tags_if_missing:
 
 ```
 POST /api/agent/tasks/update
-{ "updates":[ { "query":"milk", "list":"shopping", "patch":{ "flagged":true, "due_date":"2026-07-01" } } ] }
-→ { matched:[...], unmatched:[...] }      // patch fields: title,note,due_date,defer_date,flagged,priority,status
+{ "updates":[ { "query":"milk", "list":"shopping", "patch":{ "flagged":true, "due_date":"2026-07-01" } } ],
+  "include_done":false }
+→ { matched:[...], unmatched:[...] }
 ```
+Patch fields: `title, note, due_date, defer_date, reminder_at` (ISO), `recurrence` (rule object, or
+`null` to clear), `estimate_minutes, flagged, priority, status` ("active"|"done"|"dropped"). Set
+`include_done:true` to match an already-completed task.
 
 ```
 POST /api/agent/tags/geo
@@ -296,11 +310,44 @@ GET /api/agent/nearby?lat=&lng=[&near_name=]   → tasks whose location (task/ta
 GET /api/agent/nearby?zone=Home               → tasks whose location label matches an HA zone
 ```
 
-### Worked sequences (the four canonical utterances)
+### People, sharing & assigning
+```
+GET  /api/agent/users                → { users:[{ id, name, username }] }
+```
+The people a task can be shared with or assigned to. Call it when you're unsure a name exists.
+**Bots are not listed** — you can't share or assign to a bot through this API.
+
+```
+POST /api/agent/tasks/share
+{ "query":"plan trip", "users":["Rachel"], "permission":"write" }   // permission default "write"
+   # target instead with "queries":[...] / "ids":[...] / a whole "list" or "tag"
+   # "remove":true unshares
+→ { updated:[{id,title}], users:[{id,name}], unknown_users:[names], permission, removed, unmatched:[...] }
+
+POST /api/agent/tasks/assign
+{ "query":"book flights", "users":["Rachel"] }                      // "remove":true unassigns
+→ { updated:[{id,title}], users:[{id,name}], unknown_users:[names], removed, unmatched:[...] }
+```
+Share grants a user access; assign makes them responsible. Both resolve people by name (fuzzy) and
+are **write-gated** — you can only share/assign a task you own or have write access to; anything you
+can't is reported under `unmatched` with `reason:"forbidden"`.
+
+### Time tracking
+```
+POST /api/agent/timer/start  { "query":"write report" }   → { started:{id,title}, stopped:{id,title}|null }
+POST /api/agent/timer/stop   { }                          → { stopped:{id,title}|null }
+```
+One timer runs per user — starting a new one auto-stops the previous (reported as `stopped`).
+
+### Worked sequences (canonical utterances)
 - **"Add milk and eggs to my shopping list."** → `POST /tasks/batch {list:"shopping list", titles:["milk","eggs"]}`.
 - **"Remind me to get bread next time I'm at Coles."** → `POST /tasks/batch {list:"shopping", tags:["coles"], titles:["bread"]}` (+ once: `POST /tags/geo {tag:"coles", near_name:"coles", near:{lat,lng}}` to locate it).
 - **"Mark off bread and milk."** → `POST /tasks/complete {queries:["bread","milk"]}` → tell the user matched vs unmatched.
 - **"What did I need at Coles?"** → `GET /nearby?tag=coles`; if empty, say so and show `GET /items?list=shopping`.
+- **"Remind me to take my son to swimming every Tuesday at 5pm, an hour before, and share it with Rachel."** →
+  `POST /tasks/batch {tasks:[{title:"Take son to swimming", due_date:"2026-07-07T17:00:00Z", reminder_at:"2026-07-07T16:00:00Z", recurrence:{type:"weekly",interval:1,daysOfWeek:[2]}}]}`
+  then `POST /tasks/share {query:"Take son to swimming", users:["Rachel"]}`.
+- **"Start a timer on the report."** → `POST /timer/start {query:"report"}`; later **"stop the timer"** → `POST /timer/stop {}`.
 
 ### Geocoding env (place lookup for "nearest Coles")
 Pluggable, OpenStreetMap by default, all outbound calls go through the SSRF guard.

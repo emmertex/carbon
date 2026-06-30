@@ -20,6 +20,12 @@ Examples:
   carbon-cli items --list shopping
   carbon-cli resolve list "shoping"
   carbon-cli tag-geo coles --lat -37.81 --lng 145.01 --radius 200 --label "Coles Camberwell"
+  carbon-cli add "Take son to swimming" --due 2026-07-07T17:00 --remind 2026-07-07T16:00 --repeat weekly:tue
+  carbon-cli users
+  carbon-cli share "Take son to swimming" --to rachel
+  carbon-cli assign "Book flights" --to rachel
+  carbon-cli timer start "Write report"
+  carbon-cli timer stop
 """
 
 import argparse
@@ -102,6 +108,28 @@ def _emit(resp, as_json):
     return False
 
 
+_WEEKDAYS = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def _parse_repeat(spec):
+    """'daily' | 'weekly' | 'weekly:mon,tue' | 'monthly:15' | 'yearly' → a recurrence rule dict."""
+    if not spec:
+        return None
+    typ, _, arg = spec.partition(":")
+    typ = typ.strip().lower()
+    if typ not in ("daily", "weekly", "monthly", "yearly"):
+        print(f"Error: --repeat must be daily|weekly|monthly|yearly (got '{spec}')")
+        sys.exit(1)
+    rule = {"type": typ, "interval": 1}
+    if typ == "weekly" and arg:
+        days = [_WEEKDAYS[d.strip().lower()[:3]] for d in arg.split(",") if d.strip().lower()[:3] in _WEEKDAYS]
+        if days:
+            rule["daysOfWeek"] = days
+    elif typ == "monthly" and arg.strip().isdigit():
+        rule["dayOfMonth"] = int(arg)
+    return rule
+
+
 # ── commands ──────────────────────────────────────────────────────────────
 
 
@@ -159,13 +187,24 @@ def cmd_items(a):
 
 
 def cmd_add(a):
+    # Scheduling (due/defer/remind/repeat) needs the per-task tasks[] form; otherwise titles[].
+    sched = {
+        "due_date": a.due,
+        "defer_date": a.defer,
+        "reminder_at": a.remind,
+        "recurrence": _parse_repeat(a.repeat),
+    }
+    sched = {k: v for k, v in sched.items() if v is not None}
     body = {
-        "titles": a.titles,
         "list": a.list,
         "tags": a.tag or None,
         "create_list_if_missing": not a.no_create,
         "create_tags_if_missing": not a.no_create,
     }
+    if sched:
+        body["tasks"] = [{"title": t, **sched} for t in a.titles]
+    else:
+        body["titles"] = a.titles
     resp = _fail(_api("POST", "/api/agent/tasks/batch", {k: v for k, v in body.items() if v is not None}))
     if _emit(resp, a.json):
         return
@@ -265,6 +304,66 @@ def cmd_tag_geo(a):
         print(f"Set {resp['tag']['name']} location: {g['lat']:.4f}, {g['lng']:.4f} (r={g['radius']}m){label}")
 
 
+def cmd_users(a):
+    resp = _fail(_api("GET", "/api/agent/users"))
+    if _emit(resp, a.json):
+        return
+    names = [u["name"] for u in resp.get("users", [])]
+    print("People: " + (", ".join(names) if names else "(none)"))
+
+
+def _share_assign(a, path, verbs):
+    body = {"query": a.task, "users": a.to, "remove": a.remove or None}
+    if path.endswith("share") and a.read:
+        body["permission"] = "read"
+    resp = _fail(_api("POST", path, {k: v for k, v in body.items() if v is not None}))
+    if _emit(resp, a.json):
+        return resp
+    updated = [u["title"] for u in resp.get("updated", [])]
+    who = ", ".join(u["name"] for u in resp.get("users", []))
+    unknown = resp.get("unknown_users", [])
+    unmatched = [u["query"] for u in resp.get("unmatched", [])]
+    did, undid = verbs
+    prep = "from" if a.remove else ("with" if path.endswith("share") else "to")
+    if updated and who:
+        print(f"{undid if a.remove else did} {', '.join(updated)} {prep} {who}")
+    if unknown:
+        print("No such user: " + ", ".join(unknown))
+    if unmatched:
+        print("Skipped: " + ", ".join(unmatched))
+    if not updated and not unknown and not unmatched:
+        print("Nothing to do.")
+    return resp
+
+
+def cmd_share(a):
+    _share_assign(a, "/api/agent/tasks/share", ("Shared", "Unshared"))
+
+
+def cmd_assign(a):
+    _share_assign(a, "/api/agent/tasks/assign", ("Assigned", "Unassigned"))
+
+
+def cmd_timer(a):
+    if a.action == "start":
+        resp = _fail(_api("POST", "/api/agent/timer/start", {"query": a.task}))
+        if _emit(resp, a.json):
+            return
+        started = resp.get("started") or {}
+        stopped = resp.get("stopped")
+        msg = f"Started timer on {started.get('title', a.task)}"
+        if stopped and stopped.get("title"):
+            msg += f" (stopped {stopped['title']})"
+        print(msg + ".")
+    else:  # stop
+        resp = _fail(_api("POST", "/api/agent/timer/stop", {}))
+        if _emit(resp, a.json):
+            return
+        stopped = resp.get("stopped")
+        print(f"Stopped timer on {stopped['title']}." if stopped and stopped.get("title")
+              else "No timer running.")
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="carbon-cli", description="Natural-language Carbon task control.")
     p.add_argument("--json", action="store_true", help="print raw JSON instead of a friendly line")
@@ -291,6 +390,10 @@ def build_parser():
     sp.add_argument("titles", nargs="+")
     sp.add_argument("--list")
     sp.add_argument("--tag", action="append", help="tag to attach (repeatable)")
+    sp.add_argument("--due", help="due date/time, ISO e.g. 2026-07-07T17:00")
+    sp.add_argument("--defer", help="defer (hide until) date/time, ISO")
+    sp.add_argument("--remind", help="reminder date/time, ISO (a push fires then)")
+    sp.add_argument("--repeat", help="repeat: daily|weekly|monthly|yearly, e.g. weekly:tue or monthly:15")
     sp.add_argument("--no-create", action="store_true", help="don't auto-create a missing list/tag")
     sp.set_defaults(func=cmd_add)
 
@@ -331,6 +434,27 @@ def build_parser():
     sp.add_argument("--clear", action="store_true")
     sp.add_argument("--create", action="store_true", help="create the tag if missing")
     sp.set_defaults(func=cmd_tag_geo)
+
+    sp = sub.add_parser("users", help="people a task can be shared with / assigned to")
+    sp.set_defaults(func=cmd_users)
+
+    sp = sub.add_parser("share", help="share a task with people (by name)")
+    sp.add_argument("task", help="task name (fuzzy)")
+    sp.add_argument("--to", action="append", required=True, help="person to share with (repeatable)")
+    sp.add_argument("--read", action="store_true", help="grant read-only (default is write)")
+    sp.add_argument("--remove", action="store_true", help="unshare instead")
+    sp.set_defaults(func=cmd_share)
+
+    sp = sub.add_parser("assign", help="assign a task to people (by name)")
+    sp.add_argument("task", help="task name (fuzzy)")
+    sp.add_argument("--to", action="append", required=True, help="person to assign (repeatable)")
+    sp.add_argument("--remove", action="store_true", help="unassign instead")
+    sp.set_defaults(func=cmd_assign)
+
+    sp = sub.add_parser("timer", help="start/stop time tracking on a task")
+    sp.add_argument("action", choices=["start", "stop"])
+    sp.add_argument("task", nargs="?", help="task name (for start)")
+    sp.set_defaults(func=cmd_timer)
 
     return p
 

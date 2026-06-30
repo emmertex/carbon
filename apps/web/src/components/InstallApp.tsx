@@ -3,7 +3,7 @@ import { Download, Check } from 'lucide-react';
 import { canInstall, isStandalone, onInstallChange, promptInstall } from '@/lib/pwa';
 import { LINKS } from '@/lib/links';
 import { SettingsSection } from './settings/SettingsSection';
-import { DocLink } from './settings/controls';
+import { DocLink, btnPrimary } from './settings/controls';
 
 export function InstallApp() {
   const [installable, setInstallable] = useState(canInstall());
@@ -37,10 +37,7 @@ export function InstallApp() {
           <p className="mb-3 text-sm text-text-muted">
             Add Carbon to your home screen for a full-screen, offline-ready app.
           </p>
-          <button
-            onClick={install}
-            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:bg-accent-hover"
-          >
+          <button onClick={install} className={btnPrimary}>
             <Download size={16} />
             Install Carbon
           </button>

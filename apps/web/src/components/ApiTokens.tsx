@@ -8,7 +8,7 @@ import {
 } from '@/lib/admin';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText, inputCls } from './settings/controls';
+import { ErrorText, Card, btnPrimary, btnIcon, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 
 const ALL_SCOPES = ['tasks:read', 'tasks:write', 'inbox:write'];
@@ -82,7 +82,7 @@ export function ApiTokens() {
         </div>
       )}
 
-      <div className="mb-3 divide-y divide-border rounded-xl border border-border">
+      <Card className="mb-3 divide-y divide-border">
         {tokens.length === 0 && (
           <p className="px-3 py-2 text-sm text-text-faint">No tokens yet.</p>
         )}
@@ -107,14 +107,14 @@ export function ApiTokens() {
                   await reload();
                 }
               }}
-              className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-danger"
+              className={cn(btnIcon, 'hover:text-danger')}
               title="Revoke"
             >
               <Trash2 size={15} />
             </button>
           </div>
         ))}
-      </div>
+      </Card>
 
       <form onSubmit={add} className="flex flex-wrap items-center gap-2">
         <input
@@ -138,11 +138,7 @@ export function ApiTokens() {
             {s}
           </button>
         ))}
-        <button
-          type="submit"
-          disabled={!name || scopes.length === 0}
-          className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-        >
+        <button type="submit" disabled={!name || scopes.length === 0} className={btnPrimary}>
           Create token
         </button>
       </form>

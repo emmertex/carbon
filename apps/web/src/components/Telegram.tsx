@@ -7,7 +7,7 @@ import {
   type TelegramStatus,
 } from '@/lib/admin';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText } from './settings/controls';
+import { ErrorText, btnPrimary, btnSecondary } from './settings/controls';
 
 export function Telegram() {
   const [status, setStatus] = useState<TelegramStatus | null>(null);
@@ -103,22 +103,14 @@ export function Telegram() {
                 Connected to {botHandle} as <strong>{status.link.username ?? 'you'}</strong>.
               </span>
             </div>
-            <button
-              onClick={disconnect}
-              disabled={busy}
-              className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2 disabled:opacity-50"
-            >
+            <button onClick={disconnect} disabled={busy} className={btnSecondary}>
               Disconnect
             </button>
           </div>
         ) : (
           <div className="space-y-3">
             {!code ? (
-              <button
-                onClick={connect}
-                disabled={busy}
-                className="inline-flex items-center gap-2 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-              >
+              <button onClick={connect} disabled={busy} className={btnPrimary}>
                 <Send size={14} /> Connect Telegram
               </button>
             ) : (

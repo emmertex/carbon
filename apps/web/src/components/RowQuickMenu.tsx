@@ -1,5 +1,6 @@
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Target, Eye, Flag, Trash2, ClipboardList } from 'lucide-react';
+import { Check, Target, Eye, Flag, Trash2, ClipboardList, ChevronRight } from 'lucide-react';
 import {
   listUsers,
   listTags,
@@ -16,6 +17,7 @@ import {
   type Item,
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
+import { buildTagTree, type TagNode } from '@/lib/tagTree';
 import { mutate } from '@/lib/mutate';
 import { itemTreeToMarkdown } from '@/lib/exportMarkdown';
 import { getCurrentUserId, useStore } from '@/lib/store';
@@ -56,6 +58,12 @@ export function RowQuickMenu({
 }) {
   const focus = useFocusItem();
   const itemId = item.id;
+
+  // Assign/Tags start collapsed so the menu opens compact; the tag tree mirrors
+  // the sidebar's nesting, with each parent collapsed until expanded here.
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
 
   const data = useQuery(
     (db) => ({
@@ -111,16 +119,65 @@ export function RowQuickMenu({
     });
   }
 
+  function toggleTagExpanded(tagId: string) {
+    setExpandedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tagId)) next.delete(tagId);
+      else next.add(tagId);
+      return next;
+    });
+  }
+
+  // Tag forest (counts are irrelevant in the menu) flattened to the rows that are
+  // currently visible — a parent's children appear only once it's expanded.
+  const tagRoots = useMemo(() => (data ? buildTagTree(data.tags, {}) : []), [data?.tags]);
+  const visibleTags = useMemo(() => {
+    const out: TagNode[] = [];
+    const walk = (nodes: TagNode[]) => {
+      for (const n of nodes) {
+        out.push(n);
+        if (n.children.length && expandedTags.has(n.tag.id)) walk(n.children);
+      }
+    };
+    walk(tagRoots);
+    return out;
+  }, [tagRoots, expandedTags]);
+
+  // Keep the menu on screen: if its top + height would spill past the bottom,
+  // shift it up and cap its height so the inner overflow-auto can scroll. Re-run
+  // whenever the content height changes (sections expand, tags toggle).
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [clamp, setClamp] = useState<{ top: number; maxHeight: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const margin = 8;
+    const vh = window.innerHeight;
+    const maxHeight = vh - margin * 2;
+    const height = Math.min(el.scrollHeight, maxHeight);
+    const top =
+      pos.top + height > vh - margin ? Math.max(margin, vh - height - margin) : pos.top;
+    setClamp({ top, maxHeight });
+  }, [pos.top, assignOpen, tagsOpen, expandedTags, data?.roster.length, visibleTags.length]);
+
   const sectionCls =
-    'mt-1 border-t border-border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-text-faint';
+    'mt-1 flex w-full items-center gap-1 border-t border-border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-text-faint hover:bg-surface-2';
   const itemCls = 'flex w-full items-center gap-2 rounded px-2 py-1 hover:bg-surface-2';
+  const chevronCls = (open: boolean) =>
+    cn('shrink-0 text-text-faint transition-transform', open && 'rotate-90');
 
   return createPortal(
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} onContextMenu={(e) => e.preventDefault()} />
       <div
+        ref={menuRef}
         onClick={(e) => e.stopPropagation()}
-        style={{ top: pos.top, left: pos.left, right: pos.right }}
+        style={{
+          top: clamp?.top ?? pos.top,
+          left: pos.left,
+          right: pos.right,
+          maxHeight: clamp?.maxHeight,
+        }}
         className="fixed z-50 max-h-[80vh] w-52 overflow-auto rounded-lg border border-border bg-surface p-1 text-sm shadow-lg"
       >
         <button
@@ -166,31 +223,69 @@ export function RowQuickMenu({
           {data?.inPlan && <Check size={14} className="text-accent" />}
         </button>
 
-        <div className={sectionCls}>Assign</div>
-        {data?.roster.length ? (
-          data.roster.map((u) => (
-            <button key={u.id} onClick={() => toggleAssignee(u.id)} className={itemCls}>
-              <Avatar user={u} size="sm" />
-              <span className="flex-1 truncate text-left">{u.display_name || u.username}</span>
-              {data.assigned.has(u.id) && <Check size={14} className="text-accent" />}
-            </button>
-          ))
-        ) : (
-          <div className="px-2 py-1 text-xs text-text-faint">No people</div>
-        )}
+        <button onClick={() => setAssignOpen((o) => !o)} className={sectionCls}>
+          <ChevronRight size={12} className={chevronCls(assignOpen)} />
+          <span className="flex-1 text-left">Assign</span>
+          {!!data?.assigned.size && (
+            <span className="text-[11px] tabular-nums text-text-faint">{data.assigned.size}</span>
+          )}
+        </button>
+        {assignOpen &&
+          (data?.roster.length ? (
+            data.roster.map((u) => (
+              <button key={u.id} onClick={() => toggleAssignee(u.id)} className={itemCls}>
+                <Avatar user={u} size="sm" />
+                <span className="flex-1 truncate text-left">{u.display_name || u.username}</span>
+                {data.assigned.has(u.id) && <Check size={14} className="text-accent" />}
+              </button>
+            ))
+          ) : (
+            <div className="px-2 py-1 text-xs text-text-faint">No people</div>
+          ))}
 
-        <div className={sectionCls}>Tags</div>
-        {data?.tags.length ? (
-          data.tags.map((t) => (
-            <button key={t.id} onClick={() => toggleTag(t.id)} className={itemCls}>
-              <TagMark color={t.color} />
-              <span className="flex-1 truncate text-left">{t.name}</span>
-              {data.itemTags.has(t.id) && <Check size={14} className="text-accent" />}
-            </button>
-          ))
-        ) : (
-          <div className="px-2 py-1 text-xs text-text-faint">No tags yet</div>
-        )}
+        <button onClick={() => setTagsOpen((o) => !o)} className={sectionCls}>
+          <ChevronRight size={12} className={chevronCls(tagsOpen)} />
+          <span className="flex-1 text-left">Tags</span>
+          {!!data?.itemTags.size && (
+            <span className="text-[11px] tabular-nums text-text-faint">{data.itemTags.size}</span>
+          )}
+        </button>
+        {tagsOpen &&
+          (visibleTags.length ? (
+            visibleTags.map((n) => {
+              const hasChildren = n.children.length > 0;
+              const open = expandedTags.has(n.tag.id);
+              return (
+                <div
+                  key={n.tag.id}
+                  className="flex items-center"
+                  style={{ paddingLeft: `${n.depth * 0.75}rem` }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleTagExpanded(n.tag.id)}
+                    aria-label={open ? 'Collapse' : 'Expand'}
+                    className={cn(
+                      'flex h-7 w-4 shrink-0 items-center justify-center',
+                      !hasChildren && 'invisible',
+                    )}
+                  >
+                    <ChevronRight size={12} className={chevronCls(open)} />
+                  </button>
+                  <button
+                    onClick={() => toggleTag(n.tag.id)}
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-1 hover:bg-surface-2"
+                  >
+                    <TagMark color={n.tag.color} />
+                    <span className="flex-1 truncate text-left">{n.leaf}</span>
+                    {data?.itemTags.has(n.tag.id) && <Check size={14} className="text-accent" />}
+                  </button>
+                </div>
+              );
+            })
+          ) : (
+            <div className="px-2 py-1 text-xs text-text-faint">No tags yet</div>
+          ))}
 
         <button onClick={copyMarkdown} className={cn(itemCls, 'mt-1 border-t border-border')}>
           <ClipboardList size={14} className="text-text-faint" />

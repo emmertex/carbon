@@ -198,6 +198,122 @@ describe('runAgentCommand tool loop', () => {
   });
 });
 
+describe('runAgentCommand — scheduling, sharing, assigning, timers, completed reads', () => {
+  test('scheduling: add_tasks with recurrence + reminder_at round-trips onto the item', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { parseRecurrence } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    stubLLM([
+      toolResp('add_tasks', {
+        tasks: [
+          {
+            title: 'Take son to swimming',
+            due_date: '2026-07-07T17:00:00.000Z',
+            reminder_at: '2026-07-07T16:00:00.000Z',
+            recurrence: { type: 'weekly', interval: 1, daysOfWeek: [2] },
+          },
+        ],
+      }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'remind me to take my son to swimming every tuesday at 5pm, an hour before', true);
+    assert.match(r.reply, /Added.*Take son to swimming/);
+    const { queryItems } = await import('@carbon/core');
+    const task = queryItems(db, { tasksOnly: true }).find((t) => t.title === 'Take son to swimming')!;
+    assert.equal(task.due_date, '2026-07-07T17:00:00.000Z');
+    assert.equal(task.reminder_at, '2026-07-07T16:00:00.000Z');
+    const rule = parseRecurrence(task.recurrence);
+    assert.deepEqual(rule, { type: 'weekly', interval: 1, daysOfWeek: [2] });
+  });
+
+  test('reopen: complete done:false finds a completed task by name', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { setCompleted } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Pay rent', ownerId: uid });
+    setCompleted(db, deviceId, task.id, true);
+    assert.equal(getItem(db, task.id)?.status, 'done');
+    stubLLM([toolResp('complete', { queries: ['pay rent'], done: false }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'untick pay rent', true);
+    assert.match(r.reply, /Re-opened: Pay rent/);
+    assert.equal(getItem(db, task.id)?.status, 'active');
+  });
+
+  test('share: shares a task with a roster user (write by default)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const { listSharesForItem } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Plan trip', ownerId: uid });
+    stubLLM([toolResp('share', { query: 'plan trip', users: ['rachel'] }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'share plan trip with rachel', true);
+    assert.match(r.reply, /Shared Plan trip with rachel/);
+    const shares = listSharesForItem(db, task.id);
+    assert.equal(shares.length, 1);
+    assert.equal(shares[0].user_id, rachelId);
+    assert.equal(shares[0].permission, 'write');
+  });
+
+  test('share: a read-only collaborator cannot re-share (write-gated)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: ownerId } = addUser('owner', 'pw');
+    const { id: bobId } = addUser('bob', 'pw');
+    addUser('rachel', 'pw');
+    const { shareItem, listSharesForItem } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Secret plan', ownerId });
+    shareItem(db, deviceId, task.id, bobId, 'read'); // bob can see but not write
+    stubLLM([toolResp('share', { query: 'secret plan', users: ['rachel'] }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, bobId, 'share secret plan with rachel', true);
+    assert.match(r.reply, /Skipped: Secret plan/);
+    // Only bob's original read share exists; rachel was never added.
+    assert.equal(listSharesForItem(db, task.id).length, 1);
+  });
+
+  test('assign: assigns a task to a roster user', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Book flights', ownerId: uid });
+    stubLLM([toolResp('assign', { query: 'book flights', users: ['rachel'] }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'assign book flights to rachel', true);
+    assert.match(r.reply, /Assigned Book flights to rachel/);
+    assert.ok(listAssigneesForItem(db, task.id).some((a) => a.user_id === rachelId));
+  });
+
+  test('timers: start auto-stops a prior running timer; stop ends it', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { getRunningTimer } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const t1 = createItem(db, deviceId, { type: 'task', title: 'Write report', ownerId: uid });
+    const t2 = createItem(db, deviceId, { type: 'task', title: 'Review PR', ownerId: uid });
+
+    stubLLM([toolResp('start_timer', { query: 'write report' }), doneResp()]);
+    await runAgentCommand(deps(db, deviceId), agent, uid, 'start a timer on write report', true);
+    assert.equal(getRunningTimer(db, uid)?.item_id, t1.id);
+
+    stubLLM([toolResp('start_timer', { query: 'review PR' }), doneResp()]);
+    const r2 = await runAgentCommand(deps(db, deviceId), agent, uid, 'start a timer on review PR', true);
+    assert.match(r2.reply, /Started timer on Review PR \(stopped Write report\)/);
+    assert.equal(getRunningTimer(db, uid)?.item_id, t2.id);
+
+    stubLLM([toolResp('stop_timer', {}), doneResp()]);
+    const r3 = await runAgentCommand(deps(db, deviceId), agent, uid, 'stop the timer', true);
+    assert.match(r3.reply, /Stopped timer on Review PR/);
+    assert.equal(getRunningTimer(db, uid), undefined);
+  });
+});
+
 describe('NL settings + usage helpers', () => {
   test('defaults, round-trip, and enabled requires an agent', () => {
     const { db } = makeTestDb();

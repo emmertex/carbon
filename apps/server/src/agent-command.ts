@@ -53,6 +53,26 @@ const GEO_HINT = `\n\nThe user's current location is known. When they ask to be 
 shop or place), after add_tasks also call set_tag_geo {tag:"PLACE", near_name:"PLACE"} so the reminder \
 fires at the nearest PLACE to them — you don't need coordinates, the app fills them in.`;
 
+// Scheduling / sharing / assigning / timers, appended to whichever base prompt is in use so
+// both the in-app box and chat surfaces share the same capability rules. Relies on the "current
+// date and time" line (added below) to resolve relative dates.
+const CAPABILITIES_HINT = `\n\nMore you can do (resolve all names by fuzzy match — pass plain names, never ids):
+- Scheduling. A specific event time → due_date (ISO). "Remind me N before" → reminder_at = due − N. \
+A plain "remind me at TIME" with no event → set both due_date and reminder_at to that time. Repeats \
+("every Tuesday", "weekly", "monthly on the 3rd") → recurrence, e.g. weekly on Tuesday is \
+{type:"weekly",interval:1,daysOfWeek:[2]} (daysOfWeek 0=Sun…6=Sat); monthly day 3 is \
+{type:"monthly",interval:1,dayOfMonth:3}. Put dates/repeat on creation via add_tasks {tasks:[{title,…}]}, \
+or change them later via update.
+- Sharing & assigning. "Share X with NAME" → share {query:"X", users:["NAME"]}. "Assign X to NAME" → \
+assign {query:"X", users:["NAME"]}. Call users first if unsure who exists. remove:true unshares/unassigns.
+- Time tracking. "Start a timer on X" → start_timer {query:"X"}. "Stop the timer" → stop_timer {}.
+- Completed/hidden tasks. To reopen, re-tag, edit or report on a finished task, reach it with done:false \
+(complete), include_done:true (update/tag_items), or status:"done"|"all" (items).
+Example — "Remind me to take my son to swimming every Tuesday at 5pm, remind me about an hour before, \
+share it with Rachel": add_tasks {tasks:[{title:"Take son to swimming", due_date:"<next Tue 17:00>", \
+reminder_at:"<that Tue 16:00>", recurrence:{type:"weekly",interval:1,daysOfWeek:[2]}}]} then \
+share {query:"Take son to swimming", users:["Rachel"]}.`;
+
 const SYSTEM_PROMPT = `You manage a user's tasks in Carbon by calling tools. The server resolves names \
 to ids by fuzzy match, so pass plain names (a list name, a tag, a task title) — never ids.
 
@@ -101,15 +121,38 @@ If something couldn't be found, say so plainly.`;
 const TOOLS: ToolDef[] = [
   {
     name: 'add_tasks',
-    description: 'Add one or more tasks to a list (creates the list/tags if missing).',
+    description:
+      'Add one or more tasks to a list (creates the list/tags if missing). For plain tasks pass ' +
+      'titles[]. For per-task scheduling pass tasks[] with {title, note?, due_date?, defer_date?, ' +
+      'reminder_at? (all ISO datetimes), recurrence? (object {type,interval,daysOfWeek?,dayOfMonth?}), ' +
+      'flagged?, priority? (0-3), tags?}.',
     parameters: {
       type: 'object',
       properties: {
         list: { type: 'string', description: 'the list/project name' },
-        titles: { type: 'array', items: { type: 'string' }, description: 'task titles to add' },
+        titles: { type: 'array', items: { type: 'string' }, description: 'task titles to add (plain)' },
+        tasks: {
+          type: 'array',
+          description: 'tasks with scheduling/details; use instead of titles when dates/repeat/flag are involved',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              note: { type: 'string' },
+              due_date: { type: 'string', description: 'ISO datetime' },
+              defer_date: { type: 'string', description: 'ISO datetime' },
+              reminder_at: { type: 'string', description: 'ISO datetime to fire a push reminder' },
+              recurrence: { type: 'object', description: '{type:"daily"|"weekly"|"monthly"|"yearly", interval, daysOfWeek?:[0-6 Sun-Sat], dayOfMonth?}' },
+              flagged: { type: 'boolean' },
+              priority: { type: 'number', description: '0 none,1 low,2 med,3 high' },
+              tags: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['title'],
+          },
+        },
         tags: { type: 'array', items: { type: 'string' }, description: 'tags to attach to all of them' },
       },
-      required: ['titles'],
+      required: [],
     },
   },
   {
@@ -127,10 +170,15 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'update',
-    description: 'Change fields on tasks (flag, priority, due date, note, status) by name.',
+    description:
+      'Change fields on tasks by name. patch keys: note, flagged (bool), priority (0-3), ' +
+      'due_date / defer_date / reminder_at (ISO datetime), estimate_minutes (number), ' +
+      'recurrence (object {type:"daily"|"weekly"|"monthly"|"yearly", interval, daysOfWeek?:[0-6 Sun-Sat], dayOfMonth?}; null clears it), ' +
+      'status ("active"|"done"|"dropped"). Pass include_done:true to edit a completed task.',
     parameters: {
       type: 'object',
       properties: {
+        include_done: { type: 'boolean', description: 'match completed tasks too' },
         updates: {
           type: 'array',
           items: {
@@ -204,10 +252,18 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'items',
-    description: 'Show tasks in a list or with a tag.',
+    description:
+      'Show tasks in a list or with a tag. status defaults to "active"; pass "done" for completed ' +
+      'or "all" for both. Use detail:true to get due dates, reminders, repeat, flags and priority.',
     parameters: {
       type: 'object',
-      properties: { list: { type: 'string' }, tag: { type: 'string' }, q: { type: 'string' } },
+      properties: {
+        list: { type: 'string' },
+        tag: { type: 'string' },
+        q: { type: 'string' },
+        status: { type: 'string', enum: ['active', 'done', 'all'] },
+        detail: { type: 'boolean' },
+      },
     },
   },
   {
@@ -217,6 +273,60 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: { tag: { type: 'string' }, zone: { type: 'string' } },
     },
+  },
+  {
+    name: 'users',
+    description: 'List the people tasks can be shared with or assigned to (returns their names).',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'share',
+    description:
+      'Share task(s) with one or more people by name (they gain access). Target a task with query ' +
+      '(or queries/list/tag). permission defaults to "write"; pass remove:true to unshare.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'the task to share' },
+        queries: { type: 'array', items: { type: 'string' } },
+        list: { type: 'string', description: 'share every task in this list' },
+        users: { type: 'array', items: { type: 'string' }, description: 'people to share with, by name' },
+        permission: { type: 'string', enum: ['read', 'write'] },
+        remove: { type: 'boolean' },
+      },
+      required: ['users'],
+    },
+  },
+  {
+    name: 'assign',
+    description:
+      'Assign task(s) to one or more people by name (makes them responsible). Target with query ' +
+      '(or queries/list/tag). Pass remove:true to unassign.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'the task to assign' },
+        queries: { type: 'array', items: { type: 'string' } },
+        list: { type: 'string' },
+        users: { type: 'array', items: { type: 'string' }, description: 'people to assign, by name' },
+        remove: { type: 'boolean' },
+      },
+      required: ['users'],
+    },
+  },
+  {
+    name: 'start_timer',
+    description: 'Start time tracking on a task (stops any timer already running). Target by query.',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string' }, list: { type: 'string' } },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'stop_timer',
+    description: 'Stop the currently running time-tracking timer.',
+    parameters: { type: 'object', properties: {} },
   },
 ];
 
@@ -280,6 +390,16 @@ async function execTool(
       return ops.items(userId, args);
     case 'nearby':
       return await ops.nearby(userId, args);
+    case 'users':
+      return ops.users(userId);
+    case 'share':
+      return ops.share(userId, args);
+    case 'assign':
+      return ops.assign(userId, args);
+    case 'start_timer':
+      return ops.startTimer(userId, args);
+    case 'stop_timer':
+      return ops.stopTimer(userId);
     default:
       return { ok: false, status: 400, error: `unknown tool: ${name}` };
   }
@@ -367,6 +487,11 @@ function actionToToolCall(a: Record<string, unknown>): ToolCall | null {
     items: 'items',
     lists: 'lists',
     resolve: 'resolve',
+    users: 'users',
+    share: 'share',
+    assign: 'assign',
+    start_timer: 'start_timer',
+    stop_timer: 'stop_timer',
   };
   const name = map[op];
   if (!name) return null;
@@ -443,6 +568,39 @@ function buildReply(executed: ExecutedTool[], modelText: string): string {
       const items = (d.items as Array<{ title: string }>) ?? [];
       const where = e.tool === 'nearby' ? (e.args.tag ?? e.args.zone ?? 'there') : (e.args.list ?? 'that list');
       lines.push(items.length ? `At ${where}: ${joinNames(items)}` : `Nothing for ${where}.`);
+    } else if (e.tool === 'share' || e.tool === 'assign') {
+      const updated = (d.updated as Array<{ title: string }>) ?? [];
+      const people = (d.users as Array<{ name: string }>) ?? [];
+      const unknown = (d.unknown_users as string[]) ?? [];
+      const unmatched = (d.unmatched as Array<{ query: string }>) ?? [];
+      const who = people.map((u) => u.name).join(', ');
+      if (updated.length && who) {
+        const verb =
+          e.tool === 'share'
+            ? d.removed
+              ? 'Unshared'
+              : 'Shared'
+            : d.removed
+              ? 'Unassigned'
+              : 'Assigned';
+        const prep = e.tool === 'share' ? (d.removed ? 'from' : 'with') : d.removed ? 'from' : 'to';
+        lines.push(`${verb} ${joinNames(updated)} ${prep} ${who}.`);
+      }
+      if (unknown.length) lines.push(`No such user: ${unknown.join(', ')}`);
+      if (unmatched.length) lines.push(`Skipped: ${unmatched.map((u) => u.query).join(', ')}`);
+    } else if (e.tool === 'start_timer') {
+      const started = d.started as { title: string } | undefined;
+      const stopped = d.stopped as { title: string } | null;
+      if (started) {
+        lines.push(
+          stopped?.title
+            ? `Started timer on ${started.title} (stopped ${stopped.title}).`
+            : `Started timer on ${started.title}.`,
+        );
+      }
+    } else if (e.tool === 'stop_timer') {
+      const stopped = d.stopped as { title: string } | null;
+      lines.push(stopped ? `Stopped timer${stopped.title ? ` on ${stopped.title}` : ''}.` : 'No timer running.');
     }
   }
   // Soft note when a "remind me at PLACE" geo lookup couldn't be pinned — the tasks + tag
@@ -496,6 +654,7 @@ export async function runAgentCommand(
       `geocoder=${deps.geocode ? 'on' : 'off'}`,
   );
   let system = opts.conversational ? CONVERSATIONAL_SYSTEM_PROMPT : SYSTEM_PROMPT;
+  system += CAPABILITIES_HINT;
   if (anchor) system += GEO_HINT;
   // Teach the model "now" so "due tomorrow" / "this week" resolve against the server clock.
   if (opts.now) system += `\n\nThe current date and time is ${opts.now.toISOString()}.`;

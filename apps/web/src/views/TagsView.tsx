@@ -1,9 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Pause } from 'lucide-react';
 import {
   listTags,
   getItemsByTag,
+  getProjects,
   expandTagIds,
   effectiveTagColor,
   type Item,
@@ -12,9 +13,13 @@ import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { getCurrentUserId, useStore } from '@/lib/store';
 import { enrichItems } from '@/lib/enrich';
+import { applyFilters } from '@/lib/filter';
+import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
 import { TaskList } from '@/components/TaskList';
+import { ViewControls } from '@/components/ViewControls';
+import { ViewRow } from '@/components/ViewRow';
 import { TagMark } from '@/components/TagMark';
 import { abbreviateTagPath } from '@/lib/tagLabel';
 
@@ -28,6 +33,13 @@ export function TagsView() {
     if (id) select(id, 'tag');
   }, [id, select]);
 
+  const [prefs, setPrefs] = useState<ViewPrefs>(() => getPrefs(`tag:${id}`));
+  useEffect(() => setPrefs(getPrefs(`tag:${id}`)), [id]);
+  function updatePrefs(p: ViewPrefs) {
+    setPrefs(p);
+    savePrefs(`tag:${id}`, p);
+  }
+
   const data = useQuery(
     (db) => {
       const tags = listTags(db);
@@ -37,14 +49,17 @@ export function TagsView() {
       const ids = expandTagIds(db, [id!]);
       const seen = new Map<string, Item>();
       for (const tid of ids) for (const it of getItemsByTag(db, tid)) seen.set(it.id, it);
+      const filtered = applySort(applyFilters(db, [...seen.values()], prefs.filters), prefs.sort);
       return {
         selected,
         color: effectiveTagColor(db, selected.name),
-        rows: enrichItems(db, [...seen.values()]),
+        rows: enrichItems(db, filtered),
       };
     },
-    [id],
+    [id, JSON.stringify(prefs)],
   );
+  const tags = useQuery((db) => listTags(db), []) ?? [];
+  const projects = useQuery((db) => getProjects(db), []) ?? [];
 
   function create(text: string) {
     if (!data?.selected) return;
@@ -102,6 +117,10 @@ export function TagsView() {
       <div className="mb-3">
         <QuickAdd onCreate={create} />
       </div>
+
+      <ViewControls prefs={prefs} onChange={updatePrefs} tags={tags} projects={projects} />
+
+      <ViewRow className="mb-3" />
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-muted">

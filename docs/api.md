@@ -92,9 +92,15 @@ model just passes plain names. Same scopes as above. Full contract + worked call
 | POST | `/api/agent/resolve` | `tasks:read` | Fuzzy-resolve a `list`/`tag`/`task` name → ranked candidates |
 | POST | `/api/agent/tasks/batch` | `inbox:write` | Create many tasks; resolve/create list + tags by name |
 | POST | `/api/agent/tasks/complete` | `tasks:write` | Complete by id/fuzzy query → `{matched,unmatched}` |
-| POST | `/api/agent/tasks/update` | `tasks:write` | Batch patch by id/query |
+| POST | `/api/agent/tasks/update` | `tasks:write` | Batch patch by id/query (note, flag, priority, due/defer/reminder, `recurrence`, status) |
+| POST | `/api/agent/tasks/tag` | `tasks:write` | Bulk add/remove tags on a list/tag/queries |
 | POST | `/api/agent/tags/geo` | `tasks:write` | Set/clear a tag's geofence (explicit or geocoded) |
 | GET  | `/api/agent/nearby` | `tasks:read` | Tasks by `tag`/`zone`/`lat`+`lng` |
+| GET  | `/api/agent/users` | `tasks:read` | People a task can be shared with / assigned to (non-bot) |
+| POST | `/api/agent/tasks/share` | `tasks:write` | Share task(s) with users by name (`remove` to unshare) |
+| POST | `/api/agent/tasks/assign` | `tasks:write` | Assign task(s) to users by name (`remove` to unassign) |
+| POST | `/api/agent/timer/start` | `tasks:write` | Start a timer on a task (auto-stops the prior one) |
+| POST | `/api/agent/timer/stop` | `tasks:write` | Stop the running timer |
 | GET  | `/api/agent/config` | `tasks:read` | `{enabled, keywords}` — drives the in-app Add box |
 | POST | `/api/agent/command` | `inbox:write` | Run an in-app NL command (LLM tool-loop, acts as the user) → `{reply, executed, usage}` |
 | GET/PATCH | `/api/admin/nl-settings` | admin | Pick the NL agent, keyword list, enable flag |

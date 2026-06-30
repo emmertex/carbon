@@ -144,7 +144,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific | Carbon | Todoist | OmniFocus | MS To Do |
 |---|---|---|---|---|
 | Public REST API | ✓ (Everything) <ss> | ✓ REST + Sync | URL schemes / Omni Automation | ✓ Graph |
-| **NL agent API** (`/api/agent/*`) | ✓ add/complete/tag/geofence/nearby via text commands + tool loop <ss> | ✗ | ✗ | ✗ |
+| **NL agent API** (`/api/agent/*`) | ✓ add/complete/tag/schedule (due/reminder/repeat)/share/assign/timers/geofence/nearby via text commands + tool loop <ss> | ✗ | ✗ | ✗ |
 | Scoped API tokens | ✓ <ss> | ✓ (one) | n/a | OAuth |
 | Webhooks (outbound) | ✓ (agent webhooks) <ss> | ✓ | ✗ | Graph subscriptions |
 | **CalDAV sync** (VTODO + VEVENT) | ✓ **per project** <ss> | ✓ | ✓ | ✓ |

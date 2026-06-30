@@ -85,7 +85,8 @@ fuzzy matching and batching, so the model passes plain names and composes a few 
 
 The Python helper module (`hermes/carbon-webhook-listener.py`) ships matching wrappers:
 `agent_add()`, `agent_complete()`, `agent_resolve()`, `agent_lists()`, `agent_tags()`,
-`agent_items()`, `agent_nearby()`, `agent_set_tag_geo()`, `agent_update()`.
+`agent_items()`, `agent_nearby()`, `agent_set_tag_geo()`, `agent_update()`, `agent_users()`,
+`agent_share()`, `agent_assign()`, `agent_start_timer()`, `agent_stop_timer()`.
 
 **Skill rules (the short version a 1.5B model should follow):**
 1. Resolve before you write; if a name is uncertain (`/resolve` → `best.confident` false), ask.
@@ -93,6 +94,9 @@ The Python helper module (`hermes/carbon-webhook-listener.py`) ships matching wr
 3. "Remind me to get X at PLACE" → `agent_add(list="shopping", tags=[PLACE], titles=[X])`; the tag carries the location (geofence it once with `agent_set_tag_geo`).
 4. "Mark/tick off X and Y" → `agent_complete(queries=[X,Y])`, then report `matched` vs `unmatched` **verbatim** — never claim you completed an unmatched item.
 5. "What do I need at PLACE?" → `agent_nearby(tag=PLACE)`; if empty, say so and offer `agent_items(list="shopping")`.
+6. Scheduling: a time → `due_date`; "remind me N before" → `reminder_at` (= due − N); a repeat ("every Tuesday") → `recurrence` (e.g. `{type:"weekly",interval:1,daysOfWeek:[2]}`). Pass them via `agent_add(tasks=[{title, due_date, reminder_at, recurrence}])`, or change later with `agent_update`.
+7. "Share/assign X with/to NAME" → `agent_share(query="X", users=["NAME"])` / `agent_assign(...)`; call `agent_users()` if unsure who exists (bots can't be assigned). "Start/stop a timer on X" → `agent_start_timer(query="X")` / `agent_stop_timer()`.
+8. To reach a **completed** task (reopen/re-tag/report), pass `done=false` (complete) or `status="all"`/`include_done=True`.
 
 The exact, example-driven system prompt is exported as `AGENT_API_SYSTEM_PROMPT`
 (`apps/server/src/agents.ts`) — use it (or a close paraphrase) as the model's system message.

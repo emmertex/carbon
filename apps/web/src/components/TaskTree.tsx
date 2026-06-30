@@ -269,6 +269,11 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
   // Keyboard mode hides the mouse "add below" box (which autofocuses) so it can't
   // steal navigation focus.
   const [kbMode, setKbMode] = useState(false);
+  // A freshly-created empty task that the user hasn't typed into yet. Typing
+  // confirms it (and opens its detail); cancelling discards it and restores the
+  // task that was selected before it was created.
+  const [pendingNewId, setPendingNewId] = useState<string | null>(null);
+  const [returnToId, setReturnToId] = useState<string | null>(null);
 
   const idxOf = (id: string | null) => visible.findIndex((f) => f.id === id);
   const wideEnough = () => typeof window !== 'undefined' && window.innerWidth >= 1024;
@@ -300,6 +305,8 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
     setEditingId(created.id);
     setEditText('');
     setFocusedId(created.id);
+    setPendingNewId(created.id);
+    setReturnToId(useStore.getState().selectedId);
   }
   function addSibling(afterId: string) {
     beginNew(mutate((db, dev) => createSiblingAfter(db, dev, afterId, getCurrentUserId())));
@@ -311,8 +318,36 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
     );
   }
 
+  /** First keystroke in a brand-new task confirms it: it's no longer "pending"
+   *  (so cancelling later won't discard it) and we reveal its detail pane. */
+  function onEditTextChange(v: string) {
+    setEditText(v);
+    if (pendingNewId && editingId === pendingNewId && v.trim() !== '') {
+      const id = pendingNewId;
+      setPendingNewId(null);
+      setReturnToId(null);
+      select(id); // opens the docked right-hand detail pane on desktop
+    }
+  }
+
+  /** If `id` is an untouched new task, drop it and restore the prior selection.
+   *  Returns true if it handled the cancel. */
+  function discardIfPending(id: string): boolean {
+    if (id !== pendingNewId || editText.trim() !== '') return false;
+    const back = returnToId;
+    mutate((db, dev) => deleteItem(db, dev, id));
+    setPendingNewId(null);
+    setReturnToId(null);
+    setEditingId((cur) => (cur === id ? null : cur));
+    setFocusedId(back && visible.some((v) => v.id === back) ? back : null);
+    if (back) select(back);
+    containerRef.current?.focus();
+    return true;
+  }
+
   /** Commit a row's typed value on blur; only clear edit if still on that row. */
   function onRowBlur(rowId: string, e: React.FocusEvent<HTMLInputElement>) {
+    if (discardIfPending(rowId)) return;
     const value = e.target.value;
     mutate((db, dev) => updateFromQuickAdd(db, dev, rowId, value.trim()));
     setEditingId((cur) => (cur === rowId ? null : cur));
@@ -409,6 +444,7 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
       setEditText('');
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      if (discardIfPending(id)) return;
       setEditingId(null);
       containerRef.current?.focus();
     } else if (e.key === 'Backspace' && editText === '') {
@@ -490,7 +526,7 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
                 focused: focusedId === f.id,
                 editing: editingId === f.id,
                 editText,
-                onEditChange: setEditText,
+                onEditChange: onEditTextChange,
                 onEditKeyDown,
                 onEditBlur: (e) => onRowBlur(f.id, e),
               }}

@@ -9,9 +9,15 @@ import {
   syncCaldavNow,
   type CalDavConfig,
 } from "@/lib/caldav";
+import {
+  btnPrimary,
+  btnSecondary,
+  btnIcon,
+  inputCls as baseInputCls,
+} from "./settings/controls";
 
-const inputCls =
-  "w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+// Full-width fields; derive from the shared base so styling stays in one place.
+const inputCls = cn(baseInputCls, "w-full");
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
@@ -178,10 +184,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
   if (!open) {
     return (
       <div>
-        <button
-          onClick={() => setOpen(true)}
-          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-        >
+        <button onClick={() => setOpen(true)} className={btnSecondary}>
           <CalendarClock size={15} /> Set up CalDAV sync
         </button>
       </div>
@@ -300,17 +303,13 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
       </label>
 
       <div className="flex flex-wrap items-center gap-2 pt-1">
-        <button
-          onClick={save}
-          disabled={busy}
-          className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-        >
+        <button onClick={save} disabled={busy} className={btnPrimary}>
           Save
         </button>
         <button
           onClick={runTest}
           disabled={busy || !config}
-          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2 disabled:opacity-50"
+          className={btnSecondary}
           title="Test connection"
         >
           <FlaskConical size={14} /> Test
@@ -318,7 +317,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
         <button
           onClick={syncNow}
           disabled={busy || !config}
-          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-2 disabled:opacity-50"
+          className={btnSecondary}
           title="Sync now"
         >
           <RefreshCw size={14} /> Sync now
@@ -327,7 +326,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
         <button
           onClick={remove}
           disabled={busy || !config}
-          className="flex items-center gap-1.5 rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-danger disabled:opacity-50"
+          className={cn(btnIcon, "hover:text-danger")}
           title="Remove CalDAV sync"
         >
           <Trash2 size={15} />

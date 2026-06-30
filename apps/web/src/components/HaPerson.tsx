@@ -3,7 +3,7 @@ import { Check } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { updateHaPerson } from '@/lib/sync';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText, inputCls } from './settings/controls';
+import { ErrorText, Field, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 import { useDebouncedSave } from './settings/useDebouncedSave';
 
@@ -29,30 +29,35 @@ export function HaPerson() {
 
   return (
     <SettingsSection id="ha-person" title="Home Assistant">
-      <span className="mb-1 block text-sm font-medium">Home Assistant person</span>
-      <div className="flex items-center gap-2">
-        <input
-          className={inputCls}
-          placeholder="person.name"
-          value={person}
-          onChange={(e) => {
-            setPerson(e.target.value);
-            markDirty();
-          }}
-        />
-        <span className="flex h-5 items-center gap-1 text-xs text-text-faint">
-          {saved ? (
-            <>
-              <Check size={14} className="text-success" /> Saved
-            </>
-          ) : null}
-        </span>
-        <ErrorText>{error}</ErrorText>
-      </div>
-      <p className="mt-1 text-xs text-text-faint">
-        HA posts zone changes to <code>/api/geo/event</code>; matching this person fires location
-        reminders for tasks tagged with that zone/place.
-      </p>
+      <Field
+        label="Home Assistant person"
+        hint={
+          <>
+            HA posts zone changes to <code>/api/geo/event</code>; matching this person fires location
+            reminders for tasks tagged with that zone/place.
+          </>
+        }
+      >
+        <div className="flex items-center gap-2">
+          <input
+            className={inputCls}
+            placeholder="person.name"
+            value={person}
+            onChange={(e) => {
+              setPerson(e.target.value);
+              markDirty();
+            }}
+          />
+          <span className="flex h-5 items-center gap-1 text-xs text-text-faint">
+            {saved ? (
+              <>
+                <Check size={14} className="text-success" /> Saved
+              </>
+            ) : null}
+          </span>
+          <ErrorText>{error}</ErrorText>
+        </div>
+      </Field>
     </SettingsSection>
   );
 }

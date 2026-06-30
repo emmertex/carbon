@@ -231,6 +231,14 @@ body {
   background: transparent;
 }
 
+/* Opt-out: fully hide the scrollbar (e.g. the settings mobile category bar). */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 @keyframes carbon-fade-in {
   from {
     opacity: 0;

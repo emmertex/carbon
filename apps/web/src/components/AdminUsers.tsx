@@ -10,7 +10,7 @@ import { useStore } from '@/lib/store';
 import type { CurrentUser } from '@/lib/config';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { ErrorText, inputCls } from './settings/controls';
+import { ErrorText, Card, btnPrimary, btnIcon, inputCls } from './settings/controls';
 
 export function AdminUsers() {
   const me = useStore((s) => s.currentUser);
@@ -83,7 +83,7 @@ export function AdminUsers() {
 
   return (
     <SettingsSection id="users" title="Users (admin)">
-      <div className="mb-3 divide-y divide-border rounded-xl border border-border">
+      <Card className="mb-3 divide-y divide-border">
         {users.map((u) => (
           <div key={u.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
             <span
@@ -109,7 +109,7 @@ export function AdminUsers() {
                 setResetFor(resetFor === u.id ? null : u.id);
                 setResetPw('');
               }}
-              className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2"
+              className={btnIcon}
               title="Reset password"
             >
               <KeyRound size={15} />
@@ -117,7 +117,7 @@ export function AdminUsers() {
             {u.id !== me?.id && (
               <button
                 onClick={() => remove(u.id)}
-                className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-danger"
+                className={cn(btnIcon, 'hover:text-danger')}
                 title="Delete user"
               >
                 <Trash2 size={15} />
@@ -139,14 +139,12 @@ export function AdminUsers() {
                   placeholder="New password"
                   className={cn(inputCls, 'flex-1')}
                 />
-                <button className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg">
-                  Set
-                </button>
+                <button className={btnPrimary}>Set</button>
               </form>
             )}
           </div>
         ))}
-      </div>
+      </Card>
 
       <form onSubmit={add} className="flex flex-wrap items-center gap-2">
         <input
@@ -172,11 +170,7 @@ export function AdminUsers() {
           <option value="member">member</option>
           <option value="admin">admin</option>
         </select>
-        <button
-          type="submit"
-          disabled={!username || !password}
-          className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-        >
+        <button type="submit" disabled={!username || !password} className={btnPrimary}>
           <UserPlus size={15} /> Add user
         </button>
       </form>

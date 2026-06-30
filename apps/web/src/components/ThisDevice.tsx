@@ -9,7 +9,7 @@ import {
 import { fetchDevices, removeDevice, refreshWhere, type DeviceFix } from '@/lib/where';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './settings/SettingsSection';
-import { inputCls, ErrorText } from './settings/controls';
+import { inputCls, ErrorText, Field, Card, btnIcon } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 
 function ago(updatedAt: number): string {
@@ -82,8 +82,20 @@ export function ThisDevice() {
       description="Name this device and manage the devices that report your location for the Nearby view. Each device sends its own GPS to the server so they appear as separate, toggleable sources."
     >
       <div className="space-y-4">
-        <label className="block">
-          <span className="mb-1 block text-sm font-medium">Device name</span>
+        <Field
+          label="Device name"
+          hint={
+            <span className="font-mono">
+              id {myId.slice(0, 8)}…
+              <button
+                onClick={regenerate}
+                className="ml-2 inline-flex items-center gap-1 underline hover:text-text"
+              >
+                <RotateCcw size={11} /> regenerate
+              </button>
+            </span>
+          }
+        >
           <div className="flex items-center gap-2">
             <input
               className={cn(inputCls, 'flex-1')}
@@ -101,17 +113,11 @@ export function ThisDevice() {
               )}
             </span>
           </div>
-          <span className="mt-1 block font-mono text-xs text-text-faint">
-            id {myId.slice(0, 8)}…
-            <button onClick={regenerate} className="ml-2 inline-flex items-center gap-1 underline hover:text-text">
-              <RotateCcw size={11} /> regenerate
-            </button>
-          </span>
-        </label>
+        </Field>
 
         <div>
           <span className="mb-1 block text-xs text-text-muted">Known devices</span>
-          <div className="divide-y divide-border rounded-xl border border-border">
+          <Card className="divide-y divide-border">
             {devices.length === 0 && (
               <p className="px-3 py-2 text-sm text-text-faint">No devices reporting yet.</p>
             )}
@@ -126,14 +132,14 @@ export function ThisDevice() {
                 <div className="flex-1" />
                 <button
                   onClick={() => remove(d.deviceId)}
-                  className="rounded-lg p-1.5 text-text-muted hover:bg-surface-2 hover:text-danger"
+                  className={cn(btnIcon, 'hover:text-danger')}
                   title="Remove device"
                 >
                   <Trash2 size={15} />
                 </button>
               </div>
             ))}
-          </div>
+          </Card>
         </div>
 
         <ErrorText>{error}</ErrorText>
