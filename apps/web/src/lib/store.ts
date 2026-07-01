@@ -14,6 +14,7 @@ import {
   type CurrentUser,
   type UiPrefs,
 } from './config';
+import { notifySettingsChanged } from './settings-events';
 
 export type SyncStatus = 'idle' | 'syncing' | 'error' | 'offline' | 'disabled';
 
@@ -68,6 +69,8 @@ interface AppState {
   baseDomain: string | null;
   /** Label of the dedicated offline/local-only host (e.g. "app"). */
   appHost: string | null;
+  /** Server's package version, from /api/health. Null until health resolves. */
+  serverVersion: string | null;
   /** Local-only "use without signing in" choice on the apex landing. */
   localOnly: boolean;
   /** Workspace subscription has lapsed (expired or operator-locked): the app shows a
@@ -112,6 +115,7 @@ interface AppState {
     role: AppState['hostRole'];
     baseDomain: string | null;
     appHost: string | null;
+    version?: string | null;
   }) => void;
   setWorkspaceLock: (locked: boolean, expiresAt: string | null) => void;
   setLocalOnly: (v: boolean) => void;
@@ -123,6 +127,11 @@ interface AppState {
   focusQuickAdd: () => void;
   toggleCollapsed: (id: string) => void;
   toggleExpanded: (id: string) => void;
+  /** Collapse/expand every given id at once (the tree's "Collapse All"/"Expand
+   *  All"). Scoped to the passed ids so other containers' collapse state is
+   *  left untouched. */
+  collapseAll: (ids: string[]) => void;
+  expandAll: (ids: string[]) => void;
   setThemeMode: (m: ThemeMode) => void;
   setLightTheme: (t: Theme) => void;
   setDarkTheme: (t: Theme) => void;
@@ -172,6 +181,7 @@ export const useStore = create<AppState>((set, get) => ({
   hostRole: null,
   baseDomain: null,
   appHost: null,
+  serverVersion: null,
   localOnly: localStorage.getItem('carbon.localOnly') === '1',
   workspaceLocked: false,
   workspaceExpiresAt: null,
@@ -192,7 +202,12 @@ export const useStore = create<AppState>((set, get) => ({
   openLogin: () => set({ loginOpen: true }),
   closeLogin: () => set({ loginOpen: false, authRequired: false }),
   setHostInfo: (info) =>
-    set({ hostRole: info.role, baseDomain: info.baseDomain, appHost: info.appHost }),
+    set({
+      hostRole: info.role,
+      baseDomain: info.baseDomain,
+      appHost: info.appHost,
+      serverVersion: info.version ?? get().serverVersion,
+    }),
   setWorkspaceLock: (locked, expiresAt) =>
     set({ workspaceLocked: locked, workspaceExpiresAt: expiresAt }),
   setLocalOnly: (v) => {
@@ -219,6 +234,7 @@ export const useStore = create<AppState>((set, get) => ({
       const next = new Set(s.collapsed);
       next.has(id) ? next.delete(id) : next.add(id);
       localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      notifySettingsChanged('ui');
       return { collapsed: next };
     }),
   toggleExpanded: (id) =>
@@ -226,7 +242,24 @@ export const useStore = create<AppState>((set, get) => ({
       const next = new Set(s.expanded);
       next.has(id) ? next.delete(id) : next.add(id);
       localStorage.setItem(EXPAND_KEY, JSON.stringify([...next]));
+      notifySettingsChanged('ui');
       return { expanded: next };
+    }),
+  collapseAll: (ids) =>
+    set((s) => {
+      const next = new Set(s.collapsed);
+      for (const id of ids) next.add(id);
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      notifySettingsChanged('ui');
+      return { collapsed: next };
+    }),
+  expandAll: (ids) =>
+    set((s) => {
+      const next = new Set(s.collapsed);
+      for (const id of ids) next.delete(id);
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      notifySettingsChanged('ui');
+      return { collapsed: next };
     }),
   // Each theme control re-applies the full (mode, light, dark) triple to the DOM.
   setThemeMode: (m) => {

@@ -19,6 +19,8 @@ import { onSettingsChanged, withSuppressedSettings, type SettingsScope } from '.
 const ENABLED_KEY = 'carbon.settingsSync';
 const VIEWPREFS_PREFIX = 'carbon.viewprefs.';
 const PERSPECTIVES_KEY = 'carbon.perspectives';
+const COLLAPSE_KEY = 'carbon.collapsed';
+const EXPAND_KEY = 'carbon.expanded';
 const APPLIED_META = (scope: string) => `settings_applied_${scope}`;
 
 export function isSettingsSyncEnabled(): boolean {
@@ -38,7 +40,12 @@ export function setSettingsSyncEnabled(v: boolean): void {
 // ----- snapshots (localStorage -> blob) -------------------------------------
 
 function snapshotUi(): unknown {
-  return getUiPrefs();
+  const s = useStore.getState();
+  return {
+    ...getUiPrefs(),
+    collapsedIds: [...s.collapsed],
+    expandedIds: [...s.expanded],
+  };
 }
 
 function snapshotViews(): { prefs: Record<string, unknown>; perspectives: unknown } {
@@ -64,11 +71,24 @@ function snapshotViews(): { prefs: Record<string, unknown>; perspectives: unknow
 // ----- apply (blob -> localStorage + store) ---------------------------------
 
 function applyUi(payload: unknown): void {
+  const { collapsedIds, expandedIds, ...uiPayload } = (payload ?? {}) as {
+    collapsedIds?: string[];
+    expandedIds?: string[];
+    [k: string]: unknown;
+  };
   withSuppressedSettings(() => {
-    saveUiPrefs(payload as never);
+    saveUiPrefs(uiPayload as never);
     // getUiPrefs re-normalizes (fills defaults / nested rowIcons), so the store
     // always holds a complete object even if a peer sent a partial one.
     useStore.setState({ uiPrefs: getUiPrefs() });
+    if (Array.isArray(collapsedIds)) {
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedIds));
+      useStore.setState({ collapsed: new Set(collapsedIds) });
+    }
+    if (Array.isArray(expandedIds)) {
+      localStorage.setItem(EXPAND_KEY, JSON.stringify(expandedIds));
+      useStore.setState({ expanded: new Set(expandedIds) });
+    }
   });
 }
 

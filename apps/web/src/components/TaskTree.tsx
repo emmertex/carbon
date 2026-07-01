@@ -171,7 +171,7 @@ function SortableTreeRow({
           titleSlot={titleSlot}
         />
       </SwipeableRow>
-      {selected && !edit.editing && !kbMode && (
+      {selected && !edit.editing && !kbMode && !isDragging && (
         <AddTaskButtons
           item={item}
           depth={depth}
@@ -398,13 +398,13 @@ export function TaskTree({
         if (mod) return mutate((db, dev) => reorderSibling(db, dev, cur.id, -1));
         return focusRow(visible[Math.max(idx - 1, 0)]!.id);
       case 'ArrowLeft':
-        if (mod && cur && hasKids.has(cur.id) && !collapsedSet.has(cur.id)) {
+        if (cur && hasKids.has(cur.id) && !collapsedSet.has(cur.id)) {
           e.preventDefault();
           toggleCollapsed(cur.id);
         }
         return;
       case 'ArrowRight':
-        if (mod && cur && hasKids.has(cur.id) && collapsedSet.has(cur.id)) {
+        if (cur && hasKids.has(cur.id) && collapsedSet.has(cur.id)) {
           e.preventDefault();
           toggleCollapsed(cur.id);
         }

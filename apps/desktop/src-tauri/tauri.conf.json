@@ -40,6 +40,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -50,5 +51,14 @@
     "category": "Productivity",
     "shortDescription": "A simple-on-the-surface, powerful-underneath task manager.",
     "longDescription": "Carbon is an offline-first GTD task manager that syncs to a self-hosted server."
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/emmertex/carbon/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDRjJEN0M5MzRDOEI2RkIKUldUN3RzZzB5ZGZ5L0hXcFE1Z3p5UEtyRFZieDZDV2VsT0M1ak0zSHdlcmw5TlVFUFdKOXpYSmUK"
+    }
   }
 }

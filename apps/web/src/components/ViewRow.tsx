@@ -1,4 +1,4 @@
-import { Eye, Users2, UserRound, Tag as TagIcon, Flag, Target } from 'lucide-react';
+import { Eye, Users2, UserRound, Tag as TagIcon, Flag, Target, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { useFeature } from '@/hooks/useFeature';
 import { cn } from '@/lib/cn';
@@ -22,9 +22,22 @@ const ICON_TOGGLES: { key: RowIcon; label: string; Icon: typeof Eye }[] = [
  * toggles read/write the shared `rowIcons` pref. `grouping` is only valid where a
  * planned/Plan-style list is shown — projects omit it ("only valid options").
  */
-export function ViewRow({ grouping = false, className }: { grouping?: boolean; className?: string }) {
+export function ViewRow({
+  grouping = false,
+  className,
+  collapseIds,
+}: {
+  grouping?: boolean;
+  className?: string;
+  /** Ids of the container rows (tasks/projects with children) in the tree
+   *  currently on screen. When given and non-empty, renders "Collapse All" /
+   *  "Expand All" buttons that fold/unfold every one of them at once. */
+  collapseIds?: string[];
+}) {
   const rowIcons = useStore((s) => s.uiPrefs.rowIcons);
   const setUiPrefs = useStore((s) => s.setUiPrefs);
+  const collapseAll = useStore((s) => s.collapseAll);
+  const expandAll = useStore((s) => s.expandAll);
   const showBar = useFeature('showBar');
 
   // Hidden by the user's UI-complexity choice. Row-icon prefs still apply; only the
@@ -59,6 +72,29 @@ export function ViewRow({ grouping = false, className }: { grouping?: boolean; c
           <Icon size={13} />
         </Chip>
       ))}
+      {collapseIds && collapseIds.length > 0 && (
+        <>
+          <span className="mx-1 h-4 w-px bg-border" />
+          <Chip
+            active={false}
+            onClick={() => collapseAll(collapseIds)}
+            aria-label="Collapse all"
+            title="Collapse all"
+            className="px-1.5"
+          >
+            <ChevronsDownUp size={13} />
+          </Chip>
+          <Chip
+            active={false}
+            onClick={() => expandAll(collapseIds)}
+            aria-label="Expand all"
+            title="Expand all"
+            className="px-1.5"
+          >
+            <ChevronsUpDown size={13} />
+          </Chip>
+        </>
+      )}
     </div>
   );
 }

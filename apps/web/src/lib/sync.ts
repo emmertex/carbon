@@ -90,12 +90,14 @@ export async function fetchHostInfo(): Promise<void> {
       appHost?: string | null;
       locked?: boolean;
       expiresAt?: string | null;
+      version?: string;
     };
     if (h.role) {
       useStore.getState().setHostInfo({
         role: h.role,
         baseDomain: h.baseDomain ?? null,
         appHost: h.appHost ?? null,
+        version: h.version ?? null,
       });
       useStore.getState().setWorkspaceLock(!!h.locked, h.expiresAt ?? null);
       // The dedicated offline host never syncs — detach from any server so it's a

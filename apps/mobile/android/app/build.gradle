@@ -10,7 +10,16 @@ def (vMajor, vMinor, vPatch) = carbonVersion.tokenize('.').collect { it.toIntege
 def carbonVersionCode = vMajor * 10000 + vMinor * 100 + vPatch
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
-keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+// CI signs the GitHub-release (sideload/auto-update) APK with its own dedicated
+// keystore, kept deliberately separate from the Play Store upload key in
+// keystore.properties — Android refuses to install an update whose signature
+// doesn't match the previously-installed one, so each distribution channel
+// needs a stable key of its own. See docs/RELEASING.md.
+def ciKeystorePath = System.getenv("CARBON_ANDROID_KEYSTORE_PATH")
 
 
 android {
@@ -32,10 +41,17 @@ android {
 
     signingConfigs {
         release {
-            storeFile file(keystoreProperties['storeFile'])
-            storePassword keystoreProperties['storePassword']
-            keyAlias keystoreProperties['keyAlias']
-            keyPassword keystoreProperties['keyPassword']
+            if (ciKeystorePath) {
+                storeFile file(ciKeystorePath)
+                storePassword System.getenv("CARBON_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("CARBON_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("CARBON_ANDROID_KEY_PASSWORD")
+            } else {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
         }
     }
     buildTypes {

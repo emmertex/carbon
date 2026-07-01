@@ -69,7 +69,14 @@ export function ContainerView() {
       const rows = enrichItems(db, applySort(filterByPrefs(db, tasks, prefs), prefs.sort));
       const ctx = getTimeContext(db, getCurrentUserId());
       const tracking = ctx.session?.item_id === id && !ctx.paused;
-      return { item, remaining, rows, tracking };
+      // Every id in the subtree that has at least one child — i.e. every row the
+      // tree shows a collapse chevron for. Excludes the root itself, which is the
+      // page header, not a collapsible row — collapsing it would hide everything.
+      // Drives ViewRow's Collapse/Expand All.
+      const containerIds = [
+        ...new Set(desc.map((c) => c.parent_id).filter((p): p is string => !!p && p !== id)),
+      ];
+      return { item, remaining, rows, tracking, containerIds };
     },
     [id, JSON.stringify(prefs), countScope],
   );
@@ -79,7 +86,7 @@ export function ContainerView() {
   if (!data) {
     return <div className="p-8 text-sm text-text-muted">Not found.</div>;
   }
-  const { item, remaining, rows, tracking } = data;
+  const { item, remaining, rows, tracking, containerIds } = data;
   const isProject = item.type === 'project';
 
   function toggleTrack() {
@@ -154,7 +161,7 @@ export function ContainerView() {
 
       <ViewControls prefs={prefs} onChange={updatePrefs} tags={tags} projects={projects} />
 
-      <ViewRow className="mb-3" />
+      <ViewRow className="mb-3" collapseIds={flatMode ? undefined : containerIds} />
 
       {flatMode ? (
         rows.length === 0 ? (
