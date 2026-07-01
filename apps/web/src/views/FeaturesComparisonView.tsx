@@ -62,6 +62,45 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: "Customization & editing",
+    rows: [
+      {
+        feature: "Tailorable UI",
+        detail:
+          "Simple / Standard / Advanced presets, plus per-feature show/hide with separate desktop and mobile switches.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Advanced filters",
+        detail:
+          "Nested AND/OR/NOT filters across dates, priority, tags, projects, status and text.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Undo & redo",
+        detail: "Multi-level session undo/redo for edits, completes, flags and deletes.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Natural-language filters",
+        detail: 'Describe a filter in plain English and let the agent build the expression.',
+        local: false,
+        server: true,
+        why: "The language agent runs server-side so your API keys and prompts stay off the client. The advanced filter builder itself works offline — only the natural-language helper needs the server.",
+      },
+      {
+        feature: "Settings & saved views sync",
+        detail: "UI preferences, per-view filters and perspectives follow you between devices.",
+        local: false,
+        server: true,
+        why: "Like tasks, your settings and views are relayed between devices by the sync server. Local-only keeps them on the one device.",
+      },
+    ],
+  },
+  {
     title: "Sync & multi-device",
     rows: [
       {

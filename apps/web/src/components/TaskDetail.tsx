@@ -62,6 +62,7 @@ import { getServerConfig } from "@/lib/config";
 import { Comments } from "./Comments";
 import { Attachments } from "./Attachments";
 import { Section } from "./Section";
+import { useFeature } from "@/hooks/useFeature";
 import { TagMark } from "./TagMark";
 import { Markdown } from "./Markdown";
 import { itemTagsResolved } from "@/lib/enrich";
@@ -566,12 +567,28 @@ export function TaskDetail({ id }: { id: string }) {
     );
   }
 
+  // Which detail sections show expanded by default follows the UI-complexity
+  // features — this is presentation only; every section stays here and fully usable.
+  const gtdTools = useFeature("gtdTools");
+  const locationOn = useFeature("nearby");
+  const timeOn = useFeature("timeTracking");
+  // "More…" reveal for defer-until when GTD tools are off (still fully accessible).
+  const [showDefer, setShowDefer] = useState(false);
+
   // --- collapsed-section summaries ---
   const scheduleSummary = item.due_date
     ? `Due ${formatDue(item.due_date)}`
     : item.defer_date
       ? `Deferred`
       : "No dates";
+  const geoLabel = (() => {
+    try {
+      return item.geo ? ((JSON.parse(item.geo).label as string) || "Set") : null;
+    } catch {
+      return item.geo ? "Set" : null;
+    }
+  })();
+  const locationSummary = geoLabel ?? "None";
   const sharingSummary =
     [
       assignees.length ? `${assignees.length} assigned` : "",
@@ -595,6 +612,23 @@ export function TaskDetail({ id }: { id: string }) {
           {item.type === "project" ? "Project" : "Task"}
         </span>
         <div className="flex-1" />
+        {item.type !== "project" && (
+          <button
+            onClick={toggleTimer}
+            className={cn(
+              "rounded-lg p-2 hover:bg-surface-2",
+              trackingHere ? "text-danger" : "text-text-muted hover:text-text",
+            )}
+            aria-label={trackingHere ? "Stop recording time" : "Record time"}
+            title={trackingHere ? "Stop recording time" : "Record time"}
+          >
+            {trackingHere ? (
+              <Square size={16} fill="currentColor" />
+            ) : (
+              <Play size={16} fill="currentColor" />
+            )}
+          </button>
+        )}
         {item.type !== "project" && (
           <button
             onClick={togglePlan}
@@ -918,6 +952,7 @@ export function TaskDetail({ id }: { id: string }) {
                 </div>
               )}
             </div>
+            {gtdTools || showDefer ? (
             <div>
               <Label>Defer until</Label>
               {(() => {
@@ -958,6 +993,15 @@ export function TaskDetail({ id }: { id: string }) {
                 );
               })()}
             </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowDefer(true)}
+                className="text-xs font-medium text-accent hover:underline"
+              >
+                More… (defer date)
+              </button>
+            )}
           </div>
           {item.due_date && (
             <div>
@@ -1153,6 +1197,11 @@ export function TaskDetail({ id }: { id: string }) {
               )}
             </div>
           )}
+        </Section>
+
+        {/* Location — its own section; expanded by default only when the Location
+            alerts (Nearby) feature is on. */}
+        <Section title="Location" summary={locationSummary} defaultOpen={locationOn}>
           <GeoEditor
             value={item.geo}
             resetKey={id}
@@ -1160,10 +1209,12 @@ export function TaskDetail({ id }: { id: string }) {
           />
         </Section>
 
-        {/* Dependencies — explicit predecessor/successor links (Gantt-style). */}
+        {/* Dependencies — explicit predecessor/successor links (Gantt-style).
+            Expanded by default only when GTD Tools are enabled. */}
         {!isProject && (
           <Section
             title="Dependencies"
+            defaultOpen={gtdTools}
             summary={
               predecessors.length || successors.length
                 ? `${predecessors.length} blocking · ${successors.length} blocked`
@@ -1312,8 +1363,9 @@ export function TaskDetail({ id }: { id: string }) {
           </Section>
         )}
 
-        {/* Time tracking */}
-        <Section title="Time tracking" summary={timeSummary}>
+        {/* Time tracking — expanded by default only when the feature is on. The
+            Record-time control also lives in the header, so it's always reachable. */}
+        <Section title="Time tracking" summary={timeSummary} defaultOpen={timeOn}>
           <div>
             <Label>Estimate</Label>
             {isProject ? (

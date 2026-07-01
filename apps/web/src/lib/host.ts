@@ -15,6 +15,8 @@ export interface TenantRecord {
   locked_at: string | null;
   admin_email: string | null;
   blob_quota_bytes: number | null;
+  /** Max human users (null = server default, 0 = unlimited). */
+  max_users: number | null;
   /** 1 = agents may target private/loopback/LAN endpoints; null/0 = blocked. */
   allow_private_endpoints: number | null;
   url: string;
@@ -24,6 +26,10 @@ export interface TenantUsage {
   id: string;
   subdomain: string;
   users: number;
+  /** Non-bot users (count against the seat limit). */
+  humanUsers: number;
+  /** Effective human-user cap (0 = unlimited). */
+  maxUsers: number;
   dbBytes: number;
   lastActivity: string | null;
   blobBytes: number;
@@ -172,6 +178,7 @@ export async function hostPatchTenant(
     expiresAt?: string | null;
     locked?: boolean;
     blobQuotaMb?: number | null;
+    maxUsers?: number | null;
     allowPrivateEndpoints?: boolean;
   },
 ): Promise<void> {

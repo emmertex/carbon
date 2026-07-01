@@ -86,6 +86,15 @@ interface AppState {
    *  agent. */
   nlEnabled: boolean;
   nlKeywords: string[];
+  /** Depth of the session undo/redo stacks (drives the toolbar buttons). */
+  undoCount: number;
+  redoCount: number;
+  /** Whether this device pushes/pulls UI prefs, view filters, and perspectives to
+   *  the server (default on; toggled in Settings → Features). */
+  settingsSyncEnabled: boolean;
+  /** True once the first sync round has completed (or immediately when local-only),
+   *  so the first-load complexity picker doesn't flash before synced prefs arrive. */
+  settingsHydrated: boolean;
   /** Transient snackbar (e.g. undoable delete). */
   toast: Toast | null;
   /** Prompt: a task was completed while a different project's session runs. */
@@ -122,6 +131,9 @@ interface AppState {
   setSyncError: (msg: string | null) => void;
   setLastSyncedAt: (t: number) => void;
   setUiPrefs: (patch: Partial<UiPrefs>) => void;
+  setSettingsSyncEnabled: (v: boolean) => void;
+  setSettingsHydrated: (v: boolean) => void;
+  setUndoCounts: (undo: number, redo: number) => void;
   showToast: (t: Omit<Toast, 'id'>) => void;
   dismissToast: () => void;
   setInterrupt: (v: { project: string } | null) => void;
@@ -164,6 +176,10 @@ export const useStore = create<AppState>((set, get) => ({
   workspaceLocked: false,
   workspaceExpiresAt: null,
   uiPrefs: getUiPrefs(),
+  settingsSyncEnabled: localStorage.getItem('carbon.settingsSync') !== '0',
+  settingsHydrated: false,
+  undoCount: 0,
+  redoCount: 0,
   quickAddFocusNonce: 0,
   nlEnabled: false,
   nlKeywords: ['can', 'add', 'check off', 'mark off', 'mark as'],
@@ -238,6 +254,9 @@ export const useStore = create<AppState>((set, get) => ({
       saveUiPrefs(next);
       return { uiPrefs: next };
     }),
+  setSettingsSyncEnabled: (v) => set({ settingsSyncEnabled: v }),
+  setSettingsHydrated: (v) => set({ settingsHydrated: v }),
+  setUndoCounts: (undo, redo) => set({ undoCount: undo, redoCount: redo }),
   showToast: (t) => set((s) => ({ toast: { ...t, id: (s.toast?.id ?? 0) + 1 } })),
   dismissToast: () => set({ toast: null }),
   setInterrupt: (v) => set({ interrupt: v }),

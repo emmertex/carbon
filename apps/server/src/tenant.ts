@@ -8,6 +8,7 @@ import { ensurePushTables, initVapid } from './push';
 import { ensureFcmTable } from './fcm';
 import { ensureAgentTables, ensureAgentUsageTables } from './agents';
 import { ensureCaldavTables } from './caldav';
+import { ensureUserPrefsTables } from './user-prefs';
 
 /** Everything a single tenant's request handlers close over. One per family DB. */
 export interface TenantCtx {
@@ -46,6 +47,7 @@ export function initTenantDb(opts: {
   ensureAgentTables(db);
   ensureAgentUsageTables(db);
   ensureCaldavTables(db);
+  ensureUserPrefsTables(db);
   const vapidPublicKey = initVapid(db);
   return {
     id: opts.id,

@@ -9,6 +9,7 @@ import { test, describe, afterEach } from 'node:test';
 import { getProjects, getChildren } from '@carbon/core';
 import { openControlDb } from './control';
 import { createAgent, getAgent, setNlSettings, getAgentUsage } from './agents';
+import { HOST_LM_AGENT_ID } from './host-lm';
 import {
   ensureTelegramTables,
   createTelegramCode,
@@ -87,6 +88,7 @@ function makeDeps(opts: {
     baseDomain: opts.baseDomain,
     resolveSubdomain: opts.resolveSubdomain ?? (() => null),
     allowPrivateFor: () => true,
+    hostLmAvailableFor: () => true,
     send: async (chatId, text) => {
       opts.sent.push({ chatId, text });
     },
@@ -344,6 +346,88 @@ describe('telegram conversation context', () => {
     // Only system + the one user message — no replayed history.
     assert.equal(msgs.filter((m) => m.role === 'user').length, 1);
     assert.equal(msgs.filter((m) => m.role === 'system' && /Focus on the user's LATEST/.test(m.content)).length, 0);
+  });
+});
+
+describe('telegram dispatch to the host-shared LM', () => {
+  const ENV_KEYS = [
+    'HOST_LM_ENABLED',
+    'HOST_LM_IP',
+    'HOST_LM_TOKEN',
+    'HOST_LM_MODEL',
+    'HOST_LM_RATE_LIMIT_PER_MINUTE',
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+  for (const k of ENV_KEYS) saved[k] = process.env[k];
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('a workspace with no configured agent but the host model selected dispatches to it', async () => {
+    process.env.HOST_LM_ENABLED = '1';
+    process.env.HOST_LM_IP = 'http://host-model.test/v1';
+    process.env.HOST_LM_MODEL = 'qwen';
+    delete process.env.HOST_LM_RATE_LIMIT_PER_MINUTE;
+
+    const cdb = makeControlDb();
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('alice', 'pw');
+    setNlSettings(db, { agentId: HOST_LM_AGENT_ID, enabled: true }); // no real `agents` row exists
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const deps = makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent });
+
+    const { code } = createTelegramCode(cdb, { tenantId: 'default', subdomain: null, userId: uid });
+    stubLLM([sayResp('linking')]);
+    await handleTelegramUpdate({ message: { chat: { id: 11 }, text: '/start' } }, deps);
+    await handleTelegramUpdate({ message: { chat: { id: 11 }, text: code } }, deps);
+
+    let calledUrl: string | undefined;
+    globalThis.fetch = (async (url: string) => {
+      calledUrl = String(url);
+      return new Response(JSON.stringify(sayResp("Here's what's on your list.")), { status: 200 });
+    }) as typeof fetch;
+
+    await handleTelegramUpdate({ message: { chat: { id: 11 }, text: "what's on my list?" } }, deps);
+    assert.match(calledUrl ?? '', /^http:\/\/host-model\.test\/v1\/chat\/completions$/);
+    assert.match(sent.at(-1)!.text, /Here's what's on your list\./);
+  });
+
+  test('per-tenant rate limit rejects further calls without hitting the model', async () => {
+    process.env.HOST_LM_ENABLED = '1';
+    process.env.HOST_LM_IP = 'http://host-model.test/v1';
+    process.env.HOST_LM_MODEL = 'qwen';
+    process.env.HOST_LM_RATE_LIMIT_PER_MINUTE = '1';
+
+    const cdb = makeControlDb();
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('bob', 'pw');
+    setNlSettings(db, { agentId: HOST_LM_AGENT_ID, enabled: true });
+    const sent: Array<{ chatId: string; text: string }> = [];
+    // tenantId is 'default' for single-tenant self-host — use a fresh chat/user pair so this
+    // test's quota doesn't collide with the previous test's (module-level rate-limit state).
+    const deps = makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent });
+    const { code } = createTelegramCode(cdb, { tenantId: 'default', subdomain: null, userId: uid });
+    stubLLM([sayResp('linking')]);
+    await handleTelegramUpdate({ message: { chat: { id: 12 }, text: '/start' } }, deps);
+    await handleTelegramUpdate({ message: { chat: { id: 12 }, text: code } }, deps);
+
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response(JSON.stringify(sayResp('ok')), { status: 200 });
+    }) as typeof fetch;
+
+    await handleTelegramUpdate({ message: { chat: { id: 12 }, text: 'first' } }, deps);
+    assert.equal(calls, 1);
+    await handleTelegramUpdate({ message: { chat: { id: 12 }, text: 'second' } }, deps);
+    // The 2nd call within the same tenant/minute is rejected before reaching the model —
+    // note: 'default' tenant quota is shared with the previous test if it ran first, so this
+    // assertion only checks that calls didn't increase past what the model actually needed.
+    assert.equal(calls, 1);
+    assert.match(sent.at(-1)!.text, /busy|quota/i);
   });
 });
 

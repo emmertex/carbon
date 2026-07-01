@@ -35,6 +35,7 @@ import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { toggleTaskCompletion } from '@/lib/taskActions';
 import { applyFilters } from '@/lib/filter';
+import { makeEvalCtx, evalExpr, type FilterExpr } from '@/lib/filter-expr';
 import { updateFromQuickAdd } from '@/lib/quickadd';
 import type { Filters } from '@/lib/views';
 import { TaskRow } from './TaskRow';
@@ -216,7 +217,15 @@ function AddTaskButtons({
 /** A drag-reorderable, drag-to-nest tree of a container's descendants.
  *  When `filters` is given, non-matching nodes are hidden but their matching
  *  descendants' ancestors are kept, so the hierarchy stays intact. */
-export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filters }) {
+export function TaskTree({
+  rootId,
+  filters,
+  expr,
+}: {
+  rootId: string;
+  filters?: Filters;
+  expr?: FilterExpr | null;
+}) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [offsetLeft, setOffsetLeft] = useState(0);
@@ -225,12 +234,20 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
     useQuery(
       (db) => {
         const all = flattenTree(db, rootId);
-        if (!filters) return all;
-        const matched = new Set(applyFilters(db, all.map((f) => f.item), filters).map((i) => i.id));
+        // Advanced mode (expr) takes precedence; else basic filters; else show all.
+        const matchIds = expr
+          ? (() => {
+              const ctx = makeEvalCtx(db);
+              return new Set(all.filter((f) => evalExpr(ctx, f.item, expr)).map((f) => f.id));
+            })()
+          : filters
+            ? new Set(applyFilters(db, all.map((f) => f.item), filters).map((i) => i.id))
+            : null;
+        if (!matchIds) return all;
         const byId = new Map(all.map((f) => [f.id, f.item]));
         const keep = new Set<string>();
         for (const f of all) {
-          if (!matched.has(f.id)) continue;
+          if (!matchIds.has(f.id)) continue;
           keep.add(f.id);
           let pid = f.item.parent_id; // keep ancestors for context
           while (pid && byId.has(pid)) {
@@ -240,7 +257,7 @@ export function TaskTree({ rootId, filters }: { rootId: string; filters?: Filter
         }
         return all.filter((f) => keep.has(f.id));
       },
-      [rootId, filters ? JSON.stringify(filters) : ''],
+      [rootId, filters ? JSON.stringify(filters) : '', expr ? JSON.stringify(expr) : ''],
     ) ?? [];
   const collapsedSet = useStore((s) => s.collapsed);
   // Nodes with children (for the collapse chevron).

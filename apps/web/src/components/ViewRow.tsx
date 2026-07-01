@@ -1,5 +1,6 @@
 import { Eye, Users2, UserRound, Tag as TagIcon, Flag, Target } from 'lucide-react';
 import { useStore } from '@/lib/store';
+import { useFeature } from '@/hooks/useFeature';
 import { cn } from '@/lib/cn';
 import type { RowIcon } from '@/lib/config';
 import { Chip } from './Chip';
@@ -24,6 +25,11 @@ const ICON_TOGGLES: { key: RowIcon; label: string; Icon: typeof Eye }[] = [
 export function ViewRow({ grouping = false, className }: { grouping?: boolean; className?: string }) {
   const rowIcons = useStore((s) => s.uiPrefs.rowIcons);
   const setUiPrefs = useStore((s) => s.setUiPrefs);
+  const showBar = useFeature('showBar');
+
+  // Hidden by the user's UI-complexity choice. Row-icon prefs still apply; only the
+  // toggle bar is gone.
+  if (!showBar) return null;
 
   // Read the latest icons from the store at click time, not the render closure, so
   // toggling one never clobbers another's pending change.

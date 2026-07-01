@@ -16,6 +16,7 @@ import { PlanningSettings } from '@/components/PlanningSettings';
 import { InstallApp } from '@/components/InstallApp';
 import { DataBackup } from '@/components/DataBackup';
 import { AppearanceSection } from '@/components/settings/AppearanceSection';
+import { FeaturesSection } from '@/components/settings/FeaturesSection';
 import { GesturesSection } from '@/components/settings/GesturesSection';
 import { SyncSection } from '@/components/settings/SyncSection';
 import { IntegrationsDocs } from '@/components/settings/IntegrationsDocs';
@@ -70,6 +71,7 @@ export function SettingsView() {
   // One declarative list: ordering, grouping, and visibility all live here.
   const SECTIONS: SectionDef[] = [
     { id: 'appearance', group: 'general', show: () => true, render: () => <AppearanceSection /> },
+    { id: 'features', group: 'general', show: () => true, render: () => <FeaturesSection /> },
     { id: 'gestures', group: 'general', show: () => true, render: () => <GesturesSection /> },
     { id: 'planning', group: 'tasks', show: (c) => c.signedIn, render: () => <PlanningSettings /> },
     { id: 'profile', group: 'account', show: (c) => c.signedIn, render: () => <Profile /> },

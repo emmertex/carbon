@@ -6,6 +6,7 @@ node_modules/
 # Build outputs
 dist/
 build/
+release/
 dev-dist/
 *.tsbuildinfo
 
@@ -22,7 +23,10 @@ dev-dist/
 serviceAccount*.json
 *.jks
 *.keystore
+keystore.properties
 google-services.json
+# Hermes skill credentials (per-skill .credentials hold API tokens; ship .example only)
+hermes/**/.credentials
 
 # IDE
 .vscode/
@@ -59,7 +63,6 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
-release/
 docs/internal/
 
 .env
@@ -72,6 +75,13 @@ docs/internal/
 *.swo
 *~
 
+# Testing Code
+e2e/
+
 # Playwright benchmark artifacts
 test-results/
 perf/test-results/
+
+# Python bytecode (hermes scripts)
+__pycache__/
+*.pyc

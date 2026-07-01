@@ -117,7 +117,7 @@ export function GeoEditor({
       } else if (error) {
         setSearchMsg('Search failed — try again');
       } else if (hits.length === 0) {
-        setSearchMsg('No matches near you');
+        setSearchMsg('No matches found');
       } else {
         setCandidates(hits);
       }

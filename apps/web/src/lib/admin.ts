@@ -1,4 +1,4 @@
-import { getServerConfig, authHeaders, type CurrentUser } from './config';
+import { getServerConfig, authHeaders, localTimezone, type CurrentUser } from './config';
 
 function url(path: string): string {
   return getServerConfig().url.replace(/\/$/, '') + path;
@@ -28,8 +28,13 @@ export async function adminCreateUser(input: {
     body: JSON.stringify(input),
   });
   if (!res.ok) {
-    const msg = ((await res.json().catch(() => ({}))) as { error?: string }).error;
-    throw new Error(msg || `create failed: ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as { error?: string; limit?: number };
+    if (body.error === 'workspace_user_limit') {
+      throw new Error(
+        `This workspace has reached its limit of ${body.limit} users. Ask your host admin to raise it.`,
+      );
+    }
+    throw new Error(body.error || `create failed: ${res.status}`);
   }
 }
 
@@ -93,6 +98,10 @@ export async function adminRevokeToken(id: string): Promise<void> {
 }
 
 // ----- LLM agents -----------------------------------------------------------
+
+// Sentinel id for the host-operator-provided shared model (see apps/server/src/host-lm.ts).
+// Not a real agents row — synthesized server-side and read-only in the UI.
+export const HOST_LM_AGENT_ID = '__host_lm__';
 
 export type AgentKind = 'openai' | 'anthropic' | 'webhook';
 
@@ -195,7 +204,7 @@ export async function runCommand(text: string): Promise<CommandReply> {
   const res = await fetch(url('/api/agent/command'), {
     method: 'POST',
     headers: authHeaders(getServerConfig()),
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, timezone: localTimezone() }),
   });
   if (res.status === 503) throw new Error('AI commands are not set up. Configure one in Settings → AI agents.');
   if (!res.ok) throw new Error(await errMsg(res, 'command failed'));
@@ -228,6 +237,7 @@ export async function createTelegramCode(): Promise<{
   const res = await fetch(url('/api/telegram/code'), {
     method: 'POST',
     headers: authHeaders(getServerConfig()),
+    body: JSON.stringify({ timezone: localTimezone() }),
   });
   if (res.status === 503) throw new Error('The Telegram bot is not configured on this server.');
   if (!res.ok) throw new Error(await errMsg(res, 'could not create code'));

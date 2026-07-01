@@ -74,7 +74,7 @@ export function ensureAgentUsageTables(db: Db): void {
   `);
 }
 
-export type UsageKind = 'comment_reply' | 'nl_command' | 'telegram_command';
+export type UsageKind = 'comment_reply' | 'nl_command' | 'telegram_command' | 'filter_build';
 
 export function recordAgentUsage(
   db: Db,
@@ -296,6 +296,42 @@ export function deleteAgent(db: Db, id: string): void {
 
 function snippet(s: string, n = 200): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/**
+ * Render "now" for the LLM prompt with an explicit UTC offset and IANA zone name, so
+ * relative dates ("tomorrow night") resolve in the user's local time rather than the
+ * server's (Carbon's server process runs in UTC; the client's zone is often different).
+ * Falls back to a plainly-labelled UTC instant when no (or an invalid) zone is known.
+ */
+export function formatNow(now: Date, timezone?: string | null): string {
+  if (timezone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(now);
+      const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+      const local = `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}`;
+      const offsetPart = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        timeZoneName: 'longOffset',
+      })
+        .formatToParts(now)
+        .find((p) => p.type === 'timeZoneName')?.value;
+      const offset = offsetPart?.replace('GMT', '') || '+00:00';
+      return `${local}${offset === '' ? '+00:00' : offset} (${timezone})`;
+    } catch {
+      /* invalid zone name — fall through to the UTC form below */
+    }
+  }
+  return `${now.toISOString()} (UTC)`;
 }
 
 /** Token counts, normalised across providers (Anthropic input/output, OpenAI prompt/completion). */

@@ -18,7 +18,7 @@ import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { enrichItems } from '@/lib/enrich';
-import { applyFilters } from '@/lib/filter';
+import { filterByPrefs } from '@/lib/filter-expr';
 import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
 import { Breadcrumbs } from '@/components/Breadcrumbs';
 import { QuickAdd } from '@/components/QuickAdd';
@@ -66,7 +66,7 @@ export function ContainerView() {
         }
       }
       const tasks = desc.filter((c) => c.type === 'task');
-      const rows = enrichItems(db, applySort(applyFilters(db, tasks, prefs.filters), prefs.sort));
+      const rows = enrichItems(db, applySort(filterByPrefs(db, tasks, prefs), prefs.sort));
       const ctx = getTimeContext(db, getCurrentUserId());
       const tracking = ctx.session?.item_id === id && !ctx.paused;
       return { item, remaining, rows, tracking };
@@ -165,7 +165,11 @@ export function ContainerView() {
           <TaskList items={rows} reorderable={false} />
         )
       ) : (
-        <TaskTree rootId={id} filters={prefs.filters} />
+        <TaskTree
+          rootId={id}
+          filters={prefs.mode === 'advanced' ? undefined : prefs.filters}
+          expr={prefs.mode === 'advanced' ? prefs.expr : null}
+        />
       )}
     </div>
   );

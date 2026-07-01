@@ -61,6 +61,7 @@ export function sanitizeRecordOps(
         break;
       case 'timelog':
       case 'plan':
+      case 'setting':
         data.user_id = userId; // per-user rows: only your own
         break;
       case 'tag':

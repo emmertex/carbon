@@ -17,9 +17,11 @@
 import { randomInt } from 'node:crypto';
 import { type Db, getUser } from '@carbon/core';
 import { sha256Hex } from './auth';
-import { getAgent, getNlSettings } from './agents';
+import { getNlSettings } from './agents';
+import { getHostLmConfig, resolveAgent as resolveNlAgent, isHostAgent, checkHostRateLimit } from './host-lm';
 import { buildAgentApiDeps } from './agent-ops';
 import { runAgentCommand } from './agent-command';
+import { getUserTimezone } from './user-prefs';
 import type { TenantRegistry } from './tenant';
 
 const CODE_TTL_MS = 10 * 60 * 1000; // pairing codes are short-lived
@@ -294,6 +296,8 @@ export interface TelegramDeps {
   resolveSubdomain: (subdomain: string) => string | null;
   /** Whether a tenant's agents may reach private/LAN endpoints (host-admin flag / self-host). */
   allowPrivateFor: (tenantId: string) => boolean;
+  /** Whether a tenant may select the host-shared LM (host-admin flag / self-host). */
+  hostLmAvailableFor: (tenantId: string) => boolean;
   /** Test seam: override the outbound sender. */
   send?: (chatId: string, text: string) => Promise<void>;
 }
@@ -518,7 +522,10 @@ async function runLinkedCommand(
     return;
   }
   const nl = getNlSettings(ctx.db);
-  const agent = nl.enabled && nl.agentId ? getAgent(ctx.db, nl.agentId) : undefined;
+  const agent =
+    nl.enabled && nl.agentId
+      ? resolveNlAgent(ctx.db, nl.agentId, deps.hostLmAvailableFor(link.tenant_id))
+      : undefined;
   if (!agent || !agent.enabled || agent.kind === 'webhook') {
     await reply(
       "This workspace doesn't have an AI assistant set up yet. An admin can add one in " +
@@ -526,7 +533,16 @@ async function runLinkedCommand(
     );
     return;
   }
-  const allowPrivate = deps.allowPrivateFor(link.tenant_id);
+  if (isHostAgent(agent)) {
+    const cfg = getHostLmConfig();
+    const rl = cfg ? checkHostRateLimit(link.tenant_id, cfg) : { ok: false as const };
+    if (!rl.ok) {
+      await reply(rl.message ?? 'Try again later.');
+      return;
+    }
+  }
+  // The host operator's own endpoint is trusted regardless of this workspace's SSRF flag.
+  const allowPrivate = isHostAgent(agent) ? true : deps.allowPrivateFor(link.tenant_id);
   const apiDeps = buildAgentApiDeps(ctx.db, ctx.serverDeviceId, {
     multiTenant: !!deps.baseDomain,
     allowPrivate,
@@ -536,6 +552,7 @@ async function runLinkedCommand(
     const r = await runAgentCommand(apiDeps, agent, link.user_id, text, allowPrivate, {
       conversational: true,
       now: new Date(),
+      timezone: getUserTimezone(ctx.db, link.user_id),
       requestKind: 'telegram_command',
       history,
     });
@@ -568,6 +585,7 @@ export interface StartTelegramOpts {
   webhookSecret?: string;
   resolveSubdomain: (subdomain: string) => string | null;
   allowPrivateFor: (tenantId: string) => boolean;
+  hostLmAvailableFor: (tenantId: string) => boolean;
 }
 
 function joinUrl(base: string, path: string): string {
@@ -614,6 +632,7 @@ export async function startTelegramBot(opts: StartTelegramOpts): Promise<Telegra
     baseDomain: opts.baseDomain,
     resolveSubdomain: opts.resolveSubdomain,
     allowPrivateFor: opts.allowPrivateFor,
+    hostLmAvailableFor: opts.hostLmAvailableFor,
   };
   console.log(`[carbon] telegram bot @${botUsername ?? '?'} ready`);
   return { botUsername, handle: (u: unknown) => handleTelegramUpdate(u, deps) };

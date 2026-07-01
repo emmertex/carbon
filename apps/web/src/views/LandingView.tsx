@@ -16,6 +16,9 @@ import {
   Send,
   MapPin,
   Command,
+  SlidersHorizontal,
+  LayoutGrid,
+  Undo2,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import {
@@ -89,6 +92,21 @@ const STRENGTHS: { icon: typeof ListChecks; title: string; body: string }[] = [
     icon: Command,
     title: "Desktop quick-add",
     body: "A global hotkey and system-tray icon pop a spotlight capture bar from anywhere on Linux, Windows and Mac — jot a task without switching windows.",
+  },
+  {
+    icon: LayoutGrid,
+    title: "Grows with you",
+    body: "Start Simple, Standard or Advanced, then show or hide individual features — even differently on desktop and mobile. A welcoming app that unfolds into a power tool, with your choices synced across devices.",
+  },
+  {
+    icon: SlidersHorizontal,
+    title: "Advanced filters",
+    body: "Build nested AND/OR/NOT filters across dates, priority, tags, projects and more — or just describe what you want and let the LLM agent assemble the filter for you.",
+  },
+  {
+    icon: Undo2,
+    title: "Undo & redo",
+    body: "Changed your mind? Multi-level undo and redo (Ctrl+Z / Ctrl+Shift+Z) covers completes, flags, priorities, plan changes and deletes.",
   },
 ];
 

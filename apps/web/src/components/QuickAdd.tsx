@@ -6,6 +6,7 @@ import { firstWordIsCommand } from '@/lib/command';
 import { runCommand } from '@/lib/admin';
 import { scheduleSync } from '@/lib/sync';
 import { useTokenSuggest, SuggestionMenu } from './TokenSuggest';
+import { useFeature } from '@/hooks/useFeature';
 
 type Status = { kind: 'pending' | 'reply' | 'error'; text: string } | null;
 
@@ -25,7 +26,8 @@ export function QuickAdd({
   // handled by the LLM instead of creating a plain task. The box turns yellow to show it.
   const nlEnabled = useStore((s) => s.nlEnabled);
   const nlKeywords = useStore((s) => s.nlKeywords);
-  const commandMode = nlEnabled && firstWordIsCommand(value, nlKeywords);
+  const nlFeature = useFeature('nlCommands');
+  const commandMode = nlEnabled && nlFeature && firstWordIsCommand(value, nlKeywords);
 
   // Focus when a global hotkey (`c` / `/`) requests the quick-add bar.
   const focusNonce = useStore((s) => s.quickAddFocusNonce);

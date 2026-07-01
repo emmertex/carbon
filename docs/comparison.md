@@ -51,10 +51,10 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 |---|---|---|---|---|
 | Due date | ✓ | ✓ | ✓ | ✓ |
 | Defer / start date (hide until) | ✓ | ✗ | ✓ | ✗ |
-| Separate **reminder time** (≠ due) | ✓ (own field, pushes at that time) | ✓ | Due/defer notifications | ✓ |
-| Recurrence | Daily/Weekly/Monthly/Yearly × interval (+ multi-weekday) | **Natural-language**, most powerful | **Most flexible** | Daily/Weekly/Monthly/Yearly + custom |
-| **Ordinal / complex patterns** (e.g. "2nd Tue", "last weekday") | ✗ (planned) | ✓ | ✓ | Partial |
-| **Completion-relative recurrence** | ✓ "Repeat from completion date" | ✓ ("every!") | ✓ | Partial |
+| Separate **reminder time** (≠ due) | ✓ | ✓ | Due/defer notifications | ✓ |
+| Recurrence | ✓ | ✓ | ✓ | ✓ |
+| **Ordinal / complex patterns** (e.g. "2nd Tue", "last weekday") | ✓ | ✓ | ✓ | Partial |
+| **Completion-relative recurrence** | ✓ | ✓ ("every!") | ✓ | Partial |
 | Time-of-day on due | ✓ | ✓ | ✓ | ✓ |
 
 ## 4. Organization: tags, priority, flags, filtering
@@ -65,8 +65,10 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Tag "on hold" (defer all tasks w/ tag) | ✓ | ✗ | ✓ | ✗ |
 | Priority levels | **4** | **4** | ✗ | ✗ |
 | Flag | ✓ | ✗ (can use P1) | ✓ | ✓ "Important" |
-| Saved views / Perspectives | ✓ | ✓ saved filters (query) | ✓ (Pro) | Smart lists only |
-| Perspective rule power | Sort + flat filters; AND/OR/NOT on **tags only** | Query language | **Arbitrary rule trees** + custom grouping/sorting | ✗ |
+| Saved views / Perspectives | ✓ (basic **or** advanced filters persist per view) | ✓ saved filters (query) | ✓ (Pro) | Smart lists only |
+| Perspective rule power | Sort + basic filters, **plus advanced nested AND/OR/NOT** across due/defer/priority/flag/tags/project/status/text | Query language | **Arbitrary rule trees** + custom grouping/sorting | ✗ |
+| **Advanced boolean filters** (nested AND/OR/NOT groups) | ✓ visual builder, any attribute | Via query language | ✓ rule trees | ✗ |
+| **Natural-language → filter** (describe it, LLM builds the expression) | ✓ <ss> | ✗ | ✗ | ✗ |
 | Filter by tag (multi) | ✓ | ✓ | ✓ | ✗ |
 | Filter by priority (multi) | ✓ | ✓ | ✓ | ✗ |
 | Filter by project (multi) | ✓ | ✓ | ✓ | ✗ |
@@ -103,10 +105,10 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific | Carbon | Todoist | OmniFocus | MS To Do |
 |---|---|---|---|---|
 | Push reminders | ✓ <ss> | ✓ (Pro) | ✓ | ✓ |
-| **Local reminders, no server** | ✓ foreground scan | ✗ | ✓ | ✗ |
-| Location reminders | ✓ (foreground and <ss>) | ✓ (Pro) | ✓ (iOS) | ✗ |
+| **Local reminders, no server** | ✓ (Foreground as PWA, Background as App) | ✗ | ✓ | ✗ |
+| Location reminders | ✓ + external location with <ss> | ✓ (Pro) | ✓ (iOS) | ✗ |
 | Multi-device location store | ✓ each device reports GPS to server; **Nearby view** shows tasks at your location | ✗ | ✗ | ✗ |
-| Background geofence | Via Sync Server <ss> | ✓ native mobile | ✓ native iOS | ✗ |
+| Background geofence | ✓ App or via Sync Server <ss> | ✓ native mobile | ✓ native iOS | ✗ |
 
 ## 8. Time tracking & review
 
@@ -121,10 +123,10 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 
 | Specific | Carbon | Todoist | OmniFocus | MS To Do |
 |---|---|---|---|---|
-| Quick-add inline tokens | ✓ `#tag` `@user` `!priority` w/ autocomplete; **NL commands** via configured keyword <ss> | ✓ **full NLP** | ✓ (dates) | Basic |
-| Natural-language **commands** (LLM) | ✓ **True LLM AI** <ss> | ✓ "AI Assistant" (Pro, limited) | ✗ | ✗ |
-| Natural-language **dates** (NLP parsing) | ✗ (planned <ss>) | ✓ | ✓ | ✓ partial |
-| Email-to-task | ✗ (not planned, use API <ss>) | ✓ | ✓ (Mail drop) | ✓ (flagged email) |
+| Quick-add inline tokens | ✓ `#tag` `@user` `!priority` w/ autocomplete; **full NLP** via <ss> | ✓ **full NLP** | ✓ (dates) | Basic |
+| Natural-language **commands** | ✓ **True LLM AI** <ss> | ✓ "AI Assistant" (Pro, limited) | ✗ | ✗ |
+| Natural-language **dates** | ✓ **True LLM AI** <ss> | ✓ | ✓ | ✓ partial |
+| Email-to-task | ✗ (not planned) | ✓ | ✓ (Mail drop) | ✓ (flagged email) |
 
 ## 10. Views
 
@@ -169,17 +171,28 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific | Carbon | Todoist | OmniFocus | MS To Do |
 |---|---|---|---|---|
 | Track record / maturity | Newer, actively developed, **Fully OSS** | Established, large team | **Mature, GTD Gold Standard** | Microsoft-backed |
-| Native apps | Web, **Linux**, Win, Android (Max and iOS planned) | ✓ Web, Win, Max, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
-| Apple Watch / wearable | ✗ (submit PR!) | ✓ | ✓ | ✓ |
-| Home-screen **widgets** | ✗ (submit PR!) | ✓ | ✓ | ✓ |
-| **Gemini / Siri / Shortcuts / voice** | ✗ (submit PR!) | ✓ | ✓ deep | ✓ (Cortana/Copilot) |
-| OS **share sheet** capture | ✗ (submit PR!) | ✓ | ✓ | ✓ |
+| Native apps | Web, PWA, **Linux**, Win, Android, (Mac and iOS planned) | ✓ Web, Win, Max, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
+| Apple Watch / wearable | ✗ (Please help with a PR!) | ✓ | ✓ | ✓ |
+| Home-screen **widgets** | ✗ (Please help with a PR!) | ✓ | ✓ | ✓ |
+| **Gemini / Siri / Shortcuts / voice** | ✗ (Please help with a PR!) | ✓ | ✓ deep | ✓ (Cortana/Copilot) |
+| OS **share sheet** capture | ✗ (Please help with a PR!) | ✓ | ✓ | ✓ |
 | System-wide **quick capture** hotkey | ✓ **desktop** `Ctrl+Shift+A` | ✓ | ✓ (Quick Entry) | Partial |
-| Background reminders **without a server** | ✗ (planned, submit PR!) | ✓ native | ✓ native | ✓ native |
-| Notification reliability | Web Push <ss> / foreground scan | ✓ OS-level | ✓ OS-level | ✓ OS-level |
+| Background reminders **without a server** | ✓ (native apps only) | ✓ | ✓ | ✓ |
+| Notification reliability | Web Push <ss> / foreground scan / OS-level in App | ✓ OS-level | ✓ OS-level | ✓ OS-level |
 | Scripting options | ✓ REST + agents <ss> | Integrations | ✓ Omni Automation | Power Automate |
 
-## 14. Pricing & availability
+## 14. Customization, onboarding & editing
+
+| Specific | Carbon | Todoist | OmniFocus | MS To Do |
+|---|---|---|---|---|
+| **UI complexity presets** (Simple / Standard / Advanced) | ✓ chosen on first run, changeable anytime | ✗ | ✗ | ✗ |
+| **Show/hide individual features** (filter bar, Nearby, Forecast, Review, time tracking, assistant, …) | ✓ per-feature toggles | Limited | Some layout prefs | ✗ |
+| **Separate desktop vs mobile** feature visibility | ✓ | ✗ | ✗ | ✗ |
+| First-run setup picker | ✓ | ✓ onboarding | ✓ | ✓ |
+| **Undo / redo** | ✓ multi-level session stack (`Ctrl/⌘+Z` / `Ctrl/⌘+Shift+Z`) + buttons | ✓ recent-action undo | ✓ full undo/redo | Partial |
+| **Sync UI settings & saved views across devices** | ✓ optional, on by default; pulled on first sign-in <ss> | ✓ | ✓ | ✓ |
+
+## 15. Pricing & availability
 
 | Specific | Carbon | Todoist | OmniFocus | MS To Do |
 |---|---|---|---|---|
@@ -195,28 +208,28 @@ The honest list of what you give up by choosing Carbon today. None of these are 
 are the reasons a careful GTD user might *not* switch.
 
 **vs OmniFocus (the gold standard):**
-- **Perspectives are far weaker.** OmniFocus builds arbitrary rule trees (nested AND/OR/NOT
-  across any attribute) with custom grouping and sorting. Carbon offers flat filters with
-  boolean logic on *tags only*. (Not Planned)
-- **Recurrence is basic.** No ordinal patterns ("2nd Tuesday", "last weekday of month"). (Considering this feature)
-- **Forecast is task-only** No system-calendar overlay. (Will not do)
+- **Perspectives still lack custom grouping/sorting.** Carbon now has advanced filters —
+  nested AND/OR/NOT groups across any attribute (due/defer/priority/flag/tags/project/status/
+  text), with a natural-language builder — so the rule-tree gap is largely closed. What
+  OmniFocus still does that Carbon doesn't: arbitrary **custom grouping and per-perspective
+  sorting** within a saved view.
+- **Forecast is task-only** No system-calendar overlay. (Not Planned)
 - **Native maturity.** OmniFocus has years of polish, rock-solid OS notifications, Apple
   Watch, widgets, Siri/Shortcuts, share-sheet and Quick Entry capture. Carbon is a PWA with
-  thin native shells and no widgets/Watch/Siri; iOS PWA push is unreliable, and
-  server-independent background reminders don't exist (Server API is the workaround).
+  thin native shells and no widgets/Watch/Siri.
 - **Track record.** OmniFocus is a supported commercial product trusted with thousands of
   tasks over many years; Carbon is newer and still building that long-term reliability story.
 
 **vs Todoist:**
 - Kanban (If you want them, and can make them work, by all means, submit a PR!).
 - Huge integration marketplace.  (Not planned, when linked to an agent like Hermes, we feel Carbon is superior)
-- Widgets on Mobile Platforms.  (Not planned, submit a PR if you want it)
+- Widgets on Mobile Platforms.  (Planned)
 - App maturity / Market Penetration.
 
 **vs Microsoft To Do:**
-- Home Screen Widgets.
-- True Native Apps with true OS integration.
-- Reliable background notifications.
+- Home Screen Widgets. (Planned)
+- True Native Apps with true OS integration. (In Development)
+- Reliable background notifications. (In Development)
 - Supported by Microsoft.
 
 ## Where Carbon holds its own
@@ -230,6 +243,7 @@ Carbon's reason to exist isn't beating competition, it's a different *intersecti
   - **Agentic Links** - API's are nice, but using them can be tricky, so provided in the project are listeners for agents, skills, and tutorials for using **Hermes**, **OpenClaw** and alike right out of the box.  And you don't need your own Sync Server, all API's are available on our hosting solution.  
   - **True Agent** - You can @comment to your Agent, or add it projects or tasks, it will see everything you do, and action as you wish!
   - **True LLM** - Not some crappy natural language with rules, Natural Language uses an LLM of your choice.  We reccomend using at least a 8B model, We use a 20B one personally.  But if you want to use Opus or GPT5.5, that is your choice!  With an extremely complete API, it can do more than you think!  
+  - **Grows with you** - Pick Simple, Standard or Advanced on first run, then show or hide individual features (filter bar, Nearby, Forecast, Review, time tracking, the assistant, …) — even differently on desktop vs mobile. A welcoming app for newcomers that unfolds into a power tool, with those choices syncing across your devices.
   - **New and FOSS** - At Emmertex we have used the predecessor of Carbon for nearly 10 years, but it wasn't a todo app.  It was a sync machine between all sorts of applications to make our workflow functional.  Carbon is a natural evolution, bringing all those pieces together into one.  Carbon is not human coded, it is the output of a decade of wish lists and hacky solutions due to nothing out there doing what we want.  But we aren't into AI Slop.  This is heavily guided, planned and reviewed.
 - **vs OmniFocus**
   - Carbon covers much of the GTD core (defer + due dates, review, tags incl.
@@ -262,12 +276,10 @@ Decisions based on feature gaps:
 
 | Gap | Decision | Notes |
 |---|---|---|
-| **Rule-based perspectives** | 🔜 As Needed | Currently everything we want works.  If there is ever an edge case, we will add it.  We are not adding features for the sake of a bigger feature list |
-| **Ordinal recurrence patterns** | 🔜 Planned | "2nd Tuesday", "last weekday of month".  We know people want it, but we don't use it.  So it is low priority.  When we need it, it will be added.  If someone submits a PR, might happen sooner |
+| **Rule-based perspectives** | ✅ Largely shipped | Advanced filters now build nested AND/OR/NOT across any attribute (plus a natural-language builder), and persist per view. Remaining gap vs OmniFocus is custom grouping/sorting within a perspective — 🔜 as needed. |
 | **Forecast calendar overlay** | ⬇️ Deprioritized | We push and pull to CALDav and that is sufficient for us.  We don't currently use or want this, and don't want to make it, and have it imperfect.  When we need or want it, it will happen.  If someone really wants it, and uses it, submit a PR. |
-| **End-to-end encrypted sync** | ❌ Not Planned | Yes, we see the benefit.  No app we know of apart from OmniFocus supports this.  If you want data security, self host your own sync server. |
-| **Natural-language dates** (NLP in quick-add) | 🔜 In Testing | We have this internally, but it makes mistakes.  Once it is solid, it will be released.  (extends existing `#`/`@`/`!`). |
-| **Productivity stats** | 🔜 Planned | Must integrate with **time tracking** (timers + estimates vs actuals); design holistically before building. We did have this from the start, but it added no value, and was removied.  It will come back once it is useful. |
-| **Kanban board** | ❌ Not planned | We like the idea, but see little to no value in it personally.  We are not adding features for the sake of it.  If we won't use it ourselves, we can't assure the quality we expect.  This needs to come in as a PR from someone who truly needs and uses it. |
-| **Third-party integration marketplace** | ❌ Not planned | Instead, invest in making the **REST API excellent** (the integration surface).  Use the Agentic tools like Hermes or OpenClaw.  We feel the idea of manual integrations are a high maintenance legacy solution no longer needed |
-| **Native platform integration** | ⬇️ Deprioritized | Real, acknowledged gaps: iOS background push/geofencing, home-screen widgets, share-sheet, and OS-level notification reliability.  The issue is, internally, we don't use or care about them.  This again causes the whole, no feature for the sake of it, so we can't guarentee quality.  This needs to come in as a PR from someone who truly needs and uses it. |
+| **End-to-end encrypted sync** | ⬇️ Deprioritized | Yes, we see the benefit.  No app we know of apart from OmniFocus supports this.  If you want data security, self host your own sync server.  This is on our radar. |
+| **Productivity stats** | 🔜 Planned | Must integrate with **time tracking** (timers + estimates vs actuals); design holistically before building. We did have this from the start, but it added no value, and was removed.  It will come back once it is useful. |
+| **Kanban board** | ❌ Not planned | We like the idea, but doing it in a useful way that doesn't add complexity or another field in the database, no.  We are not adding features for the sake of it.  If we won't use it ourselves, we can't assure the quality we expect.  We wish we could add it, but we don't want to do it wrong.  Help us help you if you need this feature, either with design ideas, or a PR |
+| **Third-party integration marketplace** | ❌ Not planned | Instead, we invest in making the **REST API excellent** (the integration surface).  Use the Agentic tools like Hermes or OpenClaw.  We feel the idea of manual integrations are a high maintenance legacy solution no longer needed.  If we are wrong, we will walk back this decision. |
+| **Native platform integration** | Planned | Real, acknowledged gaps: iOS background push/geofencing, home-screen widgets, and OS-level notification reliability.  The issue is, internally, we don't use iOS, and don't use widgets on Android.  This again causes the whole, no feature for the sake of it, so we can't guarentee quality.  This would benefit greatly from the community. Windows, Linux, Mac and Android (without widgets) are all a go! |

@@ -22,6 +22,8 @@ import {
   Trash2,
   ChevronRight,
   X,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
@@ -64,10 +66,17 @@ import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { TagMark } from './TagMark';
 import { useQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
+import { useFeature } from '@/hooks/useFeature';
+import { undo, redo } from '@/lib/undo';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { mutate } from '@/lib/mutate';
 import { cn } from '@/lib/cn';
-import { getPerspectives, removePerspective, type SavedPerspective } from '@/lib/views';
+import {
+  getPerspectives,
+  removePerspective,
+  reorderPerspectives,
+  type SavedPerspective,
+} from '@/lib/views';
 import { buildFolderRows, rowGroup, targetGroupAt, type FolderRow } from '@/lib/folderTree';
 import { ColorSwatches } from './ColorSwatches';
 import { ProjectGlyph } from './ProjectGlyph';
@@ -666,22 +675,173 @@ function TagsSection() {
   );
 }
 
-export function Sidebar() {
+/** Undo / redo controls, disabled when the respective stack is empty. */
+function UndoButtons() {
+  const undoCount = useStore((s) => s.undoCount);
+  const redoCount = useStore((s) => s.redoCount);
+  return (
+    <>
+      <button
+        onClick={() => undo()}
+        disabled={undoCount === 0}
+        className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text disabled:opacity-30"
+        aria-label="Undo"
+        title="Undo (Ctrl+Z)"
+      >
+        <Undo2 size={17} />
+      </button>
+      <button
+        onClick={() => redo()}
+        disabled={redoCount === 0}
+        className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text disabled:opacity-30"
+        aria-label="Redo"
+        title="Redo (Ctrl+Shift+Z)"
+      >
+        <Redo2 size={17} />
+      </button>
+    </>
+  );
+}
+
+/** One draggable perspective row. The delete button only exists while this
+ *  perspective is the open view — and when it does, it stays fully visible
+ *  (no hover reveal) so it is reachable on touch. */
+function PerspectiveRow({
+  p,
+  selected,
+  onOpen,
+  onDelete,
+}: {
+  p: SavedPerspective;
+  selected: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: p.id,
+  });
+  // Whole-row press-and-hold drag, matching the projects/tags lists.
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn('relative select-none', isDragging && 'z-10 opacity-80')}
+    >
+      <NavLink
+        to={`/view/${p.id}`}
+        onClick={onOpen}
+        className={({ isActive }) =>
+          cn(
+            'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors',
+            isActive
+              ? 'bg-accent-soft text-accent'
+              : 'text-text-muted hover:bg-surface-2 hover:text-text',
+            // leave room for the delete button so long names don't slide under it
+            selected && 'pr-9',
+          )
+        }
+      >
+        <span className="shrink-0">
+          <Bookmark size={16} />
+        </span>
+        <span className="flex-1 truncate">{p.name}</span>
+      </NavLink>
+      {selected && (
+        <button
+          type="button"
+          onClick={onDelete}
+          // stop the drag sensor from claiming the press so a tap deletes
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-text-faint hover:text-danger"
+          aria-label={`Delete ${p.name}`}
+        >
+          <X size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PerspectivesSection() {
   const navigate = useNavigate();
   const location = useLocation();
-  const sidebarOpen = useStore((s) => s.sidebarOpen);
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
+  // A sync bumps dbRevision after applying settings; re-read so a perspective
+  // added/removed/reordered on another device shows up without a navigation.
+  const dbRevision = useStore((s) => s.dbRevision);
+  const close = () => setSidebarOpen(false);
+  const sensors = useReorderSensors();
 
   const [perspectives, setPerspectives] = useState<SavedPerspective[]>(getPerspectives);
-  useEffect(() => setPerspectives(getPerspectives()), [location.pathname]);
+  useEffect(() => setPerspectives(getPerspectives()), [location.pathname, dbRevision]);
 
-  function deletePerspective(id: string) {
+  if (perspectives.length === 0) return null;
+
+  function deletePerspective(id: string, name: string) {
+    if (!window.confirm(`Delete perspective "${name}"?`)) return;
     removePerspective(id);
     setPerspectives(getPerspectives());
     if (location.pathname === `/view/${id}`) navigate('/today');
   }
 
+  function onDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const oldIndex = perspectives.findIndex((p) => p.id === active.id);
+    const newIndex = perspectives.findIndex((p) => p.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    const reordered = arrayMove(perspectives, oldIndex, newIndex);
+    setPerspectives(reordered); // optimistic; persist + sync the new order
+    reorderPerspectives(reordered);
+  }
+
+  return (
+    <>
+      <div className="mt-5 px-4 pb-1 text-xs font-semibold uppercase tracking-wide text-text-faint">
+        Perspectives
+      </div>
+      <div className="px-2.5">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToVerticalAxis]}
+          onDragEnd={onDragEnd}
+        >
+          <SortableContext
+            items={perspectives.map((p) => p.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="flex flex-col gap-0.5">
+              {perspectives.map((p) => (
+                <PerspectiveRow
+                  key={p.id}
+                  p={p}
+                  selected={location.pathname === `/view/${p.id}`}
+                  onOpen={close}
+                  onDelete={() => deletePerspective(p.id, p.name)}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      </div>
+    </>
+  );
+}
+
+export function Sidebar() {
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const setSidebarOpen = useStore((s) => s.setSidebarOpen);
+
   const where = useWhere();
+  const showNearby = useFeature('nearby');
+  const showForecast = useFeature('forecast');
+  const showReview = useFeature('review');
+  const showTime = useFeature('timeTracking');
+  const showPerspectives = useFeature('perspectives');
+  const showTags = useFeature('tags');
   const countScope = useStore((s) => s.uiPrefs.countScope);
   const data = useQuery(
     (db) => {
@@ -751,14 +911,16 @@ export function Sidebar() {
           count={data?.flaggedCount}
           onClick={close}
         />
-        <NavItem
-          to="/forecast"
-          icon={<CalendarRange size={17} />}
-          label="Forecast"
-          count={data?.overdueCount}
-          onClick={close}
-        />
-        {where.hasLocation && (
+        {showForecast && (
+          <NavItem
+            to="/forecast"
+            icon={<CalendarRange size={17} />}
+            label="Forecast"
+            count={data?.overdueCount}
+            onClick={close}
+          />
+        )}
+        {showNearby && where.hasLocation && (
           <NavItem
             to="/nearby"
             icon={<MapPin size={17} />}
@@ -768,43 +930,22 @@ export function Sidebar() {
           />
         )}
         <NavItem to="/plan" icon={<Target size={17} />} label="Plan" onClick={close} />
-        <NavItem
-          to="/review"
-          icon={<Eye size={17} />}
-          label="Review"
-          count={data?.reviewCount}
-          onClick={close}
-        />
+        {showReview && (
+          <NavItem
+            to="/review"
+            icon={<Eye size={17} />}
+            label="Review"
+            count={data?.reviewCount}
+            onClick={close}
+          />
+        )}
         <NavItem to="/all" icon={<Layers size={17} />} label="All Tasks" onClick={close} />
-        <NavItem to="/time" icon={<Clock size={17} />} label="Time tracked" onClick={close} />
+        {showTime && (
+          <NavItem to="/time" icon={<Clock size={17} />} label="Time tracked" onClick={close} />
+        )}
       </nav>
 
-      {perspectives.length > 0 && (
-        <>
-          <div className="mt-5 px-4 pb-1 text-xs font-semibold uppercase tracking-wide text-text-faint">
-            Perspectives
-          </div>
-          <nav className="flex flex-col gap-0.5 px-2.5">
-            {perspectives.map((p) => (
-              <div key={p.id} className="group/persp relative">
-                <NavItem
-                  to={`/view/${p.id}`}
-                  icon={<Bookmark size={16} />}
-                  label={p.name}
-                  onClick={close}
-                />
-                <button
-                  onClick={() => deletePerspective(p.id)}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-text-faint opacity-0 hover:text-danger group-hover/persp:opacity-100"
-                  aria-label={`Delete ${p.name}`}
-                >
-                  <X size={13} />
-                </button>
-              </div>
-            ))}
-          </nav>
-        </>
-      )}
+      {showPerspectives && <PerspectivesSection />}
 
       {data?.shared && data.shared.length > 0 && (
         <>
@@ -828,12 +969,13 @@ export function Sidebar() {
 
       <ProjectsSection />
 
-      <TagsSection />
+      {showTags && <TagsSection />}
       </div>
 
       <div className="flex items-center gap-1 border-t border-border px-2.5 py-2">
         <SyncIndicator />
         <div className="flex-1" />
+        <UndoButtons />
         <ThemeToggle />
         <NavLink
           to="/settings"

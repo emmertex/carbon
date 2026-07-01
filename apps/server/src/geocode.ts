@@ -44,6 +44,8 @@ export interface GeocodeConfig {
   userAgent: string;
   /** Default brand-search radius in metres. */
   radiusM: number;
+  /** Min ms between outbound requests. Defaults to 1100 to honour OSM ≤1 req/s policy. */
+  requestIntervalMs?: number;
 }
 
 const DEFAULT_NOMINATIM = 'https://nominatim.openstreetmap.org';
@@ -56,6 +58,31 @@ const DEFAULT_UA =
 // lookups so a burst of NL commands can't get the deployment rate-limited/banned.
 const MIN_REQUEST_INTERVAL_MS = 1100;
 const CACHE_TTL_MS = 5 * 60_000;
+
+// Concise tracing so a failing place search can be diagnosed from the server log:
+// which tier ran, the upstream HTTP status, and the hit count. On by default for
+// single-tenant self-host (mirrors CARBON_NL_DEBUG); set CARBON_GEO_DEBUG=0 to silence.
+const GEO_DEBUG = process.env.CARBON_GEO_DEBUG !== '0';
+function geoDbg(msg: string): void {
+  if (GEO_DEBUG) console.log(`[geo] ${msg}`);
+}
+
+// The public Overpass endpoint is frequently overloaded; cap its wait short so a slow
+// Overpass falls through to Nominatim quickly instead of stalling the whole search.
+const OVERPASS_TIMEOUT_MS = 8_000;
+
+/** One-line cause for a thrown fetch: ENOTFOUND/EAI_AGAIN = no DNS/egress, TimeoutError
+ *  = upstream too slow, EndpointError = SSRF guard blocked the URL. */
+function describeErr(e: unknown): string {
+  const err = e as { name?: string; code?: string; message?: string; cause?: unknown };
+  const cause = err.cause as { code?: string; message?: string } | undefined;
+  return (
+    `${err.name ?? 'Error'}` +
+    `${err.code ? ` code=${err.code}` : ''}` +
+    `${cause?.code ? ` cause=${cause.code}` : ''}` +
+    ` — ${err.message ?? cause?.message ?? 'unknown'}`
+  );
+}
 
 /**
  * Read geocoder config from the environment.
@@ -118,13 +145,15 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
 
   type Hit = { point: GeoPoint; label: string; dist: number };
 
+  const requestIntervalMs = cfg.requestIntervalMs ?? MIN_REQUEST_INTERVAL_MS;
+
   // Space out outbound requests to honour the OSM ≤1 req/s policy. A request reserves
   // the next free time-slot; an isolated request pays no delay, only bunched ones wait.
   let nextSlot = 0;
   async function paced<T>(fn: () => Promise<T>): Promise<T> {
     const now = Date.now();
     const wait = Math.max(0, nextSlot - now);
-    nextSlot = Math.max(now, nextSlot) + MIN_REQUEST_INTERVAL_MS;
+    nextSlot = Math.max(now, nextSlot) + requestIntervalMs;
     if (wait) await new Promise((res) => setTimeout(res, wait));
     return fn();
   }
@@ -148,16 +177,24 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
     if (!q) return [];
     const filter = `(around:${radiusM},${near.lat},${near.lng})`;
     const ql =
-      `[out:json][timeout:15];(` +
+      `[out:json][timeout:8];(` +
       `nwr["brand"~"${q}",i]${filter};` +
       `nwr["name"~"${q}",i]${filter};` +
       `);out center 40;`;
-    const res = await safeFetch(cfg.overpassUrl, allowPrivate, {
-      method: 'POST',
-      headers: { 'content-type': 'text/plain', 'user-agent': cfg.userAgent },
-      body: 'data=' + encodeURIComponent(ql),
-    });
-    if (!res.ok) return [];
+    const res = await safeFetch(
+      cfg.overpassUrl,
+      allowPrivate,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', 'user-agent': cfg.userAgent },
+        body: 'data=' + encodeURIComponent(ql),
+      },
+      OVERPASS_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      geoDbg(`overpass HTTP ${res.status} for "${q}" (host may be blocking server requests)`);
+      return [];
+    }
     const data = (await res.json()) as { elements?: OverpassElement[] };
     const hits: Array<{ point: GeoPoint; label: string; dist: number }> = [];
     for (const el of data.elements ?? []) {
@@ -175,17 +212,39 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
     return hits;
   }
 
-  async function viaNominatim(query: string, near: GeoPoint): Promise<Hit[]> {
-    // Bias the search to a viewbox around `near` (~0.3° ≈ 30km), bounded.
-    const d = 0.3;
+  /**
+   * Nominatim free-text search around `near`.
+   *
+   * `bounded` (default) hard-restricts results to a tight viewbox (~0.3° ≈ 30km) — the
+   * local "what's near me" pass. With `bounded: false` the viewbox is only a soft ranking
+   * bias over a wide span (`spanDeg`), so an explicit "Ikea Springvale" / "Bunnings
+   * Melbourne" still resolves a place outside the immediate area (Nominatim parses the
+   * "<brand> <locality>" string the same way osm.org does), preferring the user's region
+   * for ambiguous names. Either way hits carry their distance from `near` for nearest-first
+   * sorting.
+   */
+  async function viaNominatim(
+    query: string,
+    near: GeoPoint,
+    opts?: { bounded?: boolean; spanDeg?: number },
+  ): Promise<Hit[]> {
+    const bounded = opts?.bounded ?? true;
+    const d = opts?.spanDeg ?? 0.3;
     const vb = [near.lng - d, near.lat + d, near.lng + d, near.lat - d].join(',');
     const url =
-      `${cfg.nominatimUrl}/search?format=jsonv2&addressdetails=1&limit=20&bounded=1` +
+      `${cfg.nominatimUrl}/search?format=jsonv2&addressdetails=1&limit=20` +
+      (bounded ? '&bounded=1' : '') +
       `&viewbox=${encodeURIComponent(vb)}&q=${encodeURIComponent(query)}`;
     const res = await safeFetch(url, allowPrivate, {
       headers: { 'user-agent': cfg.userAgent, accept: 'application/json' },
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      geoDbg(
+        `nominatim HTTP ${res.status} for "${query}" (bounded=${bounded}); ` +
+          `403/429 means the public host is blocking this server's requests`,
+      );
+      return [];
+    }
     const rows = (await res.json()) as NominatimResult[];
     const hits: Array<{ point: GeoPoint; label: string; dist: number }> = [];
     for (const r of rows) {
@@ -211,20 +270,47 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 5;
     const key = cacheKey(query, near, radiusM);
     const cached = cache.get(key);
-    let hits: Hit[];
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-      hits = cached.hits;
-    } else {
+      geoDbg(`"${query}" → ${cached.hits.length} hit(s) (cache)`);
+      return cached.hits.slice(0, limit).map((h) => ({ point: h.point, label: h.label }));
+    }
+
+    // Each tier is fault-isolated: a failure (timeout, rate-limit, bad JSON) degrades to
+    // empty and falls through to the next provider — one slow Overpass must not abort the
+    // Nominatim tiers that would have answered. Tiers, in order:
+    //   1) brand/name near me (Overpass)         — best for "nearest <brand> to me"
+    //   2) free-text near me (Nominatim, bounded) — local place/address match
+    //   3) free-text region-wide (Nominatim)      — explicit far place ("Ikea Springvale")
+    const tiers: Array<{ name: string; run: () => Promise<Hit[]> }> = [
+      { name: 'overpass', run: () => viaOverpass(query, near, radiusM) },
+      { name: 'nominatim/local', run: () => viaNominatim(query, near) },
+      {
+        name: 'nominatim/region',
+        run: () => viaNominatim(query, near, { bounded: false, spanDeg: 10 }),
+      },
+    ];
+    let hits: Hit[] = [];
+    let tier = 'none';
+    for (const t of tiers) {
+      let h: Hit[] = [];
       try {
-        let h = await paced(() => viaOverpass(query, near, radiusM));
-        if (h.length === 0) h = await paced(() => viaNominatim(query, near));
+        h = await paced(t.run);
+      } catch (e) {
+        geoDbg(`"${query}" ${t.name} failed: ${describeErr(e)} — trying next tier`);
+        continue;
+      }
+      if (h.length > 0) {
         hits = h.sort((a, b) => a.dist - b.dist);
-        cache.set(key, { at: Date.now(), hits });
-      } catch {
-        // EndpointError (SSRF/url), network, timeout, or bad JSON → "nothing found".
-        return [];
+        tier = t.name;
+        break;
       }
     }
+    geoDbg(
+      `"${query}" @ ${near.lat.toFixed(3)},${near.lng.toFixed(3)} → ${hits.length} hit(s) via ${tier}`,
+    );
+    // Cache only successful lookups: a transient upstream failure must not pin an empty
+    // result for the whole TTL and keep failing on retry.
+    if (hits.length > 0) cache.set(key, { at: Date.now(), hits });
     return hits.slice(0, limit).map((h) => ({ point: h.point, label: h.label }));
   }
 

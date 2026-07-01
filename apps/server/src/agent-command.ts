@@ -14,6 +14,7 @@ import type { Db } from '@carbon/core';
 import {
   chatLLM,
   recordAgentUsage,
+  formatNow,
   type FullAgentRow,
   type ChatMsg,
   type ToolDef,
@@ -423,6 +424,10 @@ export interface AgentCommandOpts {
   conversational?: boolean;
   /** Current time, taught to the model so relative dates ("due tomorrow") resolve. */
   now?: Date;
+  /** IANA zone (e.g. "Australia/Melbourne") the current time is expressed in for the model.
+   *  Without this, "now" is UTC and unlabeled, so relative dates resolve against the wrong
+   *  local day/evening for anyone not colocated with the server. */
+  timezone?: string | null;
   /** Which bucket to bill the token usage under (default 'nl_command'). */
   requestKind?: UsageKind;
   /** Prior turns of this chat (oldest first), inserted before the latest message so the model
@@ -656,8 +661,14 @@ export async function runAgentCommand(
   let system = opts.conversational ? CONVERSATIONAL_SYSTEM_PROMPT : SYSTEM_PROMPT;
   system += CAPABILITIES_HINT;
   if (anchor) system += GEO_HINT;
-  // Teach the model "now" so "due tomorrow" / "this week" resolve against the server clock.
-  if (opts.now) system += `\n\nThe current date and time is ${opts.now.toISOString()}.`;
+  // Teach the model "now" (in the user's own zone, when known) so "due tomorrow" / "this
+  // week" resolve against the user's local clock instead of the server's.
+  if (opts.now) {
+    system += `\n\nThe current date and time is ${formatNow(opts.now, opts.timezone)}. Resolve \
+relative dates ("tonight", "tomorrow", "next Tuesday") against that local time and zone, but always \
+write due_date / defer_date / reminder_at back out in UTC (ending in Z) — convert the local time you \
+picked to UTC before returning it.`;
+  }
   const history = opts.history ?? [];
   if (history.length) system += `\n\n${HISTORY_HINT}`;
   const messages: ChatMsg[] = [

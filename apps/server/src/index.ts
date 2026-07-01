@@ -86,7 +86,16 @@ import {
   setNlSettings,
   getAgentUsage,
 } from './agents';
+import {
+  getHostLmConfig,
+  buildHostAgentRow,
+  resolveAgent as resolveNlAgent,
+  isHostAgent,
+  checkHostRateLimit,
+} from './host-lm';
 import { runAgentCommand } from './agent-command';
+import { runFilterCommand } from './agent-filter';
+import { getUserTimezone, setUserTimezone } from './user-prefs';
 import {
   ensureCaldavDeviceId,
   getCaldavConfigRow,
@@ -131,8 +140,10 @@ import {
   setTenantExpiry,
   setTenantLock,
   setTenantBlobQuota,
+  setTenantMaxUsers,
   setTenantAdminEmail,
   setTenantAllowPrivate,
+  setTenantHostLmAvailable,
   deleteTenant,
   provisionTenant,
   validateSubdomain,
@@ -231,6 +242,18 @@ function effectiveBlobQuota(rec: TenantRecord | null): number {
   return rec.blob_quota_bytes == null ? BLOB_QUOTA_DEFAULT_BYTES : rec.blob_quota_bytes;
 }
 
+// Default human-user cap per hosted workspace (override with MAX_WORKSPACE_USERS,
+// default 6). Host admins can override it per workspace; the single-tenant self-host
+// is always uncapped.
+const WORKSPACE_USERS_DEFAULT = Math.max(0, Number(process.env.MAX_WORKSPACE_USERS) || 6);
+
+/** Effective human-user cap for a tenant: 0 = unlimited (self-host default tenant, or an
+ *  explicit 0 override); a null column falls back to the server default. */
+function effectiveMaxUsers(rec: TenantRecord | null): number {
+  if (!rec || rec.id === 'default') return 0; // single-tenant self-host is uncapped
+  return rec.max_users == null ? WORKSPACE_USERS_DEFAULT : rec.max_users;
+}
+
 /** Whether THIS tenant's agents may reach private/loopback/LAN endpoints (e.g. a
  *  self-hosted LLM). Single-tenant self-host always may; in multi-tenant mode the SSRF
  *  guard blocks private hosts unless a host admin opts the workspace in, or
@@ -267,6 +290,10 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
   // Per-request: may this workspace's agents reach private/LAN endpoints? (host-admin flag)
   const allowPrivate = (): boolean =>
     agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id));
+  // Per-request: may this workspace select the host-shared LM? Single-tenant self-host
+  // (the 'default' tenant) always may — there's no control-DB row to gate it.
+  const hostAvailable = (): boolean =>
+    ctx.id === 'default' ? true : !!getTenantById(controlDb, ctx.id)?.host_lm_available;
 
   const api = new Hono<Env>();
   // In multi-tenant mode never fall back to open/no-auth: a provisioned tenant
@@ -363,11 +390,23 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     if (getUserByUsername(db, body.username)) {
       return c.json({ error: 'username already exists' }, 409);
     }
+    // Enforce the per-workspace human-user cap (hosted subscriptions). Bot/agent
+    // accounts don't count toward the seat limit, and self-host is uncapped.
+    const isBot = body.isBot ?? false;
+    if (!isBot && ctx.id !== 'default') {
+      const limit = effectiveMaxUsers(getTenantById(controlDb, ctx.id));
+      if (limit > 0) {
+        const humans = listUsers(db).filter((u) => !u.is_bot).length;
+        if (humans >= limit) {
+          return c.json({ error: 'workspace_user_limit', limit }, 403);
+        }
+      }
+    }
     const user = createUser(db, {
       username: body.username,
       displayName: body.displayName ?? body.username,
       role: body.role ?? 'member',
-      isBot: body.isBot ?? false,
+      isBot,
     });
     setPassword(db, user.id, hashPassword(body.password));
     return c.json(publicUser(user), 201);
@@ -834,22 +873,67 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
       return c.json({ error: 'too many commands, try later' }, 429);
     }
-    const b = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const b = (await c.req.json().catch(() => ({}))) as { text?: string; timezone?: string };
     const text = (b.text ?? '').trim();
     if (!text) return c.json({ error: 'text required' }, 400);
+    if (b.timezone) setUserTimezone(db, userId, b.timezone);
     const nl = getNlSettings(db);
-    const agent = nl.enabled && nl.agentId ? getAgent(db, nl.agentId) : undefined;
+    const agent = nl.enabled && nl.agentId ? resolveNlAgent(db, nl.agentId, hostAvailable()) : undefined;
     if (!agent || !agent.enabled || agent.kind === 'webhook') {
       return c.json({ error: 'nl_not_configured' }, 503);
     }
+    if (isHostAgent(agent)) {
+      const cfg = getHostLmConfig();
+      const rl = cfg ? checkHostRateLimit(ctx.id, cfg) : { ok: false };
+      if (!rl.ok) return c.json({ reply: rl.message ?? 'Try again later.', executed: [], usage: { input: 0, output: 0 } });
+    }
+    // The host operator's own endpoint is trusted regardless of this workspace's SSRF flag.
+    const allowPrivateForCall = isHostAgent(agent) ? true : allowPrivate();
     try {
-      const r = await runAgentCommand(agentApiDeps, agent, userId, text, allowPrivate());
+      const r = await runAgentCommand(agentApiDeps, agent, userId, text, allowPrivateForCall, {
+        now: new Date(),
+        timezone: b.timezone ?? getUserTimezone(db, userId),
+      });
       return c.json(r);
     } catch (e) {
       // Log the detail server-side; don't return it — provider exception messages can
       // carry upstream URLs / error bodies that the API caller shouldn't see.
       console.error('[carbon] nl command failed:', e);
       return c.json({ error: 'command_failed' }, 502);
+    }
+  });
+
+  // NL → advanced filter: the filter builder posts a description, the configured agent
+  // returns a FilterExpr tree (validated client-side before it's applied). Reuses the
+  // same per-user hourly cap as commands.
+  api.post('/agent/filter', requireScope('tasks:read'), async (c) => {
+    const userId = c.get('userId');
+    if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
+      return c.json({ error: 'too many requests, try later' }, 429);
+    }
+    const b = (await c.req.json().catch(() => ({}))) as { text?: string; timezone?: string };
+    const text = (b.text ?? '').trim();
+    if (!text) return c.json({ error: 'text required' }, 400);
+    if (b.timezone) setUserTimezone(db, userId, b.timezone);
+    const nl = getNlSettings(db);
+    const agent = nl.enabled && nl.agentId ? getAgent(db, nl.agentId) : undefined;
+    if (!agent || !agent.enabled || agent.kind === 'webhook') {
+      return c.json({ error: 'nl_not_configured' }, 503);
+    }
+    try {
+      const r = await runFilterCommand(
+        agentApiDeps,
+        agent,
+        userId,
+        text,
+        allowPrivate(),
+        new Date(),
+        b.timezone ?? getUserTimezone(db, userId),
+      );
+      return c.json({ expr: r.expr });
+    } catch (e) {
+      console.error('[carbon] nl filter failed:', e);
+      return c.json({ error: 'filter_failed' }, 502);
     }
   });
 
@@ -868,12 +952,17 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     });
   });
 
-  api.post('/telegram/code', requireScope('tasks:read'), (c) => {
+  api.post('/telegram/code', requireScope('tasks:read'), async (c) => {
     if (!TELEGRAM_BOT_TOKEN) return c.json({ error: 'telegram_not_configured' }, 503);
+    const userId = c.get('userId');
+    const b = (await c.req.json().catch(() => ({}))) as { timezone?: string };
+    // Piggyback the browser's zone here — it's the one browser round-trip every Telegram
+    // user makes, so the bot can resolve "tomorrow night" without needing a separate setting.
+    if (b.timezone) setUserTimezone(db, userId, b.timezone);
     const { code, expiresAt } = createTelegramCode(controlDb, {
       tenantId: ctx.id,
       subdomain: tgSubdomain(),
-      userId: c.get('userId'),
+      userId,
     });
     return c.json({ code, expiresAt, botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null });
   });
@@ -909,7 +998,15 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
 
   // ----- admin: LLM agents (Hermes / OpenAI / Anthropic bot users) -------------
 
-  api.get('/admin/agents', requireAdmin, (c) => c.json({ agents: listAgents(db) }));
+  api.get('/admin/agents', requireAdmin, (c) => {
+    const agents = listAgents(db);
+    const hostCfg = getHostLmConfig();
+    if (hostCfg && hostAvailable()) {
+      const { api_key: _k, ...hostRow } = buildHostAgentRow(hostCfg);
+      agents.unshift(hostRow);
+    }
+    return c.json({ agents });
+  });
 
   api.post('/admin/agents', requireAdmin, async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as {
@@ -982,7 +1079,7 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
       enabled?: boolean;
     };
     if (b.agent_id) {
-      const a = getAgent(db, b.agent_id);
+      const a = resolveNlAgent(db, b.agent_id, hostAvailable());
       if (!a || a.kind === 'webhook') return c.json({ error: 'pick a direct-LLM agent' }, 400);
     }
     const patch: { agentId?: string | null; keywords?: string[]; enabled?: boolean } = {};
@@ -1414,6 +1511,8 @@ startTelegramBot({
   resolveSubdomain: (sub) => resolveTenantLocation(controlDb, sub)?.subdomain ?? null,
   allowPrivateFor: (tenantId) =>
     agentsAllowPrivate(tenantId === 'default' ? null : getTenantById(controlDb, tenantId)),
+  hostLmAvailableFor: (tenantId) =>
+    tenantId === 'default' ? true : !!getTenantById(controlDb, tenantId)?.host_lm_available,
 })
   .then((bot) => {
     telegramBot = bot;
@@ -1877,7 +1976,9 @@ host.patch('/tenants/:id', async (c) => {
     expiresAt?: string | null; // "Set Expiry" — when the workspace locks (null = never)
     locked?: boolean; // "Lock"/"Unlock" — manual operator lock (soft gate, still resolves)
     blobQuotaMb?: number | null; // storage cap in MB (null = server default, 0 = unlimited)
+    maxUsers?: number | null; // human-user cap (null = server default, 0 = unlimited)
     allowPrivateEndpoints?: boolean; // let this workspace's agents reach private/LAN hosts
+    hostLmAvailable?: boolean; // let this workspace select the host-shared LM
   };
   if (b.status) {
     setTenantStatus(controlDb, id, b.status);
@@ -1894,8 +1995,14 @@ host.patch('/tenants/:id', async (c) => {
       b.blobQuotaMb == null ? null : Math.max(0, Math.round(b.blobQuotaMb)) * 1024 * 1024,
     );
   }
+  if ('maxUsers' in b) {
+    setTenantMaxUsers(controlDb, id, b.maxUsers == null ? null : Math.max(0, Math.round(b.maxUsers)));
+  }
   if ('allowPrivateEndpoints' in b) {
     setTenantAllowPrivate(controlDb, id, !!b.allowPrivateEndpoints);
+  }
+  if ('hostLmAvailable' in b) {
+    setTenantHostLmAvailable(controlDb, id, !!b.hostLmAvailable);
   }
   return c.json({ ...getTenantById(controlDb, id) });
 });
@@ -1914,6 +2021,7 @@ host.get('/tenants/:id/usage', (c) => {
   if (!rec) return c.json({ error: 'not found' }, 404);
   const ctx = registry.getCtx(rec.subdomain);
   const users = ctx ? listUsers(ctx.db).length : 0;
+  const humanUsers = ctx ? listUsers(ctx.db).filter((u) => !u.is_bot).length : 0;
   const lastActivity = ctx
     ? (ctx.db.get<{ m: string | null }>('SELECT MAX(updated_at) AS m FROM items')?.m ?? null)
     : null;
@@ -1928,6 +2036,8 @@ host.get('/tenants/:id/usage', (c) => {
     id,
     subdomain: rec.subdomain,
     users,
+    humanUsers,
+    maxUsers: effectiveMaxUsers(rec),
     dbBytes,
     lastActivity,
     blobBytes,

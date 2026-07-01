@@ -1,4 +1,6 @@
 import { endOfToday, type Item } from '@carbon/core';
+import { notifySettingsChanged } from './settings-events';
+import type { FilterExpr } from './filter-expr';
 
 export type Base = 'all' | 'today' | 'inbox' | 'flagged';
 export type SortKey = 'manual' | 'due' | 'priority' | 'title' | 'created';
@@ -34,6 +36,10 @@ export interface Filters {
 export interface ViewPrefs {
   sort: SortKey;
   filters: Filters;
+  /** Which filter UI drives this view. 'basic' uses `filters`; 'advanced' uses `expr`. */
+  mode: 'basic' | 'advanced';
+  /** The nested boolean expression, used when `mode === 'advanced'`. */
+  expr: FilterExpr | null;
 }
 
 export const DEFAULT_FILTERS: Filters = {
@@ -54,7 +60,12 @@ export const DEFAULT_FILTERS: Filters = {
   onHoldMode: 'fade',
 };
 
-export const DEFAULT_PREFS: ViewPrefs = { sort: 'manual', filters: { ...DEFAULT_FILTERS } };
+export const DEFAULT_PREFS: ViewPrefs = {
+  sort: 'manual',
+  filters: { ...DEFAULT_FILTERS },
+  mode: 'basic',
+  expr: null,
+};
 
 /** Per-base default filters. Today hides blocked/unavailable tasks out of the box
  *  (OmniFocus "Available" behaviour); a "Show blocked" toggle reveals them. */
@@ -187,6 +198,7 @@ export function getPrefs(key: string): ViewPrefs {
 
 export function savePrefs(key: string, prefs: ViewPrefs): void {
   localStorage.setItem(PREFS_KEY(key), JSON.stringify(prefs));
+  notifySettingsChanged('views');
 }
 
 export function getPerspectives(): SavedPerspective[] {
@@ -205,6 +217,7 @@ export function getPerspective(id: string): SavedPerspective | undefined {
 
 export function addPerspective(p: SavedPerspective): void {
   localStorage.setItem(PERSPECTIVES_KEY, JSON.stringify([...getPerspectives(), p]));
+  notifySettingsChanged('views');
 }
 
 export function removePerspective(id: string): void {
@@ -212,6 +225,15 @@ export function removePerspective(id: string): void {
     PERSPECTIVES_KEY,
     JSON.stringify(getPerspectives().filter((p) => p.id !== id)),
   );
+  notifySettingsChanged('views');
+}
+
+/** Persist a new ordering of the whole perspective list (drag-to-reorder).
+ *  Order is just the array position, so this rewrites the list wholesale; the
+ *  `views` settings-sync push carries the new order to the account's devices. */
+export function reorderPerspectives(ordered: SavedPerspective[]): void {
+  localStorage.setItem(PERSPECTIVES_KEY, JSON.stringify(ordered));
+  notifySettingsChanged('views');
 }
 
 export function updatePerspective(id: string, patch: Partial<SavedPerspective>): void {
@@ -219,4 +241,5 @@ export function updatePerspective(id: string, patch: Partial<SavedPerspective>):
     PERSPECTIVES_KEY,
     JSON.stringify(getPerspectives().map((p) => (p.id === id ? { ...p, ...patch } : p))),
   );
+  notifySettingsChanged('views');
 }

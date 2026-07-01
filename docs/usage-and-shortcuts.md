@@ -74,8 +74,16 @@ Work from anywhere (ignored while typing in a field):
 |-----|--------|
 | **g** then **t / i / f / a / p / o / r** | go to Today / Inbox / Flagged / All / Plan / Forecast / Review |
 | **c** or **/** | focus the quick-add bar |
+| **Ctrl/⌘ + Z** | undo the last change |
+| **Ctrl/⌘ + Shift + Z** | redo |
 | **Home / End** | scroll the list to top / bottom |
 | **PageUp / PageDown** | scroll the list up / down a page |
+
+> **Undo / redo** covers task edits made this session — complete/reopen, flag, priority,
+> add-to-Plan, and delete — and is also available from the **↶ / ↷ buttons** in the sidebar
+> footer. Each undo is applied as a normal edit, so it syncs to your other devices like any
+> other change. The stack is per session (it clears on reload). Deleting a task still shows
+> its **Undo** snackbar, which now shares the same stack.
 
 ## Outline / list keyboard navigation
 
@@ -145,12 +153,67 @@ Configured in **Settings → Gestures & mobile**:
   view.
 - **Saved perspectives** — saved view + sort + filter combinations (in the sidebar).
 
+## Filtering: basic & advanced
+
+Every list view has a **filter & sort bar**. The sort dropdown and the icon chips
+(Completed, Flagged, Hide deferred, Hide blocked, Hide on-hold) plus the expandable panel
+(tags, priority, project, date range) are the **basic** filters — quick, flat, AND-ed
+together.
+
+Open the filter panel and switch **Basic → Advanced** to build a **nested boolean
+expression** instead:
+
+- Combine conditions with **AND / OR** groups and wrap any node in **NOT**.
+- Conditions cover flagged, completed, priority (=/≥/≤), due-within-/after-N-days, overdue,
+  no due date, deferred, blocked, on-hold, has-tag, in-project, and title/note contains.
+- Example: *due within 1 day **OR** (due within 2 days **AND** high priority) **OR** flagged,
+  **AND NOT** tagged #OnHold.*
+
+The chosen mode and expression are saved per view (and can be saved into a perspective).
+
+### Natural-language filters
+
+In the advanced panel, the **"Describe a filter…"** box turns plain English into an
+expression using the configured LLM agent (same setup as NL commands — **Settings → Users +
+AI agents**). Type *"things due tomorrow or flagged, but not on hold"*, and the builder fills
+in for you to review and tweak before applying. Token usage is tracked under `filter_build`
+in **Settings → Users + AI agents**.
+
+## Customizing the UI (Features)
+
+Carbon starts simple and unfolds as you need it. On first run a **welcome picker** asks how
+much to show — **Simple**, **Standard** or **Advanced** — and remembers your choice.
+
+Fine-tune it any time in **Settings → Features & UI complexity**:
+
+- Switch preset, or choose **Custom** to toggle individual features yourself.
+- Toggleable surfaces include the **filter & sort bar**, the **Show bar** (per-row icon
+  toggles), **GTD Tools** (advanced filters, defer dates and task dependencies), **Nearby**
+  (location), **Forecast**, **Review**, **time tracking**, **saved views**, the **tags**
+  section, and the **assistant** in the add box.
+- Each feature has separate **Desktop** and **Mobile** switches — e.g. hide the filter bar on
+  your phone but keep it on the desktop.
+
+Hidden features only disappear from the UI; their data and behaviour are untouched (a hidden
+filter bar still filters by the saved settings).
+
+The **task detail pane adapts too**: sections start expanded or collapsed to match your
+choices — Location expands when Nearby is on, Dependencies and the defer-until date appear
+with GTD Tools (otherwise behind a **More…** link), and Time tracking expands when it's
+enabled. Everything is still one click away, and **Record time** always sits at the top of the
+pane. This is presentation only — no feature is disabled or changed.
+
+By default, your Features choices — along with saved views, per-view filters, and
+perspectives — **sync across your devices** (see below). Turn this off per device with
+**"Sync views & UI settings across devices"** in the same section.
+
 ## Settings tour (quick map)
 
-Appearance (mode/theme/accent) · Gestures & mobile · Profile & Planning (signed in) ·
-Install app · Data backup (full export/import) · Sync server (URL + sign-in) · Reminders
-(push / foreground geofence) · This device & location sources · Users + AI agents (admin,
-incl. NL commands + token usage) · HA person · API tokens (admin) · About (version/device id).
+Appearance (mode/theme/accent) · **Features & UI complexity** (presets + per-feature, per-device
+toggles + settings sync) · Gestures & mobile · Profile & Planning (signed in) · Install app
+(browser only; links to the app stores) · Data backup (full export/import) · Sync server (URL +
+sign-in) · Reminders (push / foreground geofence) · This device & location sources · Users + AI
+agents (admin, incl. NL commands + token usage) · HA person · API tokens (admin) · About (version).
 
 ## Offline & sync
 
@@ -158,6 +221,11 @@ Carbon is **offline-first** — the whole database lives in your browser and eve
 applied locally first, then synced when a server is reachable. You can use it with **no
 server** at all (local-only). To sync across devices, point it at a Carbon server in
 **Settings → Sync server** and sign in. The sync indicator shows idle/syncing/error state.
+
+Alongside your tasks, Carbon also syncs your **UI settings, saved views, per-view filters and
+perspectives** (last-writer-wins, scoped to your account). It's on by default and pulled when
+you first sign in on a new device; toggle it per device in **Settings → Features & UI
+complexity**.
 
 > Durability: writes persist on a 250 ms debounce **and** flush immediately when the tab is
 > hidden or closed (`visibilitychange`/`pagehide`), so a reload or app-kill won't drop your

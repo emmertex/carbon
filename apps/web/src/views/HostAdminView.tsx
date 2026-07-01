@@ -140,6 +140,10 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
     await hostPatchTenant(creds, t.id, { blobQuotaMb }).catch((e) => setError((e as Error).message));
     void refresh();
   }
+  async function setMaxUsers(t: TenantRecord, maxUsers: number | null) {
+    await hostPatchTenant(creds, t.id, { maxUsers }).catch((e) => setError((e as Error).message));
+    void refresh();
+  }
   async function setAllowPrivate(t: TenantRecord, allowPrivateEndpoints: boolean) {
     await hostPatchTenant(creds, t.id, { allowPrivateEndpoints }).catch((e) =>
       setError((e as Error).message),
@@ -195,6 +199,7 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
               onLocked={setLocked}
               onExpiry={setExpiry}
               onQuota={setQuota}
+              onMaxUsers={setMaxUsers}
               onAllowPrivate={setAllowPrivate}
               onRemove={remove}
             />
@@ -212,6 +217,7 @@ function TenantRow({
   onLocked,
   onExpiry,
   onQuota,
+  onMaxUsers,
   onAllowPrivate,
   onRemove,
 }: {
@@ -221,6 +227,7 @@ function TenantRow({
   onLocked: (t: TenantRecord, locked: boolean) => void;
   onExpiry: (t: TenantRecord, expiresAt: string | null) => void;
   onQuota: (t: TenantRecord, blobQuotaMb: number | null) => void;
+  onMaxUsers: (t: TenantRecord, maxUsers: number | null) => void;
   onAllowPrivate: (t: TenantRecord, allow: boolean) => void;
   onRemove: (t: TenantRecord) => void;
 }) {
@@ -234,12 +241,27 @@ function TenantRow({
   const cap = usage ? (usage.blobQuota === 0 ? '∞' : fmtBytes(usage.blobQuota)) : '…';
   const near = usage && usage.blobQuota > 0 && usage.blobBytes / usage.blobQuota >= 0.9;
 
+  // Effective user cap (0 = unlimited). Blank input = server default.
+  const maxUsersVal = usage ? (usage.maxUsers === 0 ? null : usage.maxUsers) : null;
+  const userCap = usage ? (usage.maxUsers === 0 ? '∞' : String(usage.maxUsers)) : '…';
+  const usersFull = !!usage && usage.maxUsers > 0 && usage.humanUsers >= usage.maxUsers;
+
   function commitQuota(e: React.FocusEvent<HTMLInputElement> | React.KeyboardEvent<HTMLInputElement>) {
     const raw = (e.currentTarget.value ?? '').trim();
     if (raw !== '' && Number.isNaN(Number(raw))) return;
     const next = raw === '' ? null : Math.max(0, Math.floor(Number(raw)));
     if ((next ?? -1) === (quotaMb ?? -1)) return; // unchanged → no write
     onQuota(t, next);
+  }
+
+  function commitMaxUsers(
+    e: React.FocusEvent<HTMLInputElement> | React.KeyboardEvent<HTMLInputElement>,
+  ) {
+    const raw = (e.currentTarget.value ?? '').trim();
+    if (raw !== '' && Number.isNaN(Number(raw))) return;
+    const next = raw === '' ? null : Math.max(0, Math.floor(Number(raw)));
+    if ((next ?? -1) === (maxUsersVal ?? -1)) return; // unchanged → no write
+    onMaxUsers(t, next);
   }
 
   return (
@@ -272,6 +294,9 @@ function TenantRow({
         <span className={'block text-xs ' + (near ? 'text-amber-600' : 'text-text-faint')}>
           Storage {used} / {cap}
         </span>
+        <span className={'block text-xs ' + (usersFull ? 'text-amber-600' : 'text-text-faint')}>
+          Users {usage ? usage.humanUsers : '…'} / {userCap}
+        </span>
       </div>
 
       {/* Storage cap (MB): blank = server default, 0 = unlimited. */}
@@ -289,6 +314,23 @@ function TenantRow({
           className="w-16 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
         />
         MB
+      </label>
+
+      {/* User cap: blank = server default (MAX_WORKSPACE_USERS), 0 = unlimited. */}
+      <label
+        className="flex items-center gap-1 text-xs text-text-muted"
+        title="Max human users (blank = server default, 0 = unlimited). Bot/agent accounts don't count."
+      >
+        <input
+          type="number"
+          min={0}
+          key={maxUsersVal ?? 'na'}
+          defaultValue={maxUsersVal ?? ''}
+          onBlur={commitMaxUsers}
+          onKeyDown={(e) => e.key === 'Enter' && commitMaxUsers(e)}
+          className="w-14 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+        />
+        users
       </label>
 
       {/* Allow this workspace's agents to reach private/loopback/LAN endpoints. */}

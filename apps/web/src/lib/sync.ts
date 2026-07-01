@@ -24,6 +24,7 @@ import {
 import { useStore } from './store';
 import { uploadPendingBlobs } from './blobs';
 import { getNlConfig } from './admin';
+import { applyInboundSettings } from './settings-sync';
 
 function joinUrl(base: string, path: string): string {
   return base.replace(/\/$/, '') + path;
@@ -268,6 +269,7 @@ export async function syncNow(): Promise<boolean> {
   const store = useStore.getState();
   if (!cfg.url) {
     store.setSyncStatus('disabled');
+    store.setSettingsHydrated(true); // local-only: no synced settings to wait for
     return false;
   }
   if (inFlight) return false;
@@ -318,6 +320,8 @@ export async function syncNow(): Promise<boolean> {
     // subtree backfill) must not re-trigger another backfill, or it loops forever.
     const freshOps = data.ops?.length ? ingestOps(db, data.ops, true) : [];
     const freshRecords = data.recordOps?.length ? ingestRecordOps(db, data.recordOps, true) : [];
+    // Apply any synced UI prefs / view filters / perspectives into localStorage + store.
+    if (freshRecords.length) applyInboundSettings(freshRecords);
     if (unsynced.length) markOpsSynced(db, unsynced.map((o) => o.id));
     if (unsyncedRecords.length) markRecordOpsSynced(db, unsyncedRecords.map((o) => o.id));
     setMeta('last_sync_seq', String(data.cursor));
@@ -359,6 +363,9 @@ export async function syncNow(): Promise<boolean> {
     return false;
   } finally {
     inFlight = false;
+    // The first sync attempt has resolved (pulled synced settings, or determined we
+    // can't) — let the first-load complexity picker proceed.
+    useStore.getState().setSettingsHydrated(true);
   }
 }
 

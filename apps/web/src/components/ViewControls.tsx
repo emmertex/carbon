@@ -22,6 +22,10 @@ import { tagId, type Item, type Tag } from "@carbon/core";
 import { TagMark } from "./TagMark";
 import { Chip } from "./Chip";
 import { abbreviateTagPath } from "@/lib/tagLabel";
+import { useFeature } from "@/hooks/useFeature";
+import { AdvancedFilterBuilder } from "./AdvancedFilterBuilder";
+import { NlFilterBox } from "./NlFilterBox";
+import { describeExpr, type FilterExpr } from "@/lib/filter-expr";
 
 const PRIORITIES = [
   { value: 3, label: "High" },
@@ -64,10 +68,20 @@ export function ViewControls({
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
   const [open, setOpen] = useState(false);
+  const showControls = useFeature("viewControls");
+  const showPerspectives = useFeature("perspectives");
+  const showAdvanced = useFeature("gtdTools");
   const f = prefs.filters;
+  const advanced = prefs.mode === "advanced";
+
+  // Hidden by the user's UI-complexity choice. The view still filters/sorts by the
+  // saved prefs — only the control bar is gone.
+  if (!showControls) return null;
 
   const setFilters = (patch: Partial<ViewPrefs["filters"]>) =>
     onChange({ ...prefs, filters: { ...f, ...patch } });
+  const setExpr = (expr: FilterExpr | null) => onChange({ ...prefs, expr });
+  const setMode = (mode: "basic" | "advanced") => onChange({ ...prefs, mode });
 
   return (
     <div className="mb-3 text-xs">
@@ -92,33 +106,36 @@ export function ViewControls({
           </select>
         </div>
 
-        {QUICK_FILTERS.map(({ key, label, Icon }) => (
+        {!advanced &&
+          QUICK_FILTERS.map(({ key, label, Icon }) => (
+            <Chip
+              key={key}
+              active={f[key]}
+              onClick={() => setFilters({ [key]: !f[key] })}
+              aria-label={label}
+              title={label}
+              className="px-1.5"
+            >
+              <Icon size={14} />
+            </Chip>
+          ))}
+
+        {!advanced && (
           <Chip
-            key={key}
-            active={f[key]}
-            onClick={() => setFilters({ [key]: !f[key] })}
-            aria-label={label}
-            title={label}
+            active={f.onHoldMode === "hide"}
+            onClick={() =>
+              setFilters({ onHoldMode: f.onHoldMode === "hide" ? "fade" : "hide" })
+            }
+            aria-label="Hide on-hold"
+            title="Hide on-hold tasks (default: faded)"
             className="px-1.5"
           >
-            <Icon size={14} />
+            <Pause size={14} />
           </Chip>
-        ))}
+        )}
 
         <Chip
-          active={f.onHoldMode === "hide"}
-          onClick={() =>
-            setFilters({ onHoldMode: f.onHoldMode === "hide" ? "fade" : "hide" })
-          }
-          aria-label="Hide on-hold"
-          title="Hide on-hold tasks (default: faded)"
-          className="px-1.5"
-        >
-          <Pause size={14} />
-        </Chip>
-
-        <Chip
-          active={open || anyFilterActive(f)}
+          active={open || advanced || anyFilterActive(f)}
           onClick={() => setOpen((o) => !o)}
           aria-label="Filters"
           title="Filters"
@@ -127,9 +144,19 @@ export function ViewControls({
           <SlidersHorizontal size={14} />
         </Chip>
 
+        {advanced && prefs.expr && (
+          <span
+            className="max-w-[40%] truncate text-text-muted"
+            title={describeExpr(prefs.expr)}
+          >
+            {describeExpr(prefs.expr)}
+          </span>
+        )}
+
         <div className="flex-1" />
 
         {onSavePerspective &&
+          showPerspectives &&
           (saving ? (
             <form
               onSubmit={(e) => {
@@ -161,6 +188,48 @@ export function ViewControls({
 
       {open && (
         <div className="mt-2 space-y-3 rounded-lg border border-border bg-surface p-3">
+          {showAdvanced && (
+            <div className="flex items-center gap-2 border-b border-border pb-2">
+              <span className="text-text-faint">Mode</span>
+              <div className="flex overflow-hidden rounded-md border border-border">
+                {(["basic", "advanced"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMode(m)}
+                    className={`px-2 py-0.5 font-medium capitalize ${
+                      prefs.mode === m
+                        ? "bg-accent text-accent-fg"
+                        : "text-text-muted hover:bg-surface-2"
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {advanced ? (
+            <div className="space-y-3">
+              <NlFilterBox onResult={(expr) => onChange({ ...prefs, expr })} />
+              <AdvancedFilterBuilder
+                expr={prefs.expr}
+                onChange={setExpr}
+                tags={tags}
+                projects={projects}
+              />
+              {prefs.expr && (
+                <button
+                  onClick={() => setExpr(null)}
+                  className="text-xs font-medium text-accent hover:underline"
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
           {/* The same quick filters as the toolbar row, spelled out so the
               icon-only toolbar chips become learnable. */}
           <Group label="Status">
@@ -273,6 +342,8 @@ export function ViewControls({
             >
               Clear all filters
             </button>
+          )}
+            </>
           )}
         </div>
       )}

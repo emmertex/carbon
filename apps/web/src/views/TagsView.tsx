@@ -13,7 +13,7 @@ import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { getCurrentUserId, useStore } from '@/lib/store';
 import { enrichItems } from '@/lib/enrich';
-import { applyFilters } from '@/lib/filter';
+import { filterByPrefs } from '@/lib/filter-expr';
 import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
@@ -49,7 +49,7 @@ export function TagsView() {
       const ids = expandTagIds(db, [id!]);
       const seen = new Map<string, Item>();
       for (const tid of ids) for (const it of getItemsByTag(db, tid)) seen.set(it.id, it);
-      const filtered = applySort(applyFilters(db, [...seen.values()], prefs.filters), prefs.sort);
+      const filtered = applySort(filterByPrefs(db, [...seen.values()], prefs), prefs.sort);
       return {
         selected,
         color: effectiveTagColor(db, selected.name),

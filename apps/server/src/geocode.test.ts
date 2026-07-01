@@ -164,4 +164,58 @@ describe('makeOsmProvider', () => {
     const hit = await provider.nearestBrand('coles', { lat: -37.8, lng: 145.0 });
     assert.equal(hit?.label, 'Coles Near');
   });
+
+  test('explicit far-away place resolves via the region-wide Nominatim pass', async () => {
+    // "Ikea Springvale" from Melbourne: brand-near-me (Overpass) and bounded free-text
+    // both miss; the unbounded region-biased Nominatim pass parses the full string and
+    // returns the store. (Mirrors the real case where Overpass has no IKEA brand match.)
+    const seen: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      seen.push(u);
+      if (u.includes('/interpreter') || (init?.method === 'POST' && u.includes('overpass'))) {
+        return new Response(JSON.stringify({ elements: [] }), { status: 200 }); // Overpass empty
+      }
+      // Nominatim: empty when bounded, the IKEA only on the unbounded region-wide pass.
+      const rows = u.includes('bounded=1')
+        ? []
+        : [{ lat: '-37.9265', lon: '145.1439', name: 'IKEA', address: { suburb: 'Springvale' } }];
+      return new Response(JSON.stringify(rows), { status: 200 });
+    }) as typeof fetch;
+
+    const cfg = { ...geocodeConfigFromEnv({}, false), requestIntervalMs: 0 };
+    const provider = makeOsmProvider(cfg, true)!;
+    const melbourne = { lat: -37.8136, lng: 144.9631 };
+    const hits = await provider.search('Ikea Springvale', melbourne);
+    assert.ok(hits.length > 0, 'should resolve via the region-wide pass');
+    assert.equal(hits[0].label, 'IKEA, Springvale');
+    // Confirm the third tier actually fired with an unbounded viewbox bias.
+    assert.ok(
+      seen.some((u) => u.includes('viewbox') && !u.includes('bounded=1')),
+      'expected an unbounded region-biased Nominatim request',
+    );
+  });
+
+  test('a thrown/timed-out Overpass falls through to Nominatim (not fatal)', async () => {
+    // Real deployment case: the public Overpass times out (throws). The search must still
+    // fall through to the Nominatim tiers rather than aborting the whole lookup.
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/interpreter') || init?.method === 'POST') {
+        throw Object.assign(new Error('The operation was aborted due to timeout'), {
+          name: 'TimeoutError',
+        });
+      }
+      return new Response(
+        JSON.stringify([{ lat: '-37.9265', lon: '145.1439', name: 'IKEA', address: { suburb: 'Springvale' } }]),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const cfg = { ...geocodeConfigFromEnv({}, false), requestIntervalMs: 0 };
+    const provider = makeOsmProvider(cfg, true)!;
+    const hits = await provider.search('Ikea Springvale', { lat: -37.8136, lng: 144.9631 });
+    assert.ok(hits.length > 0, 'Overpass timeout must not abort the Nominatim fallback');
+    assert.equal(hits[0].label, 'IKEA, Springvale');
+  });
 });

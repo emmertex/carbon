@@ -1,4 +1,11 @@
 import { isNative } from './platform';
+import { notifySettingsChanged } from './settings-events';
+import {
+  DEFAULT_COMPLEXITY,
+  DEFAULT_FEATURE_PREFS,
+  type Complexity,
+  type FeaturePrefs,
+} from './features';
 
 export interface ServerConfig {
   url: string;
@@ -78,6 +85,16 @@ export interface UiPrefs {
   planGrouping: PlanGrouping;
   /** Per-row iconography visibility (the View row toggles). */
   rowIcons: RowIcons;
+  /** UI complexity: which optional feature surfaces show. A preset, or 'custom' to
+   *  honour the per-feature `features` map. */
+  complexity: Complexity;
+  /** Whether the first-run complexity picker has been answered on this account. */
+  complexityChosen: boolean;
+  /** Whether the first-run sync-server intro has been dismissed ("Welcome"). Shown
+   *  after the complexity picker. */
+  welcomed: boolean;
+  /** Per-feature desktop/mobile visibility; consulted only when complexity==='custom'. */
+  features: FeaturePrefs;
 }
 
 const UI_KEY = 'carbon.ui';
@@ -98,6 +115,10 @@ const DEFAULT_UI: UiPrefs = {
   countScope: 'all',
   planGrouping: 'nested',
   rowIcons: { ...DEFAULT_ROW_ICONS },
+  complexity: DEFAULT_COMPLEXITY,
+  complexityChosen: false,
+  welcomed: false,
+  features: DEFAULT_FEATURE_PREFS,
 };
 
 export function getUiPrefs(): UiPrefs {
@@ -105,8 +126,14 @@ export function getUiPrefs(): UiPrefs {
     const raw = localStorage.getItem(UI_KEY);
     if (!raw) return { ...DEFAULT_UI, rowIcons: { ...DEFAULT_ROW_ICONS } };
     const parsed = JSON.parse(raw) as Partial<UiPrefs>;
-    // rowIcons is nested, so merge it explicitly to pick up newly-added icons.
-    return { ...DEFAULT_UI, ...parsed, rowIcons: { ...DEFAULT_ROW_ICONS, ...parsed.rowIcons } };
+    // rowIcons and features are nested, so merge them explicitly to pick up
+    // newly-added icons / feature ids without dropping a saved partial.
+    return {
+      ...DEFAULT_UI,
+      ...parsed,
+      rowIcons: { ...DEFAULT_ROW_ICONS, ...parsed.rowIcons },
+      features: { ...DEFAULT_FEATURE_PREFS, ...parsed.features },
+    };
   } catch {
     return { ...DEFAULT_UI, rowIcons: { ...DEFAULT_ROW_ICONS } };
   }
@@ -114,6 +141,7 @@ export function getUiPrefs(): UiPrefs {
 
 export function saveUiPrefs(p: UiPrefs): void {
   localStorage.setItem(UI_KEY, JSON.stringify(p));
+  notifySettingsChanged('ui');
 }
 
 export interface CurrentUser {
@@ -145,6 +173,16 @@ export function getCurrentUser(): CurrentUser | null {
 export function saveCurrentUser(user: CurrentUser | null): void {
   if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
   else localStorage.removeItem(USER_KEY);
+}
+
+/** The device's IANA zone (e.g. "Australia/Melbourne"), sent with NL requests so the
+ *  server's LLM prompt resolves "tomorrow night" against the user's local clock. */
+export function localTimezone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
 }
 
 export function authHeaders(cfg: ServerConfig): Record<string, string> {

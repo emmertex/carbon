@@ -48,6 +48,8 @@ function bootApp(): void {
         const { registerDevSeed } = await import('./lib/devSeed');
         registerDevSeed(); // window.__carbonSeed/__carbonReset for the perf benchmark
       }
+      const { initSettingsSync } = await import('./lib/settings-sync');
+      initSettingsSync(); // mirror UI prefs / views / perspectives to sync on change
       useStore.getState().setReady(true);
       // Resolve host role first so a tenant host is wired to its origin (and the
       // offline host detached) before we fetch identity / sync.

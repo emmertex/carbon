@@ -28,6 +28,8 @@ import { FeaturesComparisonView } from '@/views/FeaturesComparisonView';
 import { PrivacyView } from '@/views/PrivacyView';
 import { SignInGate } from '@/components/SignInGate';
 import { RenewGate } from '@/components/RenewGate';
+import { ComplexityPicker } from '@/components/onboarding/ComplexityPicker';
+import { SyncIntro } from '@/components/onboarding/SyncIntro';
 
 function PerspectiveRoute() {
   const { id = '' } = useParams();
@@ -284,6 +286,8 @@ export default function App() {
       </div>
 
       <Snackbar />
+      <ComplexityPicker />
+      <SyncIntro />
     </div>
   );
 }

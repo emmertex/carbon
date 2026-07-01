@@ -109,6 +109,16 @@ function normalizeRecurrence(value: unknown): string | null {
   return null;
 }
 
+/** Normalise a model-supplied datetime to a UTC ("Z") ISO string. Reminder/due sweeps
+ *  (push.ts) compare due_date/reminder_at as plain strings — a non-UTC offset the model
+ *  emits despite the prompt's instructions would sort wrong and fire at the wrong time.
+ *  Invalid input passes through unchanged so obviously-bad values still surface as-is. */
+function normalizeDateTime<T extends string | null | undefined>(value: T): T | string {
+  if (!value) return value;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toISOString();
+}
+
 // ----- input shapes (shared by routes and the command loop) -----------------
 
 export interface ItemsInput {
@@ -488,14 +498,14 @@ export function createAgentOps(deps: AgentApiDeps) {
         note: t.note ?? null,
         parentId: listItem?.id ?? null,
         ownerId: ownerOf(userId),
-        dueDate: t.due_date ?? null,
-        deferDate: t.defer_date ?? null,
+        dueDate: normalizeDateTime(t.due_date) ?? null,
+        deferDate: normalizeDateTime(t.defer_date) ?? null,
         flagged: !!t.flagged,
         priority: typeof t.priority === 'number' ? t.priority : 0,
       });
       // Scheduling fields createItem doesn't take: patch them on after creation.
       const sched: ItemPatch = {};
-      if (t.reminder_at) sched.reminder_at = t.reminder_at;
+      if (t.reminder_at) sched.reminder_at = normalizeDateTime(t.reminder_at);
       if (t.recurrence != null) sched.recurrence = normalizeRecurrence(t.recurrence);
       if (typeof t.estimate_minutes === 'number') sched.estimate_minutes = t.estimate_minutes;
       if (Object.keys(sched).length) updateItem(db, deviceId, it.id, sched);
@@ -595,6 +605,9 @@ export function createAgentOps(deps: AgentApiDeps) {
       }
       // recurrence is stored as a JSON string; accept the model's object form.
       if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
+      for (const k of ['due_date', 'defer_date', 'reminder_at'] as const) {
+        if (k in patch) (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);
+      }
       updateItem(db, deviceId, target.id, patch);
       matched.push({ query: label, id: target.id, title: target.title });
     }

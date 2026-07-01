@@ -6,6 +6,7 @@ import {
   adminUpdateAgent,
   adminDeleteAgent,
   adminTestAgent,
+  HOST_LM_AGENT_ID,
   type Agent,
   type AgentKind,
 } from '@/lib/admin';
@@ -287,7 +288,9 @@ export function Agents() {
     >
       <Card className="mb-3 divide-y divide-border">
         {agents.length === 0 && <p className="px-3 py-2 text-sm text-text-faint">No agents yet.</p>}
-        {agents.map((a) => (
+        {agents.map((a) => {
+          const isHost = a.id === HOST_LM_AGENT_ID;
+          return (
           <div key={a.id} className="px-3 py-2 text-sm">
             <div className="flex flex-wrap items-center gap-2">
               <Bot size={15} className="text-accent" />
@@ -297,54 +300,62 @@ export function Agents() {
                 {a.model ? ` · ${a.model}` : ''}
               </span>
               <div className="flex-1" />
-              <label className="flex items-center gap-1 text-xs text-text-muted">
-                <input
-                  type="checkbox"
-                  checked={a.enabled}
-                  onChange={async (e) => {
-                    setError(null);
-                    try {
-                      await adminUpdateAgent(a.id, { enabled: e.target.checked });
-                    } catch (err) {
-                      setError(String(err));
-                    }
-                    await reload();
-                  }}
-                />
-                enabled
-              </label>
-              <button
-                onClick={() => test(a.id)}
-                disabled={testing === a.id}
-                className={cn(btnIcon, 'hover:text-accent')}
-                title="Test connection"
-              >
-                <FlaskConical size={15} />
-              </button>
-              <button
-                onClick={() => (editId === a.id ? setEditId(null) : startEdit(a))}
-                className={btnIcon}
-                title="Edit"
-              >
-                <Pencil size={15} />
-              </button>
-              <button
-                onClick={async () => {
-                  if (window.confirm(`Delete agent "${a.name}"?`)) {
-                    setError(null);
-                    try {
-                      await adminDeleteAgent(a.id);
-                    } catch (err) {
-                      setError(String(err));
-                    }
-                    await reload();
-                  }
-                }}
-                className={cn(btnIcon, 'hover:text-danger')}
-                title="Delete"
-              >
-                <Trash2 size={15} />
-              </button>
+              {isHost ? (
+                <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs text-accent">
+                  Host-provided
+                </span>
+              ) : (
+                <>
+                  <label className="flex items-center gap-1 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={a.enabled}
+                      onChange={async (e) => {
+                        setError(null);
+                        try {
+                          await adminUpdateAgent(a.id, { enabled: e.target.checked });
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                        await reload();
+                      }}
+                    />
+                    enabled
+                  </label>
+                  <button
+                    onClick={() => test(a.id)}
+                    disabled={testing === a.id}
+                    className={cn(btnIcon, 'hover:text-accent')}
+                    title="Test connection"
+                  >
+                    <FlaskConical size={15} />
+                  </button>
+                  <button
+                    onClick={() => (editId === a.id ? setEditId(null) : startEdit(a))}
+                    className={btnIcon}
+                    title="Edit"
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (window.confirm(`Delete agent "${a.name}"?`)) {
+                        setError(null);
+                        try {
+                          await adminDeleteAgent(a.id);
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                        await reload();
+                      }
+                    }}
+                    className={cn(btnIcon, 'hover:text-danger')}
+                    title="Delete"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </>
+              )}
             </div>
             {tests[a.id] && (
               <p className={cn('mt-1 text-xs', tests[a.id].ok ? 'text-success' : 'text-danger')}>
@@ -363,7 +374,8 @@ export function Agents() {
               </form>
             )}
           </div>
-        ))}
+          );
+        })}
       </Card>
 
       {createdToken && <TokenReveal token={createdToken} />}

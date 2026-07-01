@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
+import { undo, redo } from '@/lib/undo';
 
 /** `g`-leader "go to" destinations. */
 const GO_ROUTES: Record<string, string> = {
@@ -86,6 +87,16 @@ export function useGlobalHotkeys(opts: {
       if (SCROLL_KEYS.has(e.key) && !isEditable(e.target)) {
         e.preventDefault();
         scrollMain(e.key);
+        return;
+      }
+
+      // Undo / redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z). Not while editing text — the
+      // field's native undo wins there.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+        if (isEditable(e.target)) return;
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
         return;
       }
 

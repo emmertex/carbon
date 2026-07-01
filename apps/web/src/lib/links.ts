@@ -16,4 +16,9 @@ export const LINKS = {
   openSource: `${DOCS}/open-source.md`,
   emmertex: 'https://emmertex.com',
   releases: `${REPO}/releases`,
+  // Surfaced from the Install section (browser web only). The Android package id
+  // matches capacitor.config.ts / tauri.conf.json; `website` points at the hosted app.
+  playStore: 'https://play.google.com/store/apps/details?id=com.emmertex.carbon',
+  website: 'https://app.carbon.etx.sx',
+  github: REPO,
 } as const;

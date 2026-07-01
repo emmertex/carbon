@@ -6,6 +6,8 @@ import { type Db, createUser, getUserByUsername } from '@carbon/core';
 import { openDb } from './sqlite';
 import { hashPassword, verifyPassword, setPassword, sha256Hex } from './auth';
 import { initTenantDb, RESERVED_SUBDOMAINS, type TenantLocation } from './tenant';
+import { setNlSettings } from './agents';
+import { getHostLmConfig, HOST_LM_AGENT_ID } from './host-lm';
 
 export type TenantStatus = 'active' | 'provisional' | 'suspended' | 'deleted';
 
@@ -27,9 +29,15 @@ export interface TenantRecord {
   /** Per-workspace blob storage cap in bytes. Null = use the server default;
    *  0 = unlimited. Enforced before accepting new blob uploads. */
   blob_quota_bytes: number | null;
+  /** Max human (non-bot) users this workspace may have. Null = use the server
+   *  default (MAX_WORKSPACE_USERS); 0 = unlimited. Enforced on user creation. */
+  max_users: number | null;
   /** 1 = this workspace's agents may target private/loopback/LAN endpoints (e.g. a
    *  self-hosted LLM); null/0 = blocked by the SSRF guard. Host-admin controlled. */
   allow_private_endpoints: number | null;
+  /** 1 = this workspace may select the host-shared LM (see host-lm.ts) for NL commands /
+   *  Telegram; 0 = not offered. Host-admin controlled; seeded at provision time. */
+  host_lm_available: number | null;
 }
 
 /** Lock = derived state. A workspace is "locked" (soft gate) when it is operationally
@@ -126,7 +134,12 @@ export function openControlDb(path: string): Db {
   ensureColumn(db, 'tenants', 'locked_at', 'TEXT');
   ensureColumn(db, 'tenants', 'admin_email', 'TEXT');
   ensureColumn(db, 'tenants', 'blob_quota_bytes', 'INTEGER');
+  ensureColumn(db, 'tenants', 'max_users', 'INTEGER');
   ensureColumn(db, 'tenants', 'allow_private_endpoints', 'INTEGER');
+  // 1 = this workspace may use the host-shared LM (see host-lm.ts). Defaults to available
+  // (1) for pre-existing tenants; new tenants get an explicit value from
+  // HOST_LM_AVAILABLE_NEW_ACCOUNTS at provision time (see provisionTenant below).
+  ensureColumn(db, 'tenants', 'host_lm_available', 'INTEGER NOT NULL DEFAULT 1');
   // Subscription columns added for Square auto-renewing subscriptions.
   ensureColumn(db, 'subscriptions', 'square_customer_id', 'TEXT');
   ensureColumn(db, 'subscriptions', 'square_subscription_id', 'TEXT');
@@ -261,6 +274,12 @@ export function setTenantBlobQuota(db: Db, id: string, bytes: number | null): vo
   db.run('UPDATE tenants SET blob_quota_bytes = ? WHERE id = ?', [bytes, id]);
 }
 
+/** Host-admin per-workspace user cap. Null resets to the server default
+ *  (MAX_WORKSPACE_USERS); 0 means unlimited. */
+export function setTenantMaxUsers(db: Db, id: string, n: number | null): void {
+  db.run('UPDATE tenants SET max_users = ? WHERE id = ?', [n, id]);
+}
+
 /** Persist the workspace billing/contact email (e.g. captured at subscribe time when a
  *  host-admin-created tenant had none). Used for receipts + the Square customer. */
 export function setTenantAdminEmail(db: Db, id: string, email: string | null): void {
@@ -271,6 +290,11 @@ export function setTenantAdminEmail(db: Db, id: string, email: string | null): v
  *  private/loopback/LAN hosts despite the multi-tenant SSRF guard. */
 export function setTenantAllowPrivate(db: Db, id: string, allow: boolean): void {
   db.run('UPDATE tenants SET allow_private_endpoints = ? WHERE id = ?', [allow ? 1 : 0, id]);
+}
+
+/** Host-admin: grant/revoke this workspace's access to the host-shared LM. */
+export function setTenantHostLmAvailable(db: Db, id: string, available: boolean): void {
+  db.run('UPDATE tenants SET host_lm_available = ? WHERE id = ?', [available ? 1 : 0, id]);
 }
 
 /** Soft-delete then remove the tenant's data dir. Caller handles export/grace first. */
@@ -351,11 +375,15 @@ export function provisionTenant(db: Db, tenantsDir: string, input: ProvisionInpu
   const blobsDir = join(tenantsDir, id, 'blobs');
   const createdAt = new Date().toISOString();
   const status: TenantStatus = input.status ?? 'active';
+  // New signups get an explicit value from the current env setting, rather than the
+  // grandfathering default the ensureColumn migration gives pre-existing tenants.
+  const hostLmCfg = getHostLmConfig();
+  const hostLmAvailable = hostLmCfg ? hostLmCfg.availableNewAccounts : false;
 
   db.run(
     `INSERT INTO tenants
-       (id, subdomain, display_name, status, plan, created_at, db_path, blobs_dir, expires_at, admin_email)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, subdomain, display_name, status, plan, created_at, db_path, blobs_dir, expires_at, admin_email, host_lm_available)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       subdomain,
@@ -367,6 +395,7 @@ export function provisionTenant(db: Db, tenantsDir: string, input: ProvisionInpu
       blobsDir,
       input.expiresAt ?? null,
       input.adminEmail ?? null,
+      hostLmAvailable ? 1 : 0,
     ],
   );
 
@@ -385,6 +414,11 @@ export function provisionTenant(db: Db, tenantsDir: string, input: ProvisionInpu
       role: 'admin',
     });
     setPassword(ctx.db, user.id, passwordHash);
+    // Pre-enable NL commands with the host-shared model when the host operator opted new
+    // accounts into that by default.
+    if (hostLmAvailable && hostLmCfg?.enabledByDefault) {
+      setNlSettings(ctx.db, { agentId: HOST_LM_AGENT_ID, enabled: true });
+    }
   } catch (e) {
     db.run('DELETE FROM tenants WHERE id = ?', [id]);
     try {
