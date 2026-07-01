@@ -1,0 +1,177 @@
+name: Build and release
+
+# Native to the PUBLIC emmertex/carbon repo. The private carbon_dev repo mirrors a
+# squashed snapshot + tag here (see carbon_dev's release-mirror.yml); this workflow
+# then builds every platform and publishes them to a single GitHub Release.
+#
+# Release notes are single-sourced from CHANGELOG.md (mirrored from carbon_dev):
+# the `prepare` job extracts the section whose heading starts with the tag.
+#
+# workflow_dispatch lets you (re)build an existing tag without re-tagging — useful
+# to backfill a release whose build never ran.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v0.5.1b)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Resolve the tag, cut the GitHub Release with notes from CHANGELOG.md, and hand
+  # the release id + tag to the build jobs so they all attach to the same release.
+  prepare:
+    if: github.repository == 'emmertex/carbon'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Resolve tag
+        id: resolve
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.resolve.outputs.tag }}"
+          # CHANGELOG.md may be absent at older tags mirrored before it existed.
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="${TAG}" '
+              index($0, "## " tag) == 1 { grab = 1; next }
+              grab && index($0, "## ") == 1 { exit }
+              grab { print }
+            ' CHANGELOG.md > notes.md
+          fi
+          if [ ! -s notes.md ]; then
+            echo "No changelog entry for ${TAG}." > notes.md
+          fi
+
+      - name: Create/patch the GitHub Release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          name: Carbon ${{ steps.resolve.outputs.tag }}
+          body_path: notes.md
+          draft: false
+          prerelease: false
+
+  # Desktop bundles for Linux + Windows via tauri-action, which also signs the
+  # updater artifacts and publishes/merges latest.json onto the release. Serialised
+  # (max-parallel 1) so the two platforms don't race on the shared latest.json.
+  desktop:
+    needs: prepare
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install Linux system deps (Tauri v2)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libappindicator3-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - run: npm ci
+
+      - name: Build, sign, and upload desktop bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          # tauri.conf.json single-sources the version from package.json, so no
+          # version args are needed here.
+
+  # Sideload/auto-update APK, signed with the DEDICATED GitHub-release keystore
+  # (never the Play Store upload key — see docs/RELEASING.md).
+  android:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - run: npm ci
+
+      - name: Build web bundle + Capacitor sync
+        working-directory: apps/mobile
+        run: |
+          npm run build:web
+          npx cap sync android
+
+      - name: Decode signing keystore
+        run: echo "${{ secrets.CARBON_ANDROID_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/carbon-release.jks"
+
+      - name: Gradle assembleRelease (signed)
+        working-directory: apps/mobile/android
+        env:
+          CARBON_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/carbon-release.jks
+          CARBON_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.CARBON_ANDROID_KEYSTORE_PASSWORD }}
+          CARBON_ANDROID_KEY_ALIAS: ${{ secrets.CARBON_ANDROID_KEY_ALIAS }}
+          CARBON_ANDROID_KEY_PASSWORD: ${{ secrets.CARBON_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Stage APK with a versioned name
+        run: |
+          set -euo pipefail
+          SRC="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          cp "$SRC" "$RUNNER_TEMP/Carbon_${{ needs.prepare.outputs.tag }}_android.apk"
+
+      - name: Attach APK to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          files: ${{ runner.temp }}/Carbon_${{ needs.prepare.outputs.tag }}_android.apk
