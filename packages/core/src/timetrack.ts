@@ -1,13 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Db, Row } from './db';
 import type { Item, TimeLog, TimeLogKind } from './types';
-import { getItem, rowToTimeLog, recordRecordOp } from './repo';
+import { getItem, getItemTags, rowToTimeLog, recordRecordOp } from './repo';
 
 // Time tracking v2 — see docs/time-tracking-design.md.
 // A *session* (kind 'session', item_id = project) contains *task segments*
 // (kind 'task') and *pauses* (kind 'pause'). Switching to another project
 // *suspends* the current session (a pause with note 'suspend'); re-entering a
 // project resumes its suspended session. Break pauses have note null.
+// A *completion* (kind 'complete') is a zero-duration marker recorded at the
+// moment a task inside an open session is finished — a data point, not a span.
 
 const SUSPEND = 'suspend';
 const iso = () => new Date().toISOString();
@@ -241,6 +243,39 @@ export function resume(db: Db, dev: string, userId: string | null): void {
   }
 }
 
+/** The open (active or suspended) session that anchors this task, if any. */
+function anchoringSession(db: Db, taskId: string, userId: string | null): TimeLog | null {
+  const anchor = sessionAnchor(db, taskId);
+  return openSessions(db, userId).find((s) => s.item_id === anchor) ?? null;
+}
+
+/**
+ * Record a task's completion as a data point. If the task is the actively-tracked
+ * segment, stop that segment now (the block keeps running, untracked). Only records
+ * when an open session anchors the task — completing a task outside any tracked
+ * block is a no-op here.
+ */
+export function recordCompletion(db: Db, dev: string, taskId: string, userId: string | null): void {
+  const session = anchoringSession(db, taskId, userId);
+  if (!session) return;
+  const at = iso();
+  const open = openTaskRow(db, session.id);
+  if (open && open.item_id === taskId) closeLog(db, dev, open, at); // stop the segment
+  emit(db, dev, makeLog({ kind: 'complete', itemId: taskId, userId, sessionId: session.id, start: at, end: at }));
+}
+
+/** Undo the most recent completion marker for a task in its open session (on reopen). */
+export function removeCompletion(db: Db, dev: string, taskId: string, userId: string | null): void {
+  const session = anchoringSession(db, taskId, userId);
+  if (!session) return;
+  const r = db.get<TLRow>(
+    `SELECT * FROM time_logs WHERE kind = 'complete' AND session_id = ? AND item_id = ? AND deleted = 0
+     ORDER BY start_time DESC LIMIT 1`,
+    [session.id, taskId],
+  );
+  if (r) emit(db, dev, { ...rowToTimeLog(r), deleted: true });
+}
+
 // ----- read models ----------------------------------------------------------
 
 function sessionRows(db: Db, sessionId: string, kind: TimeLogKind): TimeLog[] {
@@ -270,7 +305,14 @@ export interface SessionBlock {
   project: Item | undefined;
   segments: { log: TimeLog; item: Item | undefined; ms: number }[];
   pauses: TimeLog[];
+  /** Zero-duration completion markers, with the task they finished. */
+  completions: { log: TimeLog; item: Item | undefined }[];
+  /** Pause-adjusted time actually tracked (per {@link trackedMs}). */
   trackedMs: number;
+  /** Wall-clock span start→end (or now), pauses included. */
+  wallMs: number;
+  /** Tracked time not attributed to any task segment (session-level work). */
+  untrackedMs: number;
 }
 
 export function getSessionBlock(db: Db, session: TimeLog, upToMs: number = Date.now()): SessionBlock {
@@ -279,13 +321,82 @@ export function getSessionBlock(db: Db, session: TimeLog, upToMs: number = Date.
     item: getItem(db, log.item_id),
     ms: Math.max(0, (log.end_time ? ms(log.end_time) : upToMs) - ms(log.start_time)),
   }));
+  const completions = sessionRows(db, session.id, 'complete').map((log) => ({
+    log,
+    item: getItem(db, log.item_id),
+  }));
+  const tracked = trackedMs(db, session, upToMs);
+  const segTotal = segments.reduce((n, s) => n + s.ms, 0);
+  const end = session.end_time ? ms(session.end_time) : upToMs;
   return {
     session,
     project: getItem(db, session.item_id),
     segments,
     pauses: sessionRows(db, session.id, 'pause'),
-    trackedMs: trackedMs(db, session, upToMs),
+    completions,
+    trackedMs: tracked,
+    wallMs: Math.max(0, end - ms(session.start_time)),
+    untrackedMs: Math.max(0, tracked - segTotal),
   };
+}
+
+// ----- CSV export -----------------------------------------------------------
+
+const CSV_HEADER = [
+  'Date', 'Block', 'Project', 'Type', 'Item', 'Tags',
+  'Start', 'End', 'Duration (min)', 'Wall (min)', 'Tracked (min)', 'Untracked (min)',
+] as const;
+
+const csvCell = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+const min = (msVal: number) => String(Math.round(msVal / 60_000));
+const tagNames = (db: Db, itemId: string) => getItemTags(db, itemId).map((t) => t.name).join(', ');
+
+/**
+ * A row-per-entry CSV of the given blocks: one row for the session, then each
+ * task segment, pause and completion within it. Wall/Tracked/Untracked minutes
+ * are populated on the session row; each row carries the tags of its own item.
+ */
+export function toCsv(db: Db, blocks: SessionBlock[]): string {
+  const rows: (string | number)[][] = [[...CSV_HEADER]];
+  for (const b of blocks) {
+    const s = b.session;
+    const date = s.start_time.slice(0, 10);
+    const project = b.project?.title || 'Untitled';
+    const end = s.end_time ?? '';
+    // Session row — carries the block-level totals.
+    rows.push([
+      date, s.id, project, 'Session', project, tagNames(db, s.item_id),
+      s.start_time, end, min(b.wallMs), min(b.wallMs), min(b.trackedMs), min(b.untrackedMs),
+    ]);
+    // Interleave task segments, pauses and completions in chronological order.
+    const entries = [
+      ...b.segments.map((seg) => ({ t: seg.log.start_time, kind: 'seg' as const, seg })),
+      ...b.pauses.map((p) => ({ t: p.start_time, kind: 'pause' as const, p })),
+      ...b.completions.map((c) => ({ t: c.log.start_time, kind: 'done' as const, c })),
+    ].sort((a, z) => a.t.localeCompare(z.t));
+    for (const e of entries) {
+      if (e.kind === 'seg') {
+        const segEnd = e.seg.log.end_time;
+        rows.push([
+          date, s.id, project, 'Task', e.seg.item?.title || 'Task', tagNames(db, e.seg.log.item_id),
+          e.seg.log.start_time, segEnd ?? '', min(e.seg.ms), '', '', '',
+        ]);
+      } else if (e.kind === 'pause') {
+        const pe = e.p.end_time;
+        const dur = pe ? new Date(pe).getTime() - new Date(e.p.start_time).getTime() : 0;
+        rows.push([
+          date, s.id, project, e.p.note === SUSPEND ? 'Suspend' : 'Pause', project, '',
+          e.p.start_time, pe ?? '', min(Math.max(0, dur)), '', '', '',
+        ]);
+      } else {
+        rows.push([
+          date, s.id, project, 'Completed', e.c.item?.title || 'Task', tagNames(db, e.c.log.item_id),
+          e.c.log.start_time, e.c.log.start_time, '', '', '', '',
+        ]);
+      }
+    }
+  }
+  return rows.map((r) => r.map(csvCell).join(',')).join('\n');
 }
 
 /** Sessions overlapping [fromIso, toIso), most recent first. */

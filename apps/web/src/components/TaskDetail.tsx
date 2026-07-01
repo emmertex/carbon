@@ -34,6 +34,8 @@ import {
   getTimeLogs,
   getTimeContext,
   sessionAnchor,
+  recordCompletion,
+  removeCompletion,
   startTask,
   stopActive,
   listUsers,
@@ -455,6 +457,7 @@ export function TaskDetail({ id }: { id: string }) {
     mutate((db, dev) => {
       if (next === "done") {
         setCompleted(db, dev, id, true);
+        recordCompletion(db, dev, id, uid); // data point on the open block, if any
         const ctx = getTimeContext(db, uid);
         if (ctx.session && ctx.session.item_id !== sessionAnchor(db, id)) {
           useStore.getState().setInterrupt({
@@ -463,6 +466,7 @@ export function TaskDetail({ id }: { id: string }) {
         }
       } else if (next === "active") {
         setCompleted(db, dev, id, false);
+        removeCompletion(db, dev, id, uid); // retract the completion data point
       } else {
         updateItem(db, dev, id, { status: "dropped", completed_at: null });
       }

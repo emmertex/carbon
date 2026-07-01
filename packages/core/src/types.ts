@@ -178,7 +178,7 @@ export interface ItemTag {
   deleted: boolean;
 }
 
-export type TimeLogKind = 'session' | 'task' | 'pause';
+export type TimeLogKind = 'session' | 'task' | 'pause' | 'complete';
 
 export interface TimeLog {
   id: string;
@@ -188,7 +188,8 @@ export interface TimeLog {
   end_time: string | null;
   note: string | null;
   created_at: string;
-  /** 'session' (project block), 'task' (segment inside a session), or 'pause'. */
+  /** 'session' (project block), 'task' (segment inside a session), 'pause', or
+   *  'complete' (a zero-duration marker at the moment a task was completed). */
   kind: TimeLogKind;
   /** For task segments and pauses: the enclosing session id. */
   session_id: string | null;

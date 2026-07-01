@@ -9,6 +9,8 @@ import {
   isInPlan,
   getTimeContext,
   sessionAnchor,
+  recordCompletion,
+  removeCompletion,
   getItem,
   getChildren,
   type Db,
@@ -43,6 +45,7 @@ export function completeTask(item: Item, cascade = false): void {
     mutate((db, dev) => {
       if (cascade) setCompletedCascade(db, dev, item.id);
       else setCompleted(db, dev, item.id, true);
+      recordCompletion(db, dev, item.id, uid); // data point on the open block, if any
       const ctx = getTimeContext(db, uid);
       if (ctx.session && ctx.session.item_id !== sessionAnchor(db, item.id)) {
         useStore
@@ -55,8 +58,12 @@ export function completeTask(item: Item, cascade = false): void {
 }
 
 export function uncompleteTask(item: Item): void {
+  const uid = getCurrentUserId();
   recordFieldUndo([item.id], ['status', 'completed_at'], 'Reopen task', () => {
-    mutate((db, dev) => setCompleted(db, dev, item.id, false), 'complete');
+    mutate((db, dev) => {
+      setCompleted(db, dev, item.id, false);
+      removeCompletion(db, dev, item.id, uid); // retract the completion data point
+    }, 'complete');
     releaseCompleted(item.id);
   });
 }

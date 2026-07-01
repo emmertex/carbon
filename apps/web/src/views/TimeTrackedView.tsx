@@ -8,9 +8,11 @@ import {
   listTags,
   saveTimeLog,
   deleteTimeLog,
+  toCsv,
   type TimeLog,
   type SessionBlock,
 } from '@carbon/core';
+import { getDb } from '@/lib/db';
 import { TagMark } from '@/components/TagMark';
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
@@ -27,6 +29,16 @@ const fmtDay = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+/** Stable, evenly-spread hue per task id so segments are visually distinguishable. */
+function taskColor(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 60% 50%)`;
+}
+
+const HATCH =
+  'repeating-linear-gradient(45deg, rgba(0,0,0,0.28) 0 3px, transparent 3px 6px)';
 
 interface Group {
   key: string;
@@ -143,17 +155,7 @@ export function TimeTrackedView() {
   }
 
   function exportCsv() {
-    const rows = [['Date', 'Project', 'Start', 'End', 'Tracked (min)']];
-    for (const b of blocks) {
-      rows.push([
-        new Date(b.session.start_time).toISOString().slice(0, 10),
-        (b.project?.title || 'Untitled').replace(/"/g, '""'),
-        b.session.start_time,
-        b.session.end_time ?? '',
-        String(Math.round(b.trackedMs / 60000)),
-      ]);
-    }
-    const csv = rows.map((r) => r.map((c) => `"${c}"`).join(',')).join('\n');
+    const csv = toCsv(getDb(), blocks);
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
@@ -296,6 +298,57 @@ export function TimeTrackedView() {
 const inputCls = 'rounded-lg border border-border bg-surface px-2 py-1 outline-none focus:border-accent';
 const btnCls = 'flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 hover:bg-surface-2';
 
+/**
+ * A compact horizontal bar showing how a block's wall-clock span was split: task
+ * segments (coloured), pauses (hatched), untracked project time (the bare track),
+ * and completion markers (ticks). Positions are relative to the block's own span.
+ */
+function BlockBar({ block }: { block: SessionBlock }) {
+  const start = new Date(block.session.start_time).getTime();
+  const endMs = start + Math.max(1, block.wallMs); // matches the computed wall span
+  const span = endMs - start;
+  const pct = (t: number) => ((t - start) / span) * 100;
+  return (
+    <div
+      className="relative mt-2 h-3 w-full overflow-hidden rounded bg-surface-2"
+      title={`Wall ${formatDuration(block.wallMs)} · tracked ${formatDuration(block.trackedMs)}`}
+    >
+      {block.segments.map((seg) => {
+        const ss = new Date(seg.log.start_time).getTime();
+        const se = seg.log.end_time ? new Date(seg.log.end_time).getTime() : endMs;
+        return (
+          <span
+            key={seg.log.id}
+            title={`${seg.item?.title || 'Task'} · ${formatDuration(seg.ms)}`}
+            style={{ left: `${pct(ss)}%`, width: `${Math.max(0.5, pct(se) - pct(ss))}%`, backgroundColor: taskColor(seg.log.item_id) }}
+            className="absolute inset-y-0"
+          />
+        );
+      })}
+      {block.pauses.map((p) => {
+        const ps = new Date(p.start_time).getTime();
+        const pe = p.end_time ? new Date(p.end_time).getTime() : endMs;
+        return (
+          <span
+            key={p.id}
+            title={p.note === 'suspend' ? 'Suspended' : 'Paused'}
+            style={{ left: `${pct(ps)}%`, width: `${Math.max(0.8, pct(pe) - pct(ps))}%`, backgroundImage: HATCH }}
+            className="absolute inset-y-0 bg-surface"
+          />
+        );
+      })}
+      {block.completions.map((c) => (
+        <span
+          key={c.log.id}
+          title={`${c.item?.title || 'Task'} completed`}
+          style={{ left: `${pct(new Date(c.log.start_time).getTime())}%` }}
+          className="absolute inset-y-0 -ml-px w-0.5 bg-success"
+        />
+      ))}
+    </div>
+  );
+}
+
 function Block({
   block,
   onSetTimes,
@@ -324,8 +377,17 @@ function Block({
         </span>
       </div>
 
+      <BlockBar block={block} />
+
       {open && (
         <div className="mt-2 space-y-2 border-t border-border pt-2 text-xs">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-text-muted">
+            <span>Wall clock <span className="font-medium text-text">{formatDuration(block.wallMs)}</span></span>
+            <span>Tracked <span className="font-medium text-text">{formatDuration(block.trackedMs)}</span></span>
+            {block.untrackedMs > 0 && (
+              <span>Untracked <span className="font-medium text-text">{formatDuration(block.untrackedMs)}</span></span>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1 text-text-muted">
               Start
@@ -355,8 +417,29 @@ function Block({
             <ul className="space-y-0.5">
               {block.segments.map((seg) => (
                 <li key={seg.log.id} className="flex items-center gap-2 text-text-muted">
-                  <span className="truncate">↳ {seg.item?.title || 'Task'}</span>
+                  <span
+                    className="size-2 shrink-0 rounded-sm"
+                    style={{ backgroundColor: taskColor(seg.log.item_id) }}
+                  />
+                  <span className="truncate">{seg.item?.title || 'Task'}</span>
                   <span className="ml-auto tabular-nums">{formatDuration(seg.ms)}</span>
+                </li>
+              ))}
+              {block.untrackedMs > 0 && (
+                <li className="flex items-center gap-2 text-text-faint">
+                  <span className="size-2 shrink-0 rounded-sm bg-surface-2" />
+                  <span className="truncate">Untracked project time</span>
+                  <span className="ml-auto tabular-nums">{formatDuration(block.untrackedMs)}</span>
+                </li>
+              )}
+            </ul>
+          )}
+          {block.completions.length > 0 && (
+            <ul className="space-y-0.5">
+              {block.completions.map((c) => (
+                <li key={c.log.id} className="flex items-center gap-2 text-success">
+                  <span className="truncate">✓ {c.item?.title || 'Task'} completed</span>
+                  <span className="ml-auto tabular-nums">{fmtTime(c.log.start_time)}</span>
                 </li>
               ))}
             </ul>

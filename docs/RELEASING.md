@@ -44,13 +44,28 @@ The snapshot is produced with `git archive`, which:
 > the strip rules won't apply and internal docs would be published. Always tag a
 > commit that includes the current `.gitattributes`.
 
-The `carbon`-side `release.yml` isn't in this repo (this repo doesn't have push
-access to `carbon`'s Actions), and the mirror **must not clobber it**. The wipe step
-preserves the public repo's own `.git` **and `.github/`**, so `carbon`'s native
+The `carbon`-side `release.yml` lives **natively in the public repo**, not here
+(this repo can't push to `carbon`'s Actions), and the mirror **must not clobber it**.
+The wipe step preserves the public repo's own `.git` **and `.github/`**, so `carbon`'s
 release workflow (and any issue templates / FUNDING config) survive untouched while
-the rest of the tree is replaced. Its current content is authored alongside this
-doc — ask for it if it needs regenerating, or check `carbon`'s
-`.github/workflows/release.yml` directly, which is the source of truth once set up.
+the rest of the tree is replaced. `carbon`'s `.github/workflows/release.yml` is the
+source of truth — edit it directly in the `carbon` checkout (`~/git/carbon`).
+
+### Release notes (single-sourced from CHANGELOG.md)
+
+Add a section to [`CHANGELOG.md`](../CHANGELOG.md) whose heading's first token is the
+tag, e.g. `## v0.6.0 — 2026-08-01`. The pipeline uses it verbatim in two places:
+
+- the **mirror commit message** on `carbon` (extracted in `release-mirror.yml`), and
+- the **GitHub Release body** (extracted in `carbon`'s `release.yml` `prepare` job).
+
+If no matching section exists, both fall back to "No changelog entry for `<tag>`".
+Because notes come from the mirrored tree, `CHANGELOG.md` must be committed **before**
+you tag (same rule as `.gitattributes`).
+
+> The `carbon`-side `release.yml` also has a `workflow_dispatch` with a `tag` input,
+> so you can (re)build an already-pushed tag whose build never ran — Actions tab →
+> "Build and release" → Run workflow → enter the tag.
 
 Both workflows are guarded to their own repo (`github.repository == 'emmertex/carbon_dev'`
 / `'emmertex/carbon'`) so a fork or a stray branch can never trigger a release build.
