@@ -1126,16 +1126,14 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return c.json(await testCaldav(db, c.req.param('id'), allowPrivate()));
   });
 
-  api.post('/projects/:id/caldav/sync', requireAdmin, async (c) => {
+  api.post('/projects/:id/caldav/sync', requireAdmin, (c) => {
     if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
-    const r = await runSync(db, ensureCaldavDeviceId(db), c.req.param('id'), allowPrivate());
-    return c.json({
-      ok: r.errors.length === 0,
-      status: r.errors[0] ?? `ok (down ${r.pulled}, up ${r.pushed})`,
-      pulled: r.pulled,
-      pushed: r.pushed,
-      errors: r.errors,
-    });
+    // Fire-and-forget: a full sync makes one network round-trip per changed resource
+    // and can outlast the reverse proxy's read timeout (→ 504). runSync serialises per
+    // project and records last_status itself, so we kick it off and return at once; the
+    // client polls the config's last_sync_at/last_status for the outcome.
+    void runSync(db, ensureCaldavDeviceId(db), c.req.param('id'), allowPrivate());
+    return c.json({ ok: true, started: true }, 202);
   });
 
   // ----- Web Push -------------------------------------------------------------

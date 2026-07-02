@@ -10,9 +10,12 @@ async function errMsg(res: Response, fallback: string): Promise<string> {
   return msg || `${fallback}: ${res.status}`;
 }
 
+export type CalDavMode = "caldav" | "ical";
+
 /** Per-project CalDAV config as returned by the server (never includes the password). */
 export interface CalDavConfig {
   project_id: string;
+  mode: CalDavMode;
   base_url: string | null;
   username: string | null;
   todo_url: string | null;
@@ -28,6 +31,7 @@ export interface CalDavConfig {
 }
 
 export interface CalDavConfigInput {
+  mode?: CalDavMode;
   base_url?: string;
   username?: string;
   /** Omit (or send empty) to keep the stored password. */
@@ -82,19 +86,13 @@ export async function testCaldav(
   return (await res.json()) as { ok: boolean; message: string };
 }
 
-export interface SyncNowResult {
-  ok: boolean;
-  status: string;
-  pulled: number;
-  pushed: number;
-  errors: string[];
-}
-
-export async function syncCaldavNow(projectId: string): Promise<SyncNowResult> {
+/** Kick off a sync. Returns as soon as the run is queued — the server runs it in the
+ *  background (a full sync can outlast a proxy timeout), so poll {@link getCaldavConfig}
+ *  for the outcome via last_sync_at/last_status. */
+export async function syncCaldavNow(projectId: string): Promise<void> {
   const res = await fetch(url(`/api/projects/${projectId}/caldav/sync`), {
     method: "POST",
     headers: authHeaders(getServerConfig()),
   });
   if (!res.ok) throw new Error(await errMsg(res, "sync failed"));
-  return (await res.json()) as SyncNowResult;
 }

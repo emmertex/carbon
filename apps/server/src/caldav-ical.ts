@@ -37,6 +37,53 @@ function toICalDate(iso: string): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
+/** Offset (ms) of an IANA zone at a given instant: how far the zone is ahead of UTC.
+ *  Uses the Intl tz database bundled with Node — no external dependency. */
+function zoneOffsetMs(instant: number, dtf: Intl.DateTimeFormat): number {
+  const f: Record<string, number> = {};
+  for (const p of dtf.formatToParts(new Date(instant)))
+    if (p.type !== "literal") f[p.type] = Number(p.value);
+  // 'hour' can come back as 24 at midnight under h23; normalise to 0.
+  const hour = f.hour === 24 ? 0 : f.hour;
+  const asZone = Date.UTC(f.year, f.month - 1, f.day, hour, f.minute, f.second);
+  return asZone - instant;
+}
+
+/** Convert a wall-clock time in an IANA zone (e.g. from DTSTART;TZID=…) to the correct
+ *  UTC instant. Returns null if the zone name isn't recognised, so the caller can fall
+ *  back to floating/local interpretation. Two-pass so DST transitions resolve exactly. */
+function zonedWallClockToUtc(
+  y: number,
+  mo: number,
+  da: number,
+  hh: number,
+  mm: number,
+  ss: number,
+  tz: string,
+): Date | null {
+  let dtf: Intl.DateTimeFormat;
+  try {
+    dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return null; // not a valid IANA zone
+  }
+  const guess = Date.UTC(y, mo - 1, da, hh, mm, ss);
+  const off1 = zoneOffsetMs(guess, dtf);
+  let utc = guess - off1;
+  const off2 = zoneOffsetMs(utc, dtf); // re-evaluate across a possible DST edge
+  if (off2 !== off1) utc = guess - off2;
+  return new Date(utc);
+}
+
 /** Parse an iCal DATE / DATE-TIME value into a Carbon ISO string + all-day flag. */
 function parseICalDateTime(
   value: string,
@@ -68,7 +115,12 @@ function parseICalDateTime(
       allDay: false,
     };
   }
-  // Floating time or an (unresolved) TZID: interpret as local wall-clock time.
+  // TZID present → resolve it against the IANA tz database for an exact instant.
+  if (params.TZID) {
+    const d = zonedWallClockToUtc(+y, +mo, +da, +hh, +mm, +ss, params.TZID);
+    if (d) return { iso: d.toISOString(), allDay: false };
+  }
+  // Floating time (or an unrecognised TZID): interpret as local wall-clock time.
   return {
     iso: new Date(+y, +mo - 1, +da, +hh, +mm, +ss).toISOString(),
     allDay: false,
@@ -138,27 +190,39 @@ function parseLine(line: string): Prop | null {
   return { name, params, value };
 }
 
+/** Every component block of a type in a (possibly multi-component) calendar.
+ *  CalDAV resources hold one component; a subscribed iCal feed packs many. */
+function extractAllComponents(
+  ics: string,
+  comp: "VTODO" | "VEVENT",
+): Prop[][] {
+  const lines = unfold(ics).split(/\r?\n/);
+  const blocks: Prop[][] = [];
+  let cur: Prop[] | null = null;
+  for (const line of lines) {
+    if (line === `BEGIN:${comp}`) {
+      cur = [];
+      continue;
+    }
+    if (line === `END:${comp}`) {
+      if (cur) blocks.push(cur);
+      cur = null;
+      continue;
+    }
+    if (cur && line) {
+      const p = parseLine(line);
+      if (p) cur.push(p);
+    }
+  }
+  return blocks;
+}
+
+/** First component of a type (CalDAV's one-resource-one-component case). */
 function extractComponent(
   ics: string,
   comp: "VTODO" | "VEVENT",
 ): Prop[] | null {
-  const lines = unfold(ics).split(/\r?\n/);
-  let found = false;
-  let inside = false;
-  const props: Prop[] = [];
-  for (const line of lines) {
-    if (line === `BEGIN:${comp}`) {
-      found = true;
-      inside = true;
-      continue;
-    }
-    if (line === `END:${comp}`) break;
-    if (inside && line) {
-      const p = parseLine(line);
-      if (p) props.push(p);
-    }
-  }
-  return found ? props : null;
+  return extractAllComponents(ics, comp)[0] ?? null;
 }
 
 function getProp(props: Prop[], name: string): Prop | undefined {
@@ -303,9 +367,7 @@ export interface ParsedTodo {
   completed: boolean;
 }
 
-export function vtodoToItemPatch(ics: string): ParsedTodo | null {
-  const props = extractComponent(ics, "VTODO");
-  if (!props) return null;
+function mapVtodo(props: Prop[]): ParsedTodo {
   const uid = getProp(props, "UID")?.value ?? null;
   const title = unescapeText(getProp(props, "SUMMARY")?.value ?? "");
   const descr = getProp(props, "DESCRIPTION");
@@ -330,15 +392,26 @@ export function vtodoToItemPatch(ics: string): ParsedTodo | null {
   return { uid, title, patch, completed };
 }
 
+export function vtodoToItemPatch(ics: string): ParsedTodo | null {
+  const props = extractComponent(ics, "VTODO");
+  return props ? mapVtodo(props) : null;
+}
+
+/** Every VTODO in a (multi-component) calendar feed. */
+export function parseAllVtodos(ics: string): ParsedTodo[] {
+  return extractAllComponents(ics, "VTODO").map(mapVtodo);
+}
+
 export interface ParsedEvent {
   uid: string | null;
   title: string;
   patch: ItemPatch;
+  /** Carries an RRULE (a recurring series). We don't import the rule itself, but a
+   *  recurring event is "ongoing", so callers must not treat its past DTSTART as over. */
+  recurs: boolean;
 }
 
-export function veventToItemPatch(ics: string): ParsedEvent | null {
-  const props = extractComponent(ics, "VEVENT");
-  if (!props) return null;
+function mapVevent(props: Prop[]): ParsedEvent {
   const uid = getProp(props, "UID")?.value ?? null;
   const title = unescapeText(getProp(props, "SUMMARY")?.value ?? "");
   const descr = getProp(props, "DESCRIPTION");
@@ -359,7 +432,17 @@ export function veventToItemPatch(ics: string): ParsedEvent | null {
     );
     if (mins > 0) patch.estimate_minutes = mins;
   }
-  return { uid, title, patch };
+  return { uid, title, patch, recurs: !!getProp(props, "RRULE") };
+}
+
+export function veventToItemPatch(ics: string): ParsedEvent | null {
+  const props = extractComponent(ics, "VEVENT");
+  return props ? mapVevent(props) : null;
+}
+
+/** Every VEVENT in a (multi-component) calendar feed. */
+export function parseAllVevents(ics: string): ParsedEvent[] {
+  return extractAllComponents(ics, "VEVENT").map(mapVevent);
 }
 
 // ----- content hash (push diffing + echo suppression) -----------------------

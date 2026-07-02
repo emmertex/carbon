@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useDeferredValue, useMemo } from 'react';
 import type { Db } from '@carbon/core';
 import { getDb } from '@/lib/db';
 import { useStore } from '@/lib/store';
@@ -28,4 +28,31 @@ export function useQuery<T>(
     return perfLabel ? perf.time('query', perfLabel, () => fn(db)) : fn(db);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, rev, ...deps]);
+}
+
+/**
+ * Like {@link useQuery}, but recomputes against a *deferred* copy of the DB
+ * revision. On a mutation the urgent re-render reuses the previous (memoized)
+ * result — so the interaction commits immediately — and this query re-runs in a
+ * low-priority background render that React can interrupt.
+ *
+ * Use it for expensive, non-interactive read-outs that don't need to update in the
+ * same frame as the action (sidebar counts, badges, progress rings). It keeps that
+ * aggregation off the tap's critical path; the numbers catch up a beat later.
+ */
+export function useDeferredQuery<T>(
+  fn: (db: Db) => T,
+  deps: unknown[] = [],
+  perfLabel?: string,
+): T | null {
+  const rev = useStore((s) => s.dbRevision);
+  const ready = useStore((s) => s.ready);
+  const deferredRev = useDeferredValue(rev);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => {
+    if (!ready) return null;
+    const db = getDb();
+    return perfLabel ? perf.time('query', perfLabel, () => fn(db)) : fn(db);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, deferredRev, ...deps]);
 }

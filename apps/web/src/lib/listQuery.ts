@@ -1,4 +1,4 @@
-import { queryItems, getItem, type Db, type Item } from '@carbon/core';
+import { queryItems, type Db, type Item } from '@carbon/core';
 import { baseFilter, applySort, type Base, type ViewPrefs } from './views';
 import { excludeOnHold } from './filter';
 import { filterByPrefs } from './filter-expr';
@@ -33,12 +33,24 @@ export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
 
   // Drop any match that already descends from another match — it would otherwise
   // show twice (once at top level, once nested under its ancestor's subtree).
+  //
+  // Resolve ancestry in memory: one 2-column scan builds a parent map, rather than
+  // firing a getItem() per ancestor per row (that walk was a top scaling cost — it
+  // grew with both list size and nesting depth on every mutation/switch).
   const matchedIds = new Set(sorted.map((i) => i.id));
+  const parentOf = new Map<string, string | null>();
+  for (const r of db.all<{ id: string; parent_id: string | null }>(
+    'SELECT id, parent_id FROM items WHERE deleted = 0',
+  )) {
+    parentOf.set(r.id, r.parent_id);
+  }
   return sorted.filter((i) => {
     let pid = i.parent_id;
-    while (pid) {
+    const seen = new Set<string>(); // guard against any parent cycle
+    while (pid && !seen.has(pid)) {
       if (matchedIds.has(pid)) return false;
-      pid = getItem(db, pid)?.parent_id ?? null;
+      seen.add(pid);
+      pid = parentOf.get(pid) ?? null;
     }
     return true;
   });

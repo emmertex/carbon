@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type Db,
   type Item,
@@ -15,8 +15,12 @@ import {
   itemToVevent,
   vtodoToItemPatch,
   veventToItemPatch,
+  parseAllVtodos,
+  parseAllVevents,
   contentHash,
   detectKind,
+  type ParsedTodo,
+  type ParsedEvent,
 } from "./caldav-ical";
 
 // ----- server-only schema (NOT CRDT-synced; holds secrets) ------------------
@@ -33,7 +37,7 @@ export function ensureCaldavTables(db: Db): void {
       sync_tasks            INTEGER NOT NULL DEFAULT 0,
       sync_events           INTEGER NOT NULL DEFAULT 0,
       enabled               INTEGER NOT NULL DEFAULT 1,
-      frequency_seconds     INTEGER NOT NULL DEFAULT 300,
+      frequency_seconds     INTEGER NOT NULL DEFAULT 3600,
       default_event_minutes INTEGER NOT NULL DEFAULT 30,
       todo_sync_token       TEXT,
       event_sync_token      TEXT,
@@ -59,6 +63,15 @@ export function ensureCaldavTables(db: Db): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_caldav_links_uid
       ON caldav_links(project_id, kind, remote_uid);
   `);
+  // Additive columns for DBs created before they existed. Idempotent ALTERs.
+  const cols = db.all<{ name: string }>(`PRAGMA table_info(caldav_configs)`);
+  const has = (c: string) => cols.some((x) => x.name === c);
+  // sync flavour — 'caldav' (two-way DAV) or 'ical' (read-only feed pull).
+  if (!has("mode")) {
+    db.exec(
+      `ALTER TABLE caldav_configs ADD COLUMN mode TEXT NOT NULL DEFAULT 'caldav'`,
+    );
+  }
 }
 
 /** A persistent random device id for the connector, distinct from the server's own,
@@ -81,8 +94,11 @@ export function ensureCaldavDeviceId(db: Db): string {
 
 // ----- config CRUD ----------------------------------------------------------
 
+export type CaldavMode = "caldav" | "ical";
+
 export interface CaldavConfigRow {
   project_id: string;
+  mode: CaldavMode;
   base_url: string | null;
   username: string | null;
   password: string | null;
@@ -104,6 +120,7 @@ export interface CaldavConfigRow {
 /** Public projection (no password) for REST responses. */
 export interface PublicCaldavConfig {
   project_id: string;
+  mode: CaldavMode;
   base_url: string | null;
   username: string | null;
   todo_url: string | null;
@@ -131,6 +148,7 @@ export function getCaldavConfigRow(
 export function publicCaldavConfig(row: CaldavConfigRow): PublicCaldavConfig {
   return {
     project_id: row.project_id,
+    mode: row.mode,
     base_url: row.base_url,
     username: row.username,
     todo_url: row.todo_url,
@@ -154,6 +172,7 @@ export function listEnabledConfigs(db: Db): CaldavConfigRow[] {
 }
 
 export interface CaldavConfigPatch {
+  mode?: CaldavMode;
   base_url?: string | null;
   username?: string | null;
   password?: string | null;
@@ -183,6 +202,10 @@ export function upsertCaldavConfig(
 
   const row: CaldavConfigRow = {
     project_id: projectId,
+    mode:
+      patch.mode === "ical" || patch.mode === "caldav"
+        ? patch.mode
+        : (ex?.mode ?? "caldav"),
     base_url: str(patch.base_url, ex?.base_url ?? null),
     username: str(patch.username, ex?.username ?? null),
     // password: empty/undefined keeps the existing secret (matches agents.api_key UX)
@@ -194,7 +217,7 @@ export function upsertCaldavConfig(
     enabled: bool(patch.enabled, ex?.enabled ?? 1),
     frequency_seconds: Math.max(
       60,
-      patch.frequency_seconds ?? ex?.frequency_seconds ?? 300,
+      patch.frequency_seconds ?? ex?.frequency_seconds ?? 3600,
     ),
     default_event_minutes: Math.max(
       1,
@@ -209,11 +232,12 @@ export function upsertCaldavConfig(
   };
   db.run(
     `INSERT INTO caldav_configs
-       (project_id, base_url, username, password, todo_url, event_url, sync_tasks, sync_events,
-        enabled, frequency_seconds, default_event_minutes, todo_sync_token, event_sync_token,
-        last_sync_at, last_status, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       (project_id, mode, base_url, username, password, todo_url, event_url, sync_tasks, sync_events,
+        enabled, frequency_seconds, default_event_minutes,
+        todo_sync_token, event_sync_token, last_sync_at, last_status, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(project_id) DO UPDATE SET
+       mode=excluded.mode,
        base_url=excluded.base_url, username=excluded.username, password=excluded.password,
        todo_url=excluded.todo_url, event_url=excluded.event_url, sync_tasks=excluded.sync_tasks,
        sync_events=excluded.sync_events, enabled=excluded.enabled,
@@ -221,6 +245,7 @@ export function upsertCaldavConfig(
        default_event_minutes=excluded.default_event_minutes, updated_at=excluded.updated_at`,
     [
       row.project_id,
+      row.mode,
       row.base_url,
       row.username,
       row.password,
@@ -522,6 +547,32 @@ function encode(
     : itemToVevent(item, uid, defaultMinutes);
 }
 
+/** Apply a parsed VTODO onto an existing Carbon item via CRDT mutators. */
+function applyTodo(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  p: ParsedTodo,
+): void {
+  updateItem(db, deviceId, itemId, p.patch);
+  const cur = getItem(db, itemId);
+  if (!cur) return;
+  if (p.completed && cur.status !== "done")
+    setCompleted(db, deviceId, itemId, true);
+  else if (!p.completed && cur.status === "done")
+    setCompleted(db, deviceId, itemId, false);
+}
+
+/** Apply a parsed VEVENT onto an existing Carbon item via CRDT mutators. */
+function applyEvent(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  p: ParsedEvent,
+): void {
+  updateItem(db, deviceId, itemId, p.patch);
+}
+
 /** Apply a parsed remote object onto a Carbon item (existing) via CRDT mutators. */
 function applyParsed(
   db: Db,
@@ -532,19 +583,90 @@ function applyParsed(
 ): void {
   if (kind === "todo") {
     const p = vtodoToItemPatch(ics);
-    if (!p) return;
-    updateItem(db, deviceId, itemId, p.patch);
-    const cur = getItem(db, itemId);
-    if (!cur) return;
-    if (p.completed && cur.status !== "done")
-      setCompleted(db, deviceId, itemId, true);
-    else if (!p.completed && cur.status === "done")
-      setCompleted(db, deviceId, itemId, false);
+    if (p) applyTodo(db, deviceId, itemId, p);
   } else {
     const p = veventToItemPatch(ics);
-    if (!p) return;
-    updateItem(db, deviceId, itemId, p.patch);
+    if (p) applyEvent(db, deviceId, itemId, p);
   }
+}
+
+/** Create a Carbon task under a project from a parsed remote object. Shared by the
+ *  CalDAV pull and the iCal feed pull. */
+function createFromParsed(
+  db: Db,
+  deviceId: string,
+  projectId: string,
+  kind: LinkKind,
+  parsed: ParsedTodo | ParsedEvent,
+): Item {
+  // Inherit the project's owner so the pulled task is visible to that user. A
+  // server-created item with a null owner is invisible to authenticated clients
+  // (visibleItemIds is owner/share-scoped) — it would sit in the DB unseen.
+  const ownerId = getItem(db, projectId)?.owner_id ?? null;
+  const created = createItem(db, deviceId, {
+    type: "task",
+    title: parsed.title,
+    parentId: projectId,
+    ownerId,
+    note: parsed.patch.note ?? null,
+    dueDate: parsed.patch.due_date ?? null,
+    deferDate: kind === "todo" ? (parsed.patch.defer_date ?? null) : null,
+    priority: kind === "todo" ? (parsed.patch.priority ?? 0) : 0,
+  });
+  if (parsed.patch.estimate_minutes)
+    updateItem(db, deviceId, created.id, {
+      estimate_minutes: parsed.patch.estimate_minutes,
+    });
+  if (kind === "todo" && (parsed as ParsedTodo).completed)
+    setCompleted(db, deviceId, created.id, true);
+  return getItem(db, created.id)!;
+}
+
+/** Heal a linked item that predates owner inheritance: an earlier pull may have
+ *  created it with a null owner (invisible to authenticated clients). Stamp it with
+ *  the project's owner on the next sync so it starts fanning out. */
+function ensureOwner(
+  db: Db,
+  deviceId: string,
+  projectId: string,
+  itemId: string,
+): void {
+  const it = getItem(db, itemId);
+  if (!it || it.owner_id != null) return;
+  const owner = getItem(db, projectId)?.owner_id ?? null;
+  if (owner != null) updateItem(db, deviceId, itemId, { owner_id: owner });
+}
+
+/** True when a parsed VEVENT has already ended (start + duration < now). Past events
+ *  are never imported (Calendar → Carbon), so a calendar's history isn't pulled in.
+ *  Only gates *new* imports — an event already linked as a task is kept. A recurring
+ *  series is always "ongoing" and so never counts as past. */
+function eventInPast(
+  parsed: ParsedEvent,
+  now: number,
+  defaultEventMinutes: number,
+): boolean {
+  if (parsed.recurs) return false; // a recurring series is ongoing, never "past"
+  const start = parsed.patch.due_date;
+  if (!start) return false; // undated → not "past"; import as normal
+  const mins = parsed.patch.estimate_minutes ?? defaultEventMinutes;
+  return Date.parse(start) + mins * 60000 < now;
+}
+
+/** Pure-mirror cleanup when a remote object vanishes: soft-delete the task (todo)
+ *  or clear its due date (event), then drop the link. Shared by both pull paths. */
+function mirrorRemoteDeletion(
+  db: Db,
+  deviceId: string,
+  kind: LinkKind,
+  link: LinkRow,
+): void {
+  if (kind === "todo") {
+    deleteItem(db, deviceId, link.item_id); // soft-delete (recoverable)
+  } else {
+    updateItem(db, deviceId, link.item_id, { due_date: null }); // keep task, drop the date
+  }
+  deleteLinkById(db, link.id);
 }
 
 async function syncKind(
@@ -562,57 +684,83 @@ async function syncKind(
   // ---- PULL: remote → CRDT ops ----
   const remote = await davListEtags(collectionUrl, cfg, allowPrivate);
   const byHref = new Map<string, LinkRow>();
-  for (const l of linksForKind(db, projectId, kind)) byHref.set(l.href, l);
+  const byUid = new Map<string, LinkRow>();
+  for (const l of linksForKind(db, projectId, kind)) {
+    byHref.set(l.href, l);
+    byUid.set(l.remote_uid, l);
+  }
 
   const seen = new Set<string>();
+  const handledUids = new Set<string>();
   for (const [href, etag] of remote) {
     seen.add(href);
-    const link = byHref.get(href);
-    if (link && link.etag === etag) continue; // unchanged (incl. echo of our own PUT)
+    const hrefLink = byHref.get(href);
+    if (hrefLink && hrefLink.etag === etag) {
+      handledUids.add(hrefLink.remote_uid); // unchanged; also blocks a UID-sibling below
+      continue; // echo of our own PUT / genuinely unchanged
+    }
     const got = await davGet(href, cfg, allowPrivate);
     if (detectKind(got.ics) !== kind) continue; // mixed collection — wrong type here
+    const parsed =
+      kind === "todo" ? vtodoToItemPatch(got.ics) : veventToItemPatch(got.ics);
+    if (!parsed) continue;
+    const uid = parsed.uid ?? href;
+    // One task per UID. A second resource sharing a UID (e.g. a recurring event's
+    // override) is a sibling — skip it rather than flip the task between resources.
+    if (handledUids.has(uid)) continue;
+    handledUids.add(uid);
     const curEtag = got.etag ?? etag;
 
-    if (
-      link &&
-      getItem(db, link.item_id) &&
-      !getItem(db, link.item_id)!.deleted
-    ) {
-      // existing, present locally → merge remote changes in
-      applyParsed(db, deviceId, link.item_id, kind, got.ics);
-      const it = getItem(db, link.item_id)!;
-      setLinkState(db, link.id, curEtag, contentHash(kind, it, def));
-    } else {
-      // new remote object → create a task under the project
-      const parsed =
-        kind === "todo"
-          ? vtodoToItemPatch(got.ics)
-          : veventToItemPatch(got.ics);
-      if (!parsed) continue;
-      const uid = parsed.uid ?? href;
-      const created = createItem(db, deviceId, {
-        type: "task",
-        title: parsed.title,
-        parentId: projectId,
-        note: parsed.patch.note ?? null,
-        dueDate: parsed.patch.due_date ?? null,
-        deferDate: kind === "todo" ? (parsed.patch.defer_date ?? null) : null,
-        priority: kind === "todo" ? (parsed.patch.priority ?? 0) : 0,
-      });
-      if (parsed.patch.estimate_minutes)
-        updateItem(db, deviceId, created.id, {
-          estimate_minutes: parsed.patch.estimate_minutes,
-        });
-      if (
-        kind === "todo" &&
-        (parsed as ReturnType<typeof vtodoToItemPatch>)?.completed
-      )
-        setCompleted(db, deviceId, created.id, true);
-      const it = getItem(db, created.id)!;
+    // Match by href first, else by UID. A server may store/return our pushed resource
+    // under a different path than we PUT to (e.g. re-encoding the '@' in the UID), so
+    // href alone would miss it and we'd re-import our own event as a duplicate. The
+    // UID match closes that echo loop and lets us repoint the link to the real href.
+    const link = hrefLink ?? byUid.get(uid);
+    const item = link ? getItem(db, link.item_id) : undefined;
+
+    if (link && (!item || item.deleted)) {
+      // We already know this UID but the local task is gone/deleted — don't resurrect
+      // it. Repoint the link to the current href/etag so echo-suppression holds and
+      // the deletion sweep below doesn't treat the still-present resource as vanished.
       upsertLink(
         db,
         projectId,
-        created.id,
+        link.item_id,
+        kind,
+        uid,
+        href,
+        curEtag,
+        link.content_hash,
+      );
+      continue;
+    }
+
+    if (link && item) {
+      // existing (possibly relocated to a new href) → merge remote in, repoint link
+      applyParsed(db, deviceId, link.item_id, kind, got.ics);
+      const it = getItem(db, link.item_id)!;
+      upsertLink(
+        db,
+        projectId,
+        it.id,
+        kind,
+        uid,
+        href,
+        curEtag,
+        contentHash(kind, it, def),
+      );
+    } else {
+      // genuinely new remote object → create a task under the project
+      if (
+        kind === "event" &&
+        eventInPast(parsed as ParsedEvent, Date.now(), def)
+      )
+        continue; // never import a past event (Calendar → Carbon)
+      const it = createFromParsed(db, deviceId, projectId, kind, parsed);
+      upsertLink(
+        db,
+        projectId,
+        it.id,
         kind,
         uid,
         href,
@@ -626,12 +774,7 @@ async function syncKind(
   // remote deletions: a link whose href vanished from the collection
   for (const link of linksForKind(db, projectId, kind)) {
     if (seen.has(link.href)) continue;
-    if (kind === "todo") {
-      deleteItem(db, deviceId, link.item_id); // soft-delete (recoverable)
-    } else {
-      updateItem(db, deviceId, link.item_id, { due_date: null }); // keep task, drop the date
-    }
-    deleteLinkById(db, link.id);
+    mirrorRemoteDeletion(db, deviceId, kind, link);
     result.pulled++;
   }
 
@@ -705,6 +848,113 @@ async function syncKind(
   }
 }
 
+// ----- iCal feed (read-only, pull-only) -------------------------------------
+
+/** Stable hash of a parsed remote object, so a poll that returns an unchanged
+ *  component doesn't re-stamp CRDT ops. Feeds carry no per-item ETag, so we hash
+ *  the mapped fields ourselves (the iCal-mode analogue of the stored ETag). */
+function feedHash(parsed: ParsedTodo | ParsedEvent): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        title: parsed.title,
+        patch: parsed.patch,
+        completed: (parsed as ParsedTodo).completed ?? false,
+      }),
+    )
+    .digest("hex");
+}
+
+function setFeedToken(
+  db: Db,
+  projectId: string,
+  kind: LinkKind,
+  token: string | null,
+): void {
+  const col = kind === "todo" ? "todo_sync_token" : "event_sync_token";
+  db.run(`UPDATE caldav_configs SET ${col} = ? WHERE project_id = ?`, [
+    token,
+    projectId,
+  ]);
+}
+
+/** GET a whole calendar feed. Honours a stored ETag via If-None-Match so an
+ *  unchanged feed short-circuits (304 ⇒ ics=null). Auth is sent only when
+ *  credentials are configured (public secret-URL feeds need none). */
+async function fetchFeed(
+  url: string,
+  cfg: CaldavConfigRow,
+  token: string | null,
+  allowPrivate: boolean,
+): Promise<{ ics: string | null; token: string | null }> {
+  const headers: Record<string, string> = {};
+  if (cfg.username || cfg.password) headers.Authorization = authHeader(cfg);
+  if (token) headers["If-None-Match"] = `"${token}"`;
+  const res = await safeFetch(url, allowPrivate, { method: "GET", headers });
+  if (res.status === 304) return { ics: null, token };
+  if (!res.ok) throw new CaldavHttpError(res.status, `GET ${url}`);
+  return { ics: await res.text(), token: normEtag(res.headers.get("etag")) };
+}
+
+/** Pull one kind from an iCal feed into the project. Read-only: no push, no
+ *  per-item GET. Keyed on UID (a feed has no hrefs). Pure mirror — a UID that
+ *  disappears from the feed is cleaned up like a CalDAV remote deletion. */
+async function syncIcalKind(
+  db: Db,
+  deviceId: string,
+  cfg: CaldavConfigRow,
+  kind: LinkKind,
+  feedUrl: string,
+  allowPrivate: boolean,
+  result: SyncResult,
+): Promise<void> {
+  const projectId = cfg.project_id;
+  const token = kind === "todo" ? cfg.todo_sync_token : cfg.event_sync_token;
+  const feed = await fetchFeed(feedUrl, cfg, token, allowPrivate);
+  if (feed.ics === null) return; // 304 Not Modified — nothing changed
+  setFeedToken(db, projectId, kind, feed.token);
+
+  const parsedList: (ParsedTodo | ParsedEvent)[] =
+    kind === "todo" ? parseAllVtodos(feed.ics) : parseAllVevents(feed.ics);
+
+  const byUid = new Map<string, LinkRow>();
+  for (const l of linksForKind(db, projectId, kind)) byUid.set(l.remote_uid, l);
+
+  const seen = new Set<string>();
+  for (const parsed of parsedList) {
+    const uid = parsed.uid;
+    if (!uid || seen.has(uid)) continue; // no UID, or a recurrence override (shared UID)
+    seen.add(uid);
+    const hash = feedHash(parsed);
+    const link = byUid.get(uid);
+    const item = link ? getItem(db, link.item_id) : undefined;
+
+    if (link && item && !item.deleted) {
+      if (link.content_hash === hash) continue; // unchanged since last pull
+      if (kind === "todo") applyTodo(db, deviceId, link.item_id, parsed as ParsedTodo);
+      else applyEvent(db, deviceId, link.item_id, parsed as ParsedEvent);
+      setLinkState(db, link.id, null, hash);
+    } else {
+      if (
+        kind === "event" &&
+        eventInPast(parsed as ParsedEvent, Date.now(), cfg.default_event_minutes)
+      )
+        continue; // never import a past event (Calendar → Carbon)
+      if (link) deleteLinkById(db, link.id); // stale link to a removed item
+      const created = createFromParsed(db, deviceId, projectId, kind, parsed);
+      upsertLink(db, projectId, created.id, kind, uid, feedUrl, null, hash);
+    }
+    result.pulled++;
+  }
+
+  // pure-mirror deletions: a link whose UID is no longer in the feed
+  for (const link of linksForKind(db, projectId, kind)) {
+    if (seen.has(link.remote_uid)) continue;
+    mirrorRemoteDeletion(db, deviceId, kind, link);
+    result.pulled++;
+  }
+}
+
 /** Run one full sync pass for a project (both enabled kinds). */
 export async function syncProject(
   db: Db,
@@ -713,32 +963,23 @@ export async function syncProject(
   allowPrivate: boolean,
 ): Promise<SyncResult> {
   const result: SyncResult = { pulled: 0, pushed: 0, errors: [] };
+  // Heal any orphan tasks a pre-owner-inheritance pull left invisible. Cheap: the
+  // null-owner guard short-circuits once healed.
+  for (const kind of ["todo", "event"] as LinkKind[])
+    for (const l of linksForKind(db, cfg.project_id, kind))
+      ensureOwner(db, deviceId, cfg.project_id, l.item_id);
+  const ical = cfg.mode === "ical";
+  const one = ical ? syncIcalKind : syncKind;
   if (cfg.sync_tasks && cfg.todo_url) {
     try {
-      await syncKind(
-        db,
-        deviceId,
-        cfg,
-        "todo",
-        cfg.todo_url,
-        allowPrivate,
-        result,
-      );
+      await one(db, deviceId, cfg, "todo", cfg.todo_url, allowPrivate, result);
     } catch (e) {
       result.errors.push(`tasks: ${(e as Error).message}`);
     }
   }
   if (cfg.sync_events && cfg.event_url) {
     try {
-      await syncKind(
-        db,
-        deviceId,
-        cfg,
-        "event",
-        cfg.event_url,
-        allowPrivate,
-        result,
-      );
+      await one(db, deviceId, cfg, "event", cfg.event_url, allowPrivate, result);
     } catch (e) {
       result.errors.push(`events: ${(e as Error).message}`);
     }
@@ -787,14 +1028,15 @@ export function runSync(
       projectId,
       result.errors.length
         ? `error: ${result.errors[0]}`
-        : `ok (down ${result.pulled}, up ${result.pushed})`,
+        : `ok (pulled ${result.pulled} from calendar, pushed ${result.pushed} to calendar)`,
     );
     return result;
   });
 }
 
-/** Live connectivity check (Settings "Test" button): PROPFIND the configured
- *  collection(s) and report how many items each holds. */
+/** Live connectivity check (Settings "Test" button). CalDAV mode PROPFINDs each
+ *  configured collection; iCal mode GETs each feed and counts its components. Both
+ *  report how many items each source holds. */
 export async function testCaldav(
   db: Db,
   projectId: string,
@@ -802,19 +1044,34 @@ export async function testCaldav(
 ): Promise<{ ok: boolean; message: string }> {
   const cfg = getCaldavConfigRow(db, projectId);
   if (!cfg) return { ok: false, message: "not configured" };
-  const targets: Array<[string, string]> = [];
-  if (cfg.sync_tasks && cfg.todo_url) targets.push(["tasks", cfg.todo_url]);
-  if (cfg.sync_events && cfg.event_url) targets.push(["events", cfg.event_url]);
+  const targets: Array<[LinkKind, string, string]> = [];
+  if (cfg.sync_tasks && cfg.todo_url)
+    targets.push(["todo", "tasks", cfg.todo_url]);
+  if (cfg.sync_events && cfg.event_url)
+    targets.push(["event", "events", cfg.event_url]);
   if (!targets.length)
     return {
       ok: false,
-      message: "enable a sync type and set its collection URL",
+      message:
+        cfg.mode === "ical"
+          ? "enable a sync type and set its feed URL"
+          : "enable a sync type and set its collection URL",
     };
   try {
     const parts: string[] = [];
-    for (const [label, url] of targets) {
-      const m = await davListEtags(url, cfg, allowPrivate);
-      parts.push(`${label}: ${m.size} item(s)`);
+    for (const [kind, label, url] of targets) {
+      if (cfg.mode === "ical") {
+        // Force a fetch (ignore any stored ETag) so Test always reads the feed.
+        const feed = await fetchFeed(url, cfg, null, allowPrivate);
+        const n =
+          kind === "todo"
+            ? parseAllVtodos(feed.ics ?? "").length
+            : parseAllVevents(feed.ics ?? "").length;
+        parts.push(`${label}: ${n} item(s)`);
+      } else {
+        const m = await davListEtags(url, cfg, allowPrivate);
+        parts.push(`${label}: ${m.size} item(s)`);
+      }
     }
     return { ok: true, message: `Reachable — ${parts.join(", ")}` };
   } catch (e) {

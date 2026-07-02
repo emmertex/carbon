@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, FlaskConical, RefreshCw, Trash2 } from "lucide-react";
+import {
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import {
   getCaldavConfig,
@@ -8,6 +15,7 @@ import {
   testCaldav,
   syncCaldavNow,
   type CalDavConfig,
+  type CalDavMode,
 } from "@/lib/caldav";
 import {
   btnPrimary,
@@ -28,6 +36,7 @@ function Label({ children }: { children: React.ReactNode }) {
 }
 
 interface FormState {
+  mode: CalDavMode;
   base_url: string;
   username: string;
   password: string;
@@ -41,6 +50,7 @@ interface FormState {
 }
 
 const blank: FormState = {
+  mode: "caldav",
   base_url: "",
   username: "",
   password: "",
@@ -49,12 +59,13 @@ const blank: FormState = {
   sync_tasks: false,
   sync_events: false,
   enabled: true,
-  frequency_seconds: 300,
+  frequency_seconds: 3600,
   default_event_minutes: 30,
 };
 
 function fromConfig(c: CalDavConfig): FormState {
   return {
+    mode: c.mode,
     base_url: c.base_url ?? "",
     username: c.username ?? "",
     password: "",
@@ -93,7 +104,6 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
         if (!alive) return;
         setConfig(c);
         setForm(c ? fromConfig(c) : blank);
-        setOpen(!!c);
       } catch (e) {
         if (alive) setError(String(e));
       } finally {
@@ -111,6 +121,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
     setTest(null);
     try {
       const c = await saveCaldavConfig(projectId, {
+        mode: form.mode,
         base_url: form.base_url,
         username: form.username,
         ...(form.password ? { password: form.password } : {}),
@@ -147,9 +158,21 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const r = await syncCaldavNow(projectId);
-      setTest({ ok: r.ok, message: r.status });
-      setConfig(await getCaldavConfig(projectId));
+      const prev = config?.last_sync_at ?? null;
+      await syncCaldavNow(projectId); // returns as soon as the run is queued
+      setTest({ ok: true, message: "Sync started…" });
+      // Poll the config until last_sync_at advances, then surface the recorded status.
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const c = await getCaldavConfig(projectId);
+        if (c && c.last_sync_at !== prev) {
+          setConfig(c);
+          const status = c.last_status ?? "done";
+          setTest({ ok: !status.startsWith("error"), message: status });
+          return;
+        }
+      }
+      setTest({ ok: true, message: "Sync still running in the background…" });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -183,19 +206,38 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
 
   if (!open) {
     return (
-      <div>
-        <button onClick={() => setOpen(true)} className={btnSecondary}>
-          <CalendarClock size={15} /> Set up CalDAV sync
-        </button>
-      </div>
+      <button
+        onClick={() => setOpen(true)}
+        className={cn(btnSecondary, "w-full justify-start")}
+      >
+        <ChevronRight size={15} className="text-text-faint" />
+        <CalendarClock size={15} />
+        {config ? "Calendar sync" : "Set up calendar sync"}
+        {config && (
+          <span className="ml-auto text-xs text-text-faint">
+            {config.enabled
+              ? `every ${Math.round(config.frequency_seconds / 60)}m`
+              : "disabled"}
+          </span>
+        )}
+      </button>
     );
   }
+
+  const ical = form.mode === "ical";
 
   return (
     <div className="space-y-2 rounded-xl border border-border p-3">
       <div className="flex items-center gap-2">
-        <CalendarClock size={15} className="text-accent" />
-        <span className="text-sm font-medium">CalDAV sync</span>
+        <button
+          onClick={() => setOpen(false)}
+          className="flex items-center gap-2"
+          title="Collapse"
+        >
+          <ChevronDown size={15} className="text-text-faint" />
+          <CalendarClock size={15} className="text-accent" />
+          <span className="text-sm font-medium">Calendar sync</span>
+        </button>
         <div className="flex-1" />
         <label className="flex items-center gap-1 text-xs text-text-muted">
           <input
@@ -207,14 +249,36 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
         </label>
       </div>
 
+      <div className="flex gap-4 text-sm">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="radio"
+            name="caldav-mode"
+            checked={!ical}
+            onChange={() => set({ mode: "caldav" })}
+          />
+          CalDAV (two-way)
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input
+            type="radio"
+            name="caldav-mode"
+            checked={ical}
+            onChange={() => set({ mode: "ical" })}
+          />
+          iCal feed (read-only)
+        </label>
+      </div>
+
       <p className="text-xs text-text-faint">
-        Two-way sync this project against one CalDAV account. Runs on the
-        server, so a signed-in server is required.
+        {ical
+          ? "Subscribe this project to one or two iCal (.ics) feed URLs — e.g. the secret subscribe link Apple or Google exposes. Read-only: remote events become tasks here, and this project is never written back. Runs on the server, so a signed-in server is required."
+          : "Two-way sync this project against one CalDAV account. Runs on the server, so a signed-in server is required."}
       </p>
 
       <div className="grid grid-cols-2 gap-2">
         <label className="block">
-          <Label>Username</Label>
+          <Label>{ical ? "Username (optional)" : "Username"}</Label>
           <input
             className={inputCls}
             value={form.username}
@@ -222,7 +286,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
           />
         </label>
         <label className="block">
-          <Label>Password</Label>
+          <Label>{ical ? "Password (optional)" : "Password"}</Label>
           <input
             type="password"
             className={inputCls}
@@ -243,10 +307,14 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
       </label>
       {form.sync_tasks && (
         <label className="block">
-          <Label>Task-list collection URL</Label>
+          <Label>{ical ? "Task feed URL (.ics)" : "Task-list collection URL"}</Label>
           <input
             className={inputCls}
-            placeholder="https://dav.example.com/dav/calendars/user/tasks/"
+            placeholder={
+              ical
+                ? "https://caldav.example.com/…/tasks.ics"
+                : "https://dav.example.com/dav/calendars/user/tasks/"
+            }
             value={form.todo_url}
             onChange={(e) => set({ todo_url: e.target.value })}
           />
@@ -259,45 +327,60 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
           checked={form.sync_events}
           onChange={(e) => set({ sync_events: e.target.checked })}
         />
-        Sync Calendar Events (VEVENT) — only tasks with a due date
+        {ical
+          ? "Sync Calendar Events (VEVENT)"
+          : "Sync Calendar Events (VEVENT) — only tasks with a due date"}
       </label>
       {form.sync_events && (
         <>
           <label className="block">
-            <Label>Calendar collection URL</Label>
+            <Label>
+              {ical ? "Calendar feed URL (.ics)" : "Calendar collection URL"}
+            </Label>
             <input
               className={inputCls}
-              placeholder="https://dav.example.com/dav/calendars/user/calendar/"
+              placeholder={
+                ical
+                  ? "https://calendar.google.com/calendar/ical/…/basic.ics"
+                  : "https://dav.example.com/dav/calendars/user/calendar/"
+              }
               value={form.event_url}
               onChange={(e) => set({ event_url: e.target.value })}
             />
           </label>
-          <label className="block">
-            <Label>
-              Default event length (minutes, when a task has no estimate)
-            </Label>
-            <input
-              type="number"
-              min={1}
-              className={cn(inputCls, "w-32")}
-              value={form.default_event_minutes}
-              onChange={(e) =>
-                set({ default_event_minutes: Number(e.target.value) || 30 })
-              }
-            />
-          </label>
+          <p className="text-xs text-text-faint">
+            Only upcoming events are imported — past events are never pulled in.
+          </p>
+          {!ical && (
+            <label className="block">
+              <Label>
+                Default event length (minutes, when a task has no estimate)
+              </Label>
+              <input
+                type="number"
+                min={1}
+                className={cn(inputCls, "w-32")}
+                value={form.default_event_minutes}
+                onChange={(e) =>
+                  set({ default_event_minutes: Number(e.target.value) || 30 })
+                }
+              />
+            </label>
+          )}
         </>
       )}
 
       <label className="block">
-        <Label>Sync every (seconds, min 60)</Label>
+        <Label>Sync every (minutes, min 1)</Label>
         <input
           type="number"
-          min={60}
+          min={1}
           className={cn(inputCls, "w-32")}
-          value={form.frequency_seconds}
+          value={Math.round(form.frequency_seconds / 60)}
           onChange={(e) =>
-            set({ frequency_seconds: Number(e.target.value) || 300 })
+            set({
+              frequency_seconds: Math.max(60, (Number(e.target.value) || 60) * 60),
+            })
           }
         />
       </label>

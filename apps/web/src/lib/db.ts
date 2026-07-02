@@ -1,4 +1,4 @@
-import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js';
+import initSqlJs, { type Database as SqlJsDatabase, type Statement } from 'sql.js';
 import localforage from 'localforage';
 import { perf } from './perf';
 import {
@@ -16,6 +16,9 @@ const STORE_KEY = 'carbon_db';
 let dbInstance: Db | null = null;
 let sqlDb: SqlJsDatabase | null = null;
 let deviceId = '';
+/** Clears the live DB's prepared-statement cache; set when the live DB is wrapped.
+ *  Must be called after every `sqlDb.export()` (which finalizes all statements). */
+let clearLiveStmtCache: () => void = () => {};
 
 localforage.config({ name: 'carbon', storeName: 'carbon' });
 
@@ -25,26 +28,59 @@ function getSql() {
   return (sqlPromise ??= initSqlJs({ locateFile: (file) => `/${file}` }));
 }
 
-function wrap(sdb: SqlJsDatabase): Db {
-  return {
+function wrap(sdb: SqlJsDatabase): { db: Db; clearCache: () => void } {
+  // Cache compiled statements by SQL text. sql.js recompiles on every `prepare()`,
+  // and the repo layer fires many tiny reads (getItem / getChildren inside ancestor
+  // and subtree walks) — recompiling each one is a large share of interaction cost
+  // on the WASM build. Reusing the compiled statement removes that per-call cost.
+  //
+  // Safe because: every read fully drains its rows into an array before returning,
+  // so a cached statement is never mid-iteration when reused (true even for
+  // recursive tree walks — the inner call runs only after the outer `all()` has
+  // returned and `reset()` the statement). The schema is stable after `migrate()`,
+  // which uses `exec()` and never touches the cached read/write paths.
+  const stmtCache = new Map<string, Statement>();
+  const stmtFor = (sql: string): Statement => {
+    let st = stmtCache.get(sql);
+    if (!st) {
+      // prepare() may throw (e.g. a table that doesn't exist pre-migrate) — let it
+      // propagate without caching a bad entry.
+      st = sdb.prepare(sql);
+      stmtCache.set(sql, st);
+    }
+    return st;
+  };
+  const db: Db = {
     run(sql: string, params: SqlParams = []): void {
-      sdb.run(sql, params as never);
+      // exec() handles DDL / multi-statement SQL; run() is always a single
+      // parameterized statement, so it can reuse a cached compiled statement.
+      const st = stmtFor(sql);
+      try {
+        st.bind(params as never);
+        st.step();
+      } finally {
+        st.reset();
+      }
     },
     all<T = Row>(sql: string, params: SqlParams = []): T[] {
-      const stmt = sdb.prepare(sql);
-      stmt.bind(params as never);
-      const rows: T[] = [];
-      while (stmt.step()) rows.push(stmt.getAsObject() as T);
-      stmt.free();
-      return rows;
+      const st = stmtFor(sql);
+      try {
+        st.bind(params as never);
+        const rows: T[] = [];
+        while (st.step()) rows.push(st.getAsObject() as T);
+        return rows;
+      } finally {
+        st.reset();
+      }
     },
     get<T = Row>(sql: string, params: SqlParams = []): T | undefined {
-      const stmt = sdb.prepare(sql);
-      stmt.bind(params as never);
-      let row: T | undefined;
-      if (stmt.step()) row = stmt.getAsObject() as T;
-      stmt.free();
-      return row;
+      const st = stmtFor(sql);
+      try {
+        st.bind(params as never);
+        return st.step() ? (st.getAsObject() as T) : undefined;
+      } finally {
+        st.reset();
+      }
     },
     exec(sql: string): void {
       sdb.exec(sql);
@@ -61,6 +97,12 @@ function wrap(sdb: SqlJsDatabase): Db {
       }
     },
   };
+  // sql.js `export()` closes + reopens the underlying database and finalizes every
+  // prepared statement, so cached handles are invalid ("Statement closed") after a
+  // persist. Exporters call this; queries then re-prepare lazily against the
+  // reopened handle.
+  const clearCache = () => stmtCache.clear();
+  return { db, clearCache };
 }
 
 export async function initDb(): Promise<{ db: Db; deviceId: string }> {
@@ -71,7 +113,9 @@ export async function initDb(): Promise<{ db: Db; deviceId: string }> {
   sqlDb = saved ? new SQL.Database(saved) : new SQL.Database();
   sqlDb.run('PRAGMA foreign_keys = OFF');
 
-  dbInstance = wrap(sqlDb);
+  const wrapped = wrap(sqlDb);
+  dbInstance = wrapped.db;
+  clearLiveStmtCache = wrapped.clearCache;
   migrate(dbInstance);
   deviceId = ensureDeviceId(dbInstance);
   // One-time: emit record-ops for tags/links created before they were syncable.
@@ -110,6 +154,7 @@ export async function persist(): Promise<void> {
   if (!sqlDb) return;
   const t0 = performance.now();
   const data = sqlDb.export();
+  clearLiveStmtCache(); // export() finalized every prepared statement
   perf.record('persist', 'export', performance.now() - t0);
   const t1 = performance.now();
   await localforage.setItem(STORE_KEY, data);
@@ -148,7 +193,9 @@ export function registerPersistFlush(): void {
 /** Raw bytes of the current SQLite database (for backup/export). */
 export function exportDb(): Uint8Array {
   if (!sqlDb) throw new Error('DB not initialized');
-  return sqlDb.export();
+  const data = sqlDb.export();
+  clearLiveStmtCache(); // export() finalized every prepared statement
+  return data;
 }
 
 /** Overwrite the persisted database with imported bytes. Reload the app after. */
@@ -162,7 +209,7 @@ export async function openSnapshot(bytes: Uint8Array): Promise<Db> {
   const SQL = await getSql();
   const sdb = new SQL.Database(bytes);
   sdb.run('PRAGMA foreign_keys = OFF');
-  return wrap(sdb);
+  return wrap(sdb).db;
 }
 
 /**

@@ -39,7 +39,7 @@ function buildRows(results: MilestoneResult[]): Row[] {
 /** Print the headline tables to the console and return the markdown + json. */
 export function report(
   results: MilestoneResult[],
-  meta: { cyclesPerMilestone: number; durationMs: number },
+  meta: { cyclesPerMilestone: number; durationMs: number; cpuThrottle?: number },
 ): { md: string; json: unknown } {
   const milestones = results.map((r) => r.milestone).sort((a, b) => a - b);
   const small = milestones[0]!;
@@ -126,6 +126,7 @@ export function report(
     gitHash: gitHash(),
     durationMs: meta.durationMs,
     cyclesPerMilestone: meta.cyclesPerMilestone,
+    cpuThrottle: meta.cpuThrottle ?? 1,
     milestones,
     results,
   };
@@ -140,7 +141,7 @@ function buildMarkdown(
     small: number;
     large: number;
     growth: (r: Row) => number | undefined;
-    meta: { cyclesPerMilestone: number; durationMs: number };
+    meta: { cyclesPerMilestone: number; durationMs: number; cpuThrottle?: number };
   },
 ): string {
   const { small, large, growth, meta } = ctx;
@@ -151,6 +152,8 @@ function buildMarkdown(
   lines.push(`- Commit: \`${gitHash()}\``);
   lines.push(`- Milestones: ${results.map((r) => r.milestone).join(', ')} tasks`);
   lines.push(`- Cycles per milestone: ${meta.cyclesPerMilestone}`);
+  lines.push(`- CPU throttle: ${meta.cpuThrottle && meta.cpuThrottle > 1 ? `${meta.cpuThrottle}×` : 'off'}`);
+  lines.push(`- Seed: representative (folders / projects / nested sub-tasks / hierarchical tags / due+defer / perspectives)`);
   lines.push(`- Wall-clock: ${(meta.durationMs / 1000).toFixed(0)}s`);
   lines.push('');
 

@@ -125,6 +125,42 @@ test("all-day due (23:59 marker) round-trips as VALUE=DATE", () => {
   assert.equal(parsed.patch.estimate_minutes, undefined);
 });
 
+function veventTZ(tzid: string, dtstart: string, dtend: string): string {
+  return (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:tz\r\n" +
+    `DTSTART;TZID=${tzid}:${dtstart}\r\nDTEND;TZID=${tzid}:${dtend}\r\n` +
+    "SUMMARY:Zoned\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+  );
+}
+
+test("inbound DTSTART with a TZID resolves to the correct UTC instant (no DST)", () => {
+  // Australia/Melbourne in July is AEST (UTC+10): 09:00 local = 23:00Z the day before.
+  const parsed = veventToItemPatch(
+    veventTZ("Australia/Melbourne", "20260715T090000", "20260715T093000"),
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.patch.due_date, "2026-07-14T23:00:00.000Z");
+  assert.equal(parsed.patch.estimate_minutes, 30);
+});
+
+test("inbound DTSTART with a TZID honours DST", () => {
+  // Australia/Melbourne in January is AEDT (UTC+11): 09:00 local = 22:00Z the day before.
+  const parsed = veventToItemPatch(
+    veventTZ("Australia/Melbourne", "20260115T090000", "20260115T100000"),
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.patch.due_date, "2026-01-14T22:00:00.000Z");
+  assert.equal(parsed.patch.estimate_minutes, 60);
+});
+
+test("an unrecognised TZID falls back without throwing", () => {
+  const parsed = veventToItemPatch(
+    veventTZ("Not/AZone", "20260715T090000", "20260715T093000"),
+  );
+  assert.ok(parsed); // no crash; interpreted as local wall-clock
+  assert.ok(parsed.patch.due_date);
+});
+
 test("contentHash is stable for unmapped changes, changes for mapped ones", () => {
   const base = item({
     title: "X",

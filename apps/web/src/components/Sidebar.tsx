@@ -58,13 +58,16 @@ import {
   moveTag,
   reorderTag,
   tagId,
+  listPlan,
+  getItem,
   type Item,
   type OrderMode,
 } from '@carbon/core';
+import { queryRoots } from '@/lib/listQuery';
 import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { TagMark } from './TagMark';
-import { useQuery } from '@/hooks/useQuery';
+import { useDeferredQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
 import { useFeature } from '@/hooks/useFeature';
 import { undo, redo } from '@/lib/undo';
@@ -293,7 +296,7 @@ function ProjectsSection() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const data = useQuery(
+  const data = useDeferredQuery(
     (db) => {
       const projects = getProjects(db);
       const folders = getFolders(db);
@@ -545,7 +548,7 @@ function TagsSection() {
   const collapsed = useStore((s) => s.collapsed);
   const close = () => setSidebarOpen(false);
 
-  const data = useQuery((db) => {
+  const data = useDeferredQuery((db) => {
     const tags = listTags(db);
     // Resolve display colour (own or inherited) so nested tags show their parent's hue.
     const resolved = tags.map((t) => ({ ...t, color: effectiveTagColor(db, t.name) }));
@@ -709,11 +712,13 @@ function UndoButtons() {
 function PerspectiveRow({
   p,
   selected,
+  count,
   onOpen,
   onDelete,
 }: {
   p: SavedPerspective;
   selected: boolean;
+  count?: number;
   onOpen: () => void;
   onDelete: () => void;
 }) {
@@ -747,6 +752,9 @@ function PerspectiveRow({
           <Bookmark size={16} />
         </span>
         <span className="flex-1 truncate">{p.name}</span>
+        {count !== undefined && count > 0 && (
+          <span className="text-xs tabular-nums text-text-faint">{count}</span>
+        )}
       </NavLink>
       {selected && (
         <button
@@ -776,6 +784,16 @@ function PerspectivesSection() {
 
   const [perspectives, setPerspectives] = useState<SavedPerspective[]>(getPerspectives);
   useEffect(() => setPerspectives(getPerspectives()), [location.pathname, dbRevision]);
+
+  // Task quantity per saved perspective, computed the same way the view page
+  // itself would (see ListView) so the sidebar badge matches what you'd see on open.
+  const counts = useDeferredQuery(
+    (db) =>
+      Object.fromEntries(
+        perspectives.map((p) => [p.id, queryRoots(db, p.base, p.prefs).length]),
+      ),
+    [perspectives],
+  );
 
   if (perspectives.length === 0) return null;
 
@@ -819,6 +837,7 @@ function PerspectivesSection() {
                   key={p.id}
                   p={p}
                   selected={location.pathname === `/view/${p.id}`}
+                  count={counts?.[p.id]}
                   onOpen={close}
                   onDelete={() => deletePerspective(p.id, p.name)}
                 />
@@ -843,7 +862,7 @@ export function Sidebar() {
   const showPerspectives = useFeature('perspectives');
   const showTags = useFeature('tags');
   const countScope = useStore((s) => s.uiPrefs.countScope);
-  const data = useQuery(
+  const data = useDeferredQuery(
     (db) => {
       const items = allItems(db);
       const projects = getProjects(db);
@@ -853,6 +872,9 @@ export function Sidebar() {
         const { done, total } = subtaskProgress(db, id, countScope);
         return total - done;
       };
+      const planCount = listPlan(db, me)
+        .map((p) => getItem(db, p.item_id))
+        .filter((i): i is Item => !!i && !i.deleted && i.status === 'active').length;
       return {
         todayCount: today(items).length,
         inboxCount: inbox(items).length,
@@ -862,6 +884,7 @@ export function Sidebar() {
           where.hasLocation
             ? tasksNearLocation(db, { zone: where.zone, point: where.point }).length
             : 0,
+        planCount,
         reviewCount: projects.filter((p) => needsReview(p)).length,
         shared: (me ? sharedRoots(db, me) : []).map((it) => ({
           item: it,
@@ -929,7 +952,13 @@ export function Sidebar() {
             onClick={close}
           />
         )}
-        <NavItem to="/plan" icon={<Target size={17} />} label="Plan" onClick={close} />
+        <NavItem
+          to="/plan"
+          icon={<Target size={17} />}
+          label="Plan"
+          count={data?.planCount}
+          onClick={close}
+        />
         {showReview && (
           <NavItem
             to="/review"

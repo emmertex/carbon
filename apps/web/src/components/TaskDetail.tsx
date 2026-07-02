@@ -796,10 +796,7 @@ export function TaskDetail({ id }: { id: string }) {
             {/* CalDAV two-way sync is server-side and holds secrets, so it's
                 admin-only and hidden in local-only/offline mode (no server). */}
             {currentUser?.role === "admin" && !!getServerConfig().url && (
-              <div>
-                <Label>Calendar sync</Label>
-                <CalDavSettings projectId={id} />
-              </div>
+              <CalDavSettings projectId={id} />
             )}
           </>
         )}
@@ -1411,7 +1408,7 @@ export function TaskDetail({ id }: { id: string }) {
                         docs/estimate-vs-actual.md. Show tracked time only. */}
                     Tracked{" "}
                     <span className="font-medium text-text">
-                      {formatMinutes(actualMs / 60000)}
+                      {formatMinutes(Math.round(actualMs / 60000))}
                     </span>{" "}
                     so far
                   </p>
