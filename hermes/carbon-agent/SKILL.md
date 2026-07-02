@@ -14,7 +14,7 @@ metadata:
 
 ## Overview
 
-Carbon is a self-hosted task manager at `https://carbon.etx.sx`. Users trigger
+Carbon is a self-hosted task manager at `https://carbon.example.com`. Users trigger
 the Hermes agent by @mentioning the bot or assigning it a task. Carbon sends a
 webhook POST; the agent works asynchronously and calls back via the REST API to
 post comments, complete tasks, and create follow-ups.
@@ -25,7 +25,7 @@ Required environment variables (set in the skill directory or shell profile):
 
 | Variable | Description |
 |----------|-------------|
-| `CARBON_URL` | Base URL, e.g. `https://carbon.etx.sx` |
+| `CARBON_URL` | Base URL, e.g. `https://carbon.example.com` |
 | `CARBON_TOKEN` | Agent API token (Bearer auth) |
 | `CARBON_SECRET` | Shared secret for webhook verification (optional but recommended) |
 
@@ -61,7 +61,7 @@ Carbon  ──POST webhook URL──►  carbon-webhook-listener.py  (port 9192)
 
 ### Webhook listener
 
-The listener is at `/home/ku7/carbon-webhook-listener.py`. It:
+The listener is at `/home/user/carbon-webhook-listener.py`. It:
 1. Verifies `x-carbon-secret` header (if `CARBON_SECRET` is set)
 2. Responds `200` immediately
 3. Appends the trigger payload to `~/.hermes/carbon-queue.jsonl`
@@ -70,23 +70,23 @@ Start it:
 ```bash
 CARBON_TOKEN="<token>" \
 CARBON_SECRET="<secret>" \
-python3 /home/ku7/carbon-webhook-listener.py
+python3 /home/user/carbon-webhook-listener.py
 ```
 
-Or run as a systemd unit (recommended for production). A systemd unit template is at `/home/ku7/carbon-agent.service.template`.
+Or run as a systemd unit (recommended for production). A systemd unit template is at `/home/user/carbon-agent.service.template`.
 
 ### Queue processor
 
 Process queued items:
 ```bash
-python3 /home/ku7/carbon-process-queue.py          # pop and format next item
-python3 /home/ku7/carbon-process-queue.py --list   # list all pending
-python3 /home/ku7/carbon-process-queue.py --clear  # clear queue
+python3 /home/user/carbon-process-queue.py          # pop and format next item
+python3 /home/user/carbon-process-queue.py --list   # list all pending
+python3 /home/user/carbon-process-queue.py --clear  # clear queue
 ```
 
 ## REST API Reference
 
-Base: `GET/POST/PATCH https://carbon.etx.sx/api`
+Base: `GET/POST/PATCH https://carbon.example.com/api`
 Auth: `Authorization: Bearer <token>`
 
 ### Read task
@@ -195,7 +195,7 @@ usually don't need extra `GET /api/tasks` calls unless you need broader context.
    links, and inline images.
 6. **Port conflict** — The listener defaults to port 9192. Your Uptime Kuma
    webhook listener already uses 9191. Don't collide.
-7. **Systemd unit** — A template is at `/home/ku7/carbon-agent.service.template`.
+7. **Systemd unit** — A template is at `/home/user/carbon-agent.service.template`.
    Edit the CARBON_TOKEN line, then `sudo cp ... /etc/systemd/system/ && sudo systemctl enable --now carbon-agent`.
 
 ## Verification Checklist

@@ -581,6 +581,55 @@ export function subtaskProgress(
   return { done, total };
 }
 
+/**
+ * Remaining-open task counts for many containers in a single pass — the batch form
+ * of `subtaskProgress`'s `total - done`, used by the sidebar so it fires one scan
+ * instead of a recursive walk per project. `scope` matches {@link subtaskProgress}:
+ * 'direct' counts immediate child tasks, 'all' counts leaf-descendant tasks.
+ */
+export function openCountsByContainer(
+  db: Db,
+  containerIds: string[],
+  scope: CountScope,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (containerIds.length === 0) return out;
+  // One scan of the live items, grouped by parent (order is irrelevant to a count).
+  const kids = new Map<string, { id: string; type: string; status: string }[]>();
+  for (const r of db.all<{ id: string; parent_id: string | null; type: string; status: string }>(
+    'SELECT id, parent_id, type, status FROM items WHERE deleted = 0',
+  )) {
+    if (!r.parent_id) continue;
+    const row = { id: r.id, type: r.type, status: r.status };
+    const arr = kids.get(r.parent_id);
+    if (arr) arr.push(row);
+    else kids.set(r.parent_id, [row]);
+  }
+  const taskKids = (id: string) => (kids.get(id) ?? []).filter((c) => c.type === 'task');
+  const remaining = (id: string): number => {
+    if (scope === 'direct') {
+      return taskKids(id).filter((c) => c.status !== 'done').length;
+    }
+    let done = 0;
+    let total = 0;
+    const queue = [...(kids.get(id) ?? [])];
+    while (queue.length) {
+      const c = queue.shift()!;
+      if (c.type !== 'task') continue;
+      const tk = taskKids(c.id);
+      if (tk.length === 0) {
+        total++;
+        if (c.status === 'done') done++;
+      } else {
+        queue.push(...tk);
+      }
+    }
+    return total - done;
+  };
+  for (const id of containerIds) out.set(id, remaining(id));
+  return out;
+}
+
 /** The priority whose colour an item's completion circle should display: its own
  *  priority if set, otherwise inherited from the nearest ancestor *task* that has
  *  one, so a subtree shares the parent's priority colour until a task sets its own.
@@ -1558,6 +1607,81 @@ export function listAssigneesForItem(db: Db, itemId: string): Assignee[] {
   return db
     .all<AssigneeRow>('SELECT * FROM assignees WHERE item_id = ? AND deleted = 0', [itemId])
     .map(rowToAssignee);
+}
+
+// ----- batch reads (enrichment fan-out) -------------------------------------
+// One query for a whole set of items instead of one per item, so list / forecast
+// / container rendering doesn't fan out into O(rows) round-trips. The comment /
+// assignee variants also skip their query entirely when the table has no live
+// rows (the common single-user case), turning N per-item lookups into one.
+
+const inClause = (ids: string[]) => ids.map(() => '?').join(', ');
+
+/** Ids in `itemIds` that have at least one non-deleted child. */
+export function itemsWithChildren(db: Db, itemIds: string[]): Set<string> {
+  const out = new Set<string>();
+  if (itemIds.length === 0) return out;
+  for (const r of db.all<{ parent_id: string }>(
+    `SELECT DISTINCT parent_id FROM items WHERE deleted = 0 AND parent_id IN (${inClause(itemIds)})`,
+    itemIds,
+  )) {
+    if (r.parent_id) out.add(r.parent_id);
+  }
+  return out;
+}
+
+/** Ids in `itemIds` that have at least one non-deleted comment. Empty set (no
+ *  per-item query) when the comments table has no live rows. */
+export function itemsWithComments(db: Db, itemIds: string[]): Set<string> {
+  const out = new Set<string>();
+  if (itemIds.length === 0 || !db.get('SELECT 1 AS x FROM comments WHERE deleted = 0 LIMIT 1')) {
+    return out;
+  }
+  for (const r of db.all<{ item_id: string }>(
+    `SELECT DISTINCT item_id FROM comments WHERE deleted = 0 AND item_id IN (${inClause(itemIds)})`,
+    itemIds,
+  )) {
+    out.add(r.item_id);
+  }
+  return out;
+}
+
+/** Live tags for each of `itemIds`, keyed by item id (a missing key means the item
+ *  has no tags). Mirrors {@link getItemTags} per item, in one query. */
+export function getItemTagsBatch(db: Db, itemIds: string[]): Map<string, Tag[]> {
+  const out = new Map<string, Tag[]>();
+  if (itemIds.length === 0) return out;
+  const rows = db.all<TagRow & { __item: string }>(
+    `SELECT t.*, it.item_id AS __item FROM tags t
+       JOIN item_tags it ON it.tag_id = t.id
+      WHERE it.item_id IN (${inClause(itemIds)}) AND it.deleted = 0 AND t.deleted = 0
+      ORDER BY t.name`,
+    itemIds,
+  );
+  for (const r of rows) {
+    const arr = out.get(r.__item);
+    if (arr) arr.push(rowToTag(r));
+    else out.set(r.__item, [rowToTag(r)]);
+  }
+  return out;
+}
+
+/** Live assignees for each of `itemIds`, keyed by item id. Empty map (no query)
+ *  when no assignees exist. */
+export function listAssigneesForItems(db: Db, itemIds: string[]): Map<string, Assignee[]> {
+  const out = new Map<string, Assignee[]>();
+  if (itemIds.length === 0 || !db.get('SELECT 1 AS x FROM assignees WHERE deleted = 0 LIMIT 1')) {
+    return out;
+  }
+  for (const r of db.all<AssigneeRow>(
+    `SELECT * FROM assignees WHERE deleted = 0 AND item_id IN (${inClause(itemIds)})`,
+    itemIds,
+  )) {
+    const arr = out.get(r.item_id);
+    if (arr) arr.push(rowToAssignee(r));
+    else out.set(r.item_id, [rowToAssignee(r)]);
+  }
+  return out;
 }
 
 export function assignItem(db: Db, deviceId: string, itemId: string, userId: string): Assignee {

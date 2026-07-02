@@ -63,6 +63,7 @@ export function DataBackup() {
   return (
     <SettingsSection
       id="data"
+      testId="settings-backup"
       title="Data"
       description="Export everything (tasks, projects, tags, comments, attachments) to a single file, or restore from one. Works fully offline — no server required."
     >

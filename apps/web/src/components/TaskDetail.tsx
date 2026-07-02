@@ -603,7 +603,7 @@ export function TaskDetail({ id }: { id: string }) {
   const timeSummary = totalTime > 0 ? formatDuration(totalTime) : "None";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" data-testid="task-detail">
       <header className="flex items-center gap-1 border-b border-border px-3 py-2">
         <button
           onClick={() => select(null)}

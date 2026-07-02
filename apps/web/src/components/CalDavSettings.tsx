@@ -257,7 +257,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
             checked={!ical}
             onChange={() => set({ mode: "caldav" })}
           />
-          CalDAV (two-way)
+          CalDAV
         </label>
         <label className="flex items-center gap-1.5">
           <input
@@ -266,14 +266,12 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
             checked={ical}
             onChange={() => set({ mode: "ical" })}
           />
-          iCal feed (read-only)
+          iCal Feed
         </label>
       </div>
 
       <p className="text-xs text-text-faint">
-        {ical
-          ? "Subscribe this project to one or two iCal (.ics) feed URLs — e.g. the secret subscribe link Apple or Google exposes. Read-only: remote events become tasks here, and this project is never written back. Runs on the server, so a signed-in server is required."
-          : "Two-way sync this project against one CalDAV account. Runs on the server, so a signed-in server is required."}
+        Sync occurs on the Sync Server. CalDAV is 2-way, iCal is read only.
       </p>
 
       <div className="grid grid-cols-2 gap-2">
@@ -303,7 +301,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
           checked={form.sync_tasks}
           onChange={(e) => set({ sync_tasks: e.target.checked })}
         />
-        Sync Tasks (VTODO)
+        Sync Tasks
       </label>
       {form.sync_tasks && (
         <label className="block">
@@ -327,9 +325,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
           checked={form.sync_events}
           onChange={(e) => set({ sync_events: e.target.checked })}
         />
-        {ical
-          ? "Sync Calendar Events (VEVENT)"
-          : "Sync Calendar Events (VEVENT) — only tasks with a due date"}
+        {ical ? "Sync Events" : "Sync Events (Requires Due Date)"}
       </label>
       {form.sync_events && (
         <>
@@ -349,7 +345,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
             />
           </label>
           <p className="text-xs text-text-faint">
-            Only upcoming events are imported — past events are never pulled in.
+            Only upcoming events are imported.
           </p>
           {!ical && (
             <label className="block">
@@ -371,7 +367,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
       )}
 
       <label className="block">
-        <Label>Sync every (minutes, min 1)</Label>
+        <Label>Sync period in minutes.</Label>
         <input
           type="number"
           min={1}
@@ -385,7 +381,7 @@ export function CalDavSettings({ projectId }: { projectId: string }) {
         />
       </label>
 
-      <div className="flex flex-wrap items-center gap-2 pt-1">
+      <div className="flex items-center gap-2 pt-1">
         <button onClick={save} disabled={busy} className={btnPrimary}>
           Save
         </button>

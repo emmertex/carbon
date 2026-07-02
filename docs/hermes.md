@@ -36,7 +36,6 @@ so anything Hermes posts is authored by the bot and correctly permissioned. Save
 ## 2. Configure Hermes
 
 Point a Hermes profile/skill at:
-Point a Hermes profile/skill at:
 - `CARBON_URL` — base URL with workspace subdomain, e.g. `https://my.carbon.etx.sx`. For self-hosted deployments without subdomains, use `https://carbon.etx.sx`.
 - `CARBON_TOKEN` — the issued agent token.
 
@@ -108,7 +107,8 @@ controlled by the `CARBON_GEOCODE_*` env vars (OpenStreetMap by default).
 - **Test** button in Settings → AI agents does a live connectivity check (webhook POST with
   `{event:'test'}`, or a one-shot model call) and shows status + a response snippet.
 - **Edit** (pencil) changes config; **Enable/Disable** and **Delete** manage the bot user.
-- LLM/webhook errors are surfaced with URL + status + body.
+- LLM/webhook errors are logged server-side with URL + status + body; the task comment gets a
+  generic, actionable message only (see *Security notes*).
 
 ## Security notes
 

@@ -75,12 +75,11 @@ docs/internal/
 *.swo
 *~
 
-# Testing Code
-e2e/
-
 # Playwright benchmark artifacts
 test-results/
 perf/test-results/
+e2e/test-results/
+e2e/.tmp/
 
 # Python bytecode (hermes scripts)
 __pycache__/

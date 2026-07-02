@@ -36,8 +36,10 @@ internet-facing.
 - `inbox:write` — create new tasks (drop into inbox). The narrowest useful scope for a
   one-way "capture" integration like an HA automation.
 
-Admin-only routes (`/api/admin/*`, `/host/*`) reject tokens entirely — they require basic
-auth by an `admin` user (`requireAdmin`).
+Admin-only routes (`/api/admin/*`) reject tokens entirely — they require basic auth by a
+tenant `admin` user (`requireAdmin`). `/host/tenants/*` is separate: it's the host operator's
+control plane, gated by its own `host_admins` basic-auth table, not a tenant admin account.
+`/host/signup/*` and `/host/delete/*` are public (rate-limited, email + one-time code).
 
 ## Task endpoints
 
@@ -46,7 +48,7 @@ auth by an `admin` user (`requireAdmin`).
 curl -H "Authorization: Bearer carbon_xxx" \
   "$BASE/api/tasks?perspective=today"
 
-# Create a task (inbox:write). Any item field is accepted.
+# Create a task (inbox:write). Accepts: title (required), note, project_id, due_date, flagged, priority.
 curl -X POST "$BASE/api/tasks" \
   -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
   -d '{"title":"Front door battery low","due_date":"2026-06-25T20:00:00Z","priority":3}'
@@ -123,12 +125,12 @@ Geocoding for "nearest Coles" is pluggable (OpenStreetMap by default) and config
 # HA zone enter/leave → fire location reminders (tasks:write)
 curl -X POST "$BASE/api/geo/event" \
   -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
-  -d '{"person":"person.andrew","zone":"Home","event":"enter"}'
+  -d '{"person":"person.you","zone":"Home","event":"enter"}'
 
 # Raw GPS fix → match location-tagged tasks (tasks:write)
 curl -X POST "$BASE/api/gps" \
   -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
-  -d '{"person":"person.andrew","lat":-37.81,"lng":144.96}'
+  -d '{"person":"person.you","lat":-37.81,"lng":144.96}'
 ```
 
 `person` resolves to a Carbon user via their linked `ha_person` (Settings → HA person);
@@ -145,18 +147,20 @@ if omitted, the token's owning user is used. See [`home-assistant.md`](home-assi
 
 ## Health & host role
 
-`GET /api/health` returns `{ ok, role }` where `role` ∈
+`GET /api/health` returns `{ status, version, role, locked, expiresAt, ... }` where `role` ∈
 `single | apex | app | tenant | unknown` (drives multi-tenant client routing). No auth.
 
 ## Admin & host-control (basic auth, admin only)
 
 - `/api/admin/users` (CRUD), `/api/admin/tokens` (CRUD), `/api/admin/agents` (CRUD + `/test`).
-- `/api/billing` (GET status + plans) and `/api/billing/checkout` (POST `{planId}`) — tenant-admin
-  subscription/renew. Reachable even when the workspace is locked, so an admin can self-serve a
-  renewal from the gate.
+- `/api/billing` (GET status + plans) and `/api/billing/subscribe` (POST `{planId, cardToken,
+  email}`) — tenant-admin subscription/renew. Reachable even when the workspace is locked, so an
+  admin can self-serve a renewal from the gate.
 - `/host/signup/start` + `/host/signup/verify` (public, rate-limited; email + one-time code) and
-  `/host/tenants/*` (host-admin) — multi-tenant control plane. `PATCH /host/tenants/:id` accepts
-  `{status, plan, expiresAt, locked}` (Lock/Unlock + Set-Expiry).
+  `/host/tenants/*` (host-admin, separate `host_admins` basic-auth table) — multi-tenant control
+  plane. `PATCH /host/tenants/:id` accepts `{status, plan, expiresAt, locked, blobQuotaMb,
+  maxUsers, allowPrivateEndpoints, hostLmAvailable}` (Lock/Unlock + Set-Expiry, plus quota/seat
+  caps).
 
 ## Security notes
 

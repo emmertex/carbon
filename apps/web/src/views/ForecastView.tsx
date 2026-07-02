@@ -172,6 +172,7 @@ export function ForecastView() {
       };
     },
     [selected, monthOffset],
+    'forecast.data',
   );
 
   if (!data) return null;

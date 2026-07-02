@@ -22,6 +22,8 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 ### Apps & integrations
 - [**Native apps (desktop + Android)**](native-apps.md) — building and running the Tauri desktop
   and Capacitor Android apps, plus the desktop global-hotkey / tray quick-add.
+- [**Calendar sync (CalDAV & iCal)**](caldav.md) — two-way CalDAV sync and read-only iCal feed
+  subscriptions, per project.
 - [**Home Assistant integration**](home-assistant.md) — capture, geofencing, per-device
   locations, "nearest place" reminders, and two-way task flows.
 - [**Telegram bot**](telegram-bot.md) — run a per-server bot so users can control Carbon from

@@ -24,8 +24,9 @@ submits the task.
 
 ### Natural-language commands
 
-When an admin has configured an LLM agent (**Settings → Users + AI agents**) and enabled
-NL commands, the quick-add bar doubles as a command box. Start a line with a configured
+When an admin has configured an LLM agent (**Settings → AI agents**) and enabled NL
+commands (**Settings → Natural-language commands**), the quick-add bar doubles as a
+command box. Start a line with a configured
 keyword (e.g. `add`) and write plainly:
 
 - `add milk and eggs to shopping` → creates both tasks in the *shopping* list.
@@ -36,7 +37,7 @@ keyword (e.g. `add`) and write plainly:
 
 The server fuzzy-matches names to lists/tags/tasks, runs the agent's tool-loop in-process,
 and replies with exactly what changed. Token usage per command is tracked under
-**Settings → Users + AI agents**. The same capability is available to external bots
+**Settings → Natural-language commands**. The same capability is available to external bots
 (Telegram, Hermes, scripts) over the [agent API](carbon-agent-api.md).
 
 ### Desktop quick-add
@@ -174,10 +175,10 @@ The chosen mode and expression are saved per view (and can be saved into a persp
 ### Natural-language filters
 
 In the advanced panel, the **"Describe a filter…"** box turns plain English into an
-expression using the configured LLM agent (same setup as NL commands — **Settings → Users +
-AI agents**). Type *"things due tomorrow or flagged, but not on hold"*, and the builder fills
-in for you to review and tweak before applying. Token usage is tracked under `filter_build`
-in **Settings → Users + AI agents**.
+expression using the configured LLM agent (same setup as NL commands — **Settings → AI
+agents**). Type *"things due tomorrow or flagged, but not on hold"*, and the builder fills
+in for you to review and tweak before applying. Token usage is recorded server-side under
+`filter_build`, alongside the other agent usage kinds.
 
 ## Customizing the UI (Features)
 
@@ -210,10 +211,12 @@ perspectives — **sync across your devices** (see below). Turn this off per dev
 ## Settings tour (quick map)
 
 Appearance (mode/theme/accent) · **Features & UI complexity** (presets + per-feature, per-device
-toggles + settings sync) · Gestures & mobile · Profile & Planning (signed in) · Install app
-(browser only; links to the app stores) · Data backup (full export/import) · Sync server (URL +
-sign-in) · Reminders (push / foreground geofence) · This device & location sources · Users + AI
-agents (admin, incl. NL commands + token usage) · HA person · API tokens (admin) · About (version).
+toggles + settings sync) · Gestures & mobile · Planning budget / Profile (signed in) · Sync server
+(URL + sign-in) · Subscription (admin) · Data backup (full export/import) · Reminders & location
+(push / foreground geofence) · This device (location sources) · Home Assistant (person link) ·
+API tokens (admin) · AI agents (admin, incl. token usage) · Natural-language commands (admin,
+incl. token usage) · Users (admin) · About (version) · Install app (browser only; links to the
+app stores).
 
 ## Offline & sync
 

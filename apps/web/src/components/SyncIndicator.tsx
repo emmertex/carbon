@@ -57,6 +57,7 @@ export function SyncIndicator() {
 
   return (
     <button
+      data-testid="sync-status"
       onClick={onClick}
       className={cn(
         'flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium hover:bg-surface-2',

@@ -92,8 +92,10 @@ The classic "low battery / device offline / leak detected → make me a task". N
         due: "{{ (now() + timedelta(days=2)).isoformat() }}"
 ```
 
-Any task field works in the payload (`note`, `priority`, `flagged`, `defer_date`,
-`reminder_at`, …) — just extend the `rest_command` payload to pass it through.
+`POST /api/tasks` also accepts `note`, `project_id`, `flagged`, and `priority` — extend the
+`rest_command` payload to pass any of those through. (It's a create-only endpoint: fields
+like `defer_date` or reminders aren't set at creation — use `PATCH /api/tasks/:id` afterwards
+if you need those, see [`api.md`](api.md).)
 
 ---
 

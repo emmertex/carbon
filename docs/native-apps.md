@@ -78,12 +78,13 @@ window:
   ```fish
   set -x JAVA_HOME /usr/lib/jvm/java-17-openjdk
   ```
-- **Android SDK** (not yet installed). Install the command-line tools, then:
+- **Android SDK**. Install the command-line tools, then:
   ```fish
   set -x ANDROID_HOME ~/Android/Sdk
-  sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+  sdkmanager "platform-tools" "platforms;android-35" "build-tools;37.0.0"
   ```
-  (Or install Android Studio, which bundles the SDK.)
+  (Or install Android Studio, which bundles the SDK.) `compileSdk`/`targetSdk` and the
+  pinned build-tools version live in `apps/mobile/android/variables.gradle`.
 
 ### Firebase / FCM (background push)
 
@@ -112,6 +113,10 @@ npm run -w @carbon/mobile build:android   # web build → cap sync → gradlew a
 # APK: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
 npm run -w @carbon/mobile open:android     # open in Android Studio instead
 ```
+
+`apps/mobile/build-android.sh` wraps the same steps with `debug`/`release`/`install`
+modes (the last one also `adb install -r`s to an attached device) if you'd rather use a
+single script.
 
 ### Server access from the device
 
@@ -143,5 +148,7 @@ Native origins: Tauri = `tauri://localhost` (Linux/macOS) / `http://tauri.localh
 - **Background push on Android** requires your own Firebase project and a server-side
   `FCM_SERVICE_ACCOUNT_FILE` (above). Without it, Web Push still works for browsers.
 - **Signed release builds** (Android keystore / `signingConfig`, Windows `.msi`, macOS
-  `.dmg`) are produced per-maintainer; the commands above build unsigned/debug artifacts
-  suitable for local install and testing.
+  `.dmg`) are produced per-maintainer for local builds; the commands above build
+  unsigned/debug artifacts suitable for local install and testing. Tagged releases are
+  also built and signed automatically — see [`RELEASING.md`](RELEASING.md) for the CI
+  pipeline and desktop auto-update.

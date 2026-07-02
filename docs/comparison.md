@@ -42,7 +42,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Drag to re-order | ✓ | ✓ | ✓ | ✓ |
 | Drag to re-nest (change parent) | ✓ | ✓ | ✓ | ✗ |
 | Inbox / unfiled capture | ✓ | ✓ | ✓ | "Tasks" list |
-| Task status states | active / done / **dropped / on-hold** | done / not | active / done / **dropped / on-hold** | done / not |
+| Task status states | active / done / **dropped**, plus **on-hold via tags** | done / not | active / done / **dropped / on-hold** | done / not |
 | Focus / scope to one container | ✓ | ✗ | ✓ (Pro) | ✗ |
 
 ## 3. Scheduling: dates, defer, recurrence, reminders

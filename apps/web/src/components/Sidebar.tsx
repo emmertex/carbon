@@ -48,6 +48,7 @@ import {
   moveProjectToFolder,
   deleteFolder,
   subtaskProgress,
+  openCountsByContainer,
   isOverdue,
   sharedRoots,
   tasksNearLocation,
@@ -300,11 +301,11 @@ function ProjectsSection() {
     (db) => {
       const projects = getProjects(db);
       const folders = getFolders(db);
+      // One pass for every project's open count, instead of a recursive
+      // subtaskProgress walk per project on each (deferred) sidebar render.
+      const counts = openCountsByContainer(db, projects.map((p) => p.id), countScope);
       const openById: Record<string, number> = {};
-      for (const p of projects) {
-        const { done, total } = subtaskProgress(db, p.id, countScope);
-        openById[p.id] = total - done;
-      }
+      for (const p of projects) openById[p.id] = counts.get(p.id) ?? 0;
       return { projects, folders, openById };
     },
     [countScope],

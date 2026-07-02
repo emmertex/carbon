@@ -49,7 +49,7 @@ The `carbon`-side `release.yml` lives **natively in the public repo**, not here
 The wipe step preserves the public repo's own `.git` **and `.github/`**, so `carbon`'s
 release workflow (and any issue templates / FUNDING config) survive untouched while
 the rest of the tree is replaced. `carbon`'s `.github/workflows/release.yml` is the
-source of truth — edit it directly in the `carbon` checkout (`~/git/carbon`).
+source of truth — edit it directly in your local `carbon` (public mirror) checkout.
 
 ### Release notes (single-sourced from CHANGELOG.md)
 
@@ -88,15 +88,16 @@ for a human to run and store, not something to script unattended.
 ### 1. Tauri updater signing keypair
 
 Generates the keypair that signs desktop update artifacts; the **public** half is
-already baked into `apps/desktop/src-tauri/tauri.conf.json` as a placeholder —
-replace it with the real one.
+already baked into `apps/desktop/src-tauri/tauri.conf.json` (`updater.pubkey`) —
+this step is already done for the current keypair. Only needed again if the
+keypair is ever rotated.
 
 ```fish
 npx @tauri-apps/cli signer generate -w ~/.tauri/carbon-updater.key
 ```
 
-- Replace `"pubkey": "REPLACE_WITH_TAURI_SIGNING_PUBLIC_KEY"` in
-  `apps/desktop/src-tauri/tauri.conf.json` with the printed public key.
+- Replace the `"pubkey"` value in `apps/desktop/src-tauri/tauri.conf.json`
+  (`updater.pubkey`) with the printed public key.
 - Add as **secrets in `carbon`** (the repo that actually runs the build):
   `TAURI_SIGNING_PRIVATE_KEY` (contents of the private key file) and
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.

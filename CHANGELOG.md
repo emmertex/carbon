@@ -5,9 +5,31 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+## v0.5.5
+**UI Polishing**  
+- Made CalDAV Settings less technically worded
+
+**Performance**  
+Heaps more clean up and optimisation.  
+What matters is the results..  
+
+|Operation|Original|Now|
+|---|---|---|
+|interaction:add|1009 ms|193 ms (5.2×)|
+|interaction:complete|574 ms|139 ms (4.1×)|
+|interaction:switch|439 ms|243 ms (1.8×)|
+|query:forecast.data|261 ms|96 ms (2.7×)|
+|query:container.data|26 ms|2.9 ms (9×)|
+|scroll frames >50ms jank|~13|5|
+
+**More Thorough Testing**
+- Better and more complete performance tests
+- True 2 server, and 2 browser testing using playwright for end to end tests
+
+
 ## v0.5.4
 **UI Polishing**
-- Show task count on Planned
+- Show task count on Plan
 - Don't show decimal minutes in side panel for time tracked
 - Sync Interval for CalDAV and ical are now in Minutes, not Seconds
 - Collapse Calendar Sync by default in Right Panel

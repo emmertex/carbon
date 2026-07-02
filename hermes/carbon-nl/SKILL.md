@@ -25,14 +25,14 @@ didn't report.
 
 | Variable | Description |
 |----------|-------------|
-| `CARBON_URL` | Base URL, e.g. `https://carbon.etx.sx` |
+| `CARBON_URL` | Base URL, e.g. `https://carbon.example.com` |
 | `CARBON_TOKEN` | API token that **acts as the user** (so it can complete their tasks) |
 
 Set them in the shell, or put them in `.credentials` next to the script
 (`~/.hermes/skills/productivity/carbon-nl/.credentials`):
 
 ```
-CARBON_URL=https://carbon.etx.sx
+CARBON_URL=https://carbon.example.com
 CARBON_TOKEN=carbon_xxxxxxxx
 ```
 

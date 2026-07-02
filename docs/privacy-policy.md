@@ -8,8 +8,11 @@ data. In short: **the developer does not collect, receive, or have access to you
 
 ## What we collect
 
-**Nothing.** The developer operates no servers and runs no analytics, advertising, or tracking
-in the app. We do not see your tasks, notes, files, account details, or usage.
+**Nothing beyond what's described below.** The app itself runs no analytics, advertising, or
+tracking. If you never enable sync, the developer operates no server in your data path at all,
+and we do not see your tasks, notes, files, account details, or usage. If you choose to use the
+Carbon-hosted sync server, see "Where your data lives" below for exactly what that server
+stores.
 
 ## Where your data lives
 
@@ -30,10 +33,11 @@ address is deleted with it. You can delete your account at
 **https://carbon.etx.sx/delete-account**.
 
 **Location.** Location sharing is optional and is a **sync-server-only** feature. If you enable
-it while using a sync server, your current location is pushed to the server and retained only
-until it goes stale — **no location history is kept**, and all location data is deleted after
-24 hours with no updates. Only you can see your location; other workspace members and
-administrators cannot.
+it while using a sync server, your current location is pushed to the server and only your most
+recent fix per device is kept — **no location history is kept**. A device's location stops being
+shown (in the Nearby view, to reminders, etc.) once it goes 24 hours without an update, and the
+underlying record is permanently deleted by a periodic cleanup after 30 days with no further
+updates. Only you can see your location; other workspace members and administrators cannot.
 
 To turn coordinates into place names (reverse geocoding) and to search for locations by name,
 the sync server queries **OpenStreetMap (Nominatim)**. These lookups are made **anonymously** —
@@ -55,9 +59,10 @@ needed for the lookup are sent. This also happens only when you use a sync serve
 
 ## Push notifications
 
-If you enable push notifications with a sync server, delivery uses standard mobile push
-infrastructure (Google Firebase Cloud Messaging). Message delivery passes through that
-service; keep sensitive detail out of notification text if this matters to you.
+If you enable push notifications with a sync server, delivery uses standard push infrastructure:
+Web Push on the web/desktop app, or Google Firebase Cloud Messaging on the Android app. Message
+delivery passes through that service; keep sensitive detail out of notification text if this
+matters to you.
 
 ## Children
 

@@ -29,7 +29,7 @@ Enter:
     collection.
   - **Sync Calendar Events (VEVENT)** — every task **with a due date** → a VEVENT in
     a calendar collection, and inbound VEVENTs → new tasks in the project.
-- **Sync every (seconds)** — minimum 60; default 300.
+- **Sync every (seconds)** — minimum 60; default 3600.
 - **Default event length** — used for a dated task that has no time estimate.
 
 **Past events are never imported.** An inbound VEVENT whose end is already in the past
@@ -118,8 +118,8 @@ values use Carbon's local 23:59 marker ⇄ `VALUE=DATE`.
   converted to the correct UTC instant via the IANA tz database bundled with Node (DST
   included). Only a *floating* time (no `Z`, no `TZID`) falls back to the server's local
   wall-clock, since it has no zone to resolve against. Outbound writes are always UTC.
-- **Change detection** uses `PROPFIND` + ETag diffing. WebDAV `sync-collection`
-  tokens are stored but not yet used as a fast-path.
+- **Change detection (CalDAV)** uses `PROPFIND` + ETag diffing, not the WebDAV
+  `sync-collection` REPORT — every sync pass lists the whole collection.
 - **Secrets**: the CalDAV password is stored in the tenant DB in plaintext (same as
   agent API keys); encryption-at-rest is a follow-up. It is never returned by the
   API or written to logs.

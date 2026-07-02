@@ -5,31 +5,35 @@ UX first, then the multi-user foundation, then circle back for the remaining UX.
 **full data model is designed up front** (below) so later phases are additive and the
 sync protocol never needs a retrofit.
 
+All phases below have shipped; see [`docs/features.md`](docs/features.md) for the full,
+up-to-date feature inventory.
+
 ## Phases
 
 - **Phase A — Offline core** ✅ done. Capture, projects, Today/Inbox/Flagged/Review,
   tags, due/defer/flag/priority, recurrence, drag-reorder, light/dark, sync.
 
-- **Phase B — Power & structure** (in progress)
+- **Phase B — Power & structure** ✅ done.
   - **B1 Nested tasks** — drag to reorder; drag a task *onto* another to nest it.
   - **B2 Focus mode** — eye toggle beside the flag drills into a task as a container
     (only it + descendants), with a breadcrumb bar + exit. Works from any view.
-  - **B3 Time-logging UI** — surface the existing `time_logs`. *(deferred within B)*
-  - **B4 Perspectives / filters / sorting** — saved views, sort + filter. *(deferred within B)*
+  - **B3 Time-logging UI** — the **Time** view (List/Timeline/Chart) surfaces `time_logs`.
+  - **B4 Perspectives / filters / sorting** — saved perspectives, basic + advanced
+    filters, sort + filter bar.
 
-- **Phase C — Multi-user foundation** (the spine)
+- **Phase C — Multi-user foundation** ✅ done (the spine).
   - DB-backed user accounts; server **admin page** (onboarding: add/remove users,
     reset passwords, roles, mark bot users). `AUTH_USERS` env still bootstraps the
     first admin.
   - Client identity/login; server **stamps** the authenticated user on incoming ops.
   - **Authorization-scoped sync** — a peer receives only the rows for items it owns or
-    is shared on (today the server returns everything).
+    is shared on.
   - **Sharing + assignment** — share a project/task with users from the full server
     roster (read/write); assign tasks to users.
 
-- **Phase D — Rich content & collaboration**
+- **Phase D — Rich content & collaboration** ✅ done.
   - **Attachments** subsystem (built once, used by tasks *and* comments): content-hash
-    blob store, chunked upload/download, offline cache + retry queue.
+    blob store, offline cache, ≤25 MB per file across sync.
   - **Comments** — per-task timeline authored by any shared user, carrying text +
     attachments/images. `@mention` plumbing (incl. the `@Hermes` hook for Phase F).
 

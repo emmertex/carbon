@@ -66,7 +66,11 @@ export function ContainerView() {
         }
       }
       const tasks = desc.filter((c) => c.type === 'task');
-      const rows = enrichItems(db, applySort(filterByPrefs(db, tasks, prefs), prefs.sort));
+      // Only the flat view renders `rows`; in tree mode (default) TaskTree renders
+      // and enriches its own rows, so skip a full-subtree enrich that's discarded.
+      const rows = flatMode
+        ? enrichItems(db, applySort(filterByPrefs(db, tasks, prefs), prefs.sort))
+        : [];
       const ctx = getTimeContext(db, getCurrentUserId());
       const tracking = ctx.session?.item_id === id && !ctx.paused;
       // Every id in the subtree that has at least one child — i.e. every row the
@@ -79,6 +83,7 @@ export function ContainerView() {
       return { item, remaining, rows, tracking, containerIds };
     },
     [id, JSON.stringify(prefs), countScope],
+    'container.data',
   );
   const tags = useQuery((db) => listTags(db), []) ?? [];
   const projects = useQuery((db) => getProjects(db), []) ?? [];

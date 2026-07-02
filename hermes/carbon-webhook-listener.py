@@ -8,7 +8,7 @@ session picks up queued items, does the work via the Carbon REST API,
 and posts comments / completes tasks.
 
 Environment variables:
-    CARBON_URL      base URL, e.g. https://carbon.etx.sx
+    CARBON_URL      base URL, e.g. https://carbon.example.com
     CARBON_TOKEN    agent API token (Bearer auth for REST calls)
     CARBON_SECRET   shared secret for webhook verification (optional)
     CARBON_PORT     listen port (default 9192)
@@ -29,7 +29,7 @@ PORT = int(os.environ.get("CARBON_PORT", 9192))
 # Bind to loopback by default; set CARBON_HOST=0.0.0.0 to expose on the LAN
 # (only do so with CARBON_SECRET set — enforced at startup below).
 HOST = os.environ.get("CARBON_HOST", "127.0.0.1")
-CARBON_URL = os.environ.get("CARBON_URL", "https://carbon.etx.sx").rstrip("/")
+CARBON_URL = os.environ.get("CARBON_URL", "https://carbon.example.com").rstrip("/")
 CARBON_TOKEN = os.environ.get("CARBON_TOKEN", "")
 CARBON_SECRET = os.environ.get("CARBON_SECRET", "")
 # Reject request bodies larger than this (anti-DoS); webhook payloads are small.

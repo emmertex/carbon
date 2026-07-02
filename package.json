@@ -1,6 +1,6 @@
 {
   "name": "carbon",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -16,7 +16,9 @@
     "format": "prettier --write \"**/*.{ts,tsx,md,json,css}\"",
     "perf": "playwright test perf.spec.ts -c perf/playwright.config.ts",
     "perf:smallview": "playwright test smallview.spec.ts -c perf/playwright.config.ts",
-    "perf:install": "playwright install chromium"
+    "perf:install": "playwright install chromium",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "e2e:install": "playwright install chromium"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",

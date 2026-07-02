@@ -3,6 +3,7 @@ import {
   addTask,
   completeTask,
   switchScreen,
+  openLargestContainer,
   scrollSweep,
   reset,
   seed,
@@ -72,6 +73,16 @@ export async function runMilestone(
       // eslint-disable-next-line no-console
       console.log(`    [${milestone}] cycle ${c + 1}/${cycles}`);
     }
+  }
+
+  // View tour: exercise the heavier non-list views a few times so their query
+  // cost (forecast.data / container.data) is captured at this size — the list
+  // views never touch the full-enrich path these use.
+  for (let i = 0; i < 3; i++) {
+    await switchScreen(page, 'forecast');
+    await switchScreen(page, 'all');
+    await openLargestContainer(page);
+    await switchScreen(page, 'all');
   }
 
   // Dedicated scroll-jank + time-to-settle measurement at this size.

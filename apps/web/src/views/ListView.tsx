@@ -90,7 +90,9 @@ export function ListView({
   return (
     <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
       <div className="mb-3">
-        <h1 className="text-2xl font-bold tracking-tight">{heading}</h1>
+        <h1 className="text-2xl font-bold tracking-tight" data-testid="active-view">
+          {heading}
+        </h1>
         <p className="mt-0.5 text-sm text-text-muted">
           {count} {count === 1 ? 'task' : 'tasks'}
         </p>

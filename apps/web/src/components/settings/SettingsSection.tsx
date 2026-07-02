@@ -10,14 +10,16 @@ export function SettingsSection({
   title,
   description,
   children,
+  testId,
 }: {
   id: string;
   title: string;
   description?: ReactNode;
   children: ReactNode;
+  testId?: string;
 }) {
   return (
-    <section id={id} className="scroll-mt-6">
+    <section id={id} className="scroll-mt-6" data-testid={testId}>
       <h2 className="text-sm font-semibold uppercase tracking-wide text-text-faint">{title}</h2>
       {description && <p className="mt-1 text-sm text-text-muted">{description}</p>}
       <div className="mt-3">{children}</div>

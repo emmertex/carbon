@@ -7,7 +7,7 @@ Type=simple
 # Run as your user so ~/.hermes paths match the queue processor.
 User=ku7
 Environment=HOME=/home/user
-Environment=CARBON_URL=https://carbon.etx.sx
+Environment=CARBON_URL=https://carbon.example.com
 Environment=CARBON_TOKEN=REPLACE_WITH_AGENT_TOKEN
 # Set this to match the "Shared secret" in the Carbon agent (or remove the line).
 Environment=CARBON_SECRET=REPLACE_OR_REMOVE

@@ -2,6 +2,18 @@ import { queryItems, type Db, type Item } from '@carbon/core';
 import { baseFilter, applySort, type Base, type ViewPrefs } from './views';
 import { excludeOnHold } from './filter';
 import { filterByPrefs } from './filter-expr';
+import { currentRevision } from './dbRevision';
+
+/**
+ * Small revision-keyed cache of computed root lists. Rebuilding the ordered array
+ * is a top per-mutation/switch cost, and the same (base, prefs) is queried
+ * repeatedly at one revision — the view on mount/remount, plus the sidebar's
+ * per-perspective count. Keying on `dbRevision` means an entry is only reused
+ * while the data is unchanged; a mutation bumps the revision and misses. Bounded
+ * so it can't grow unbounded across revisions.
+ */
+const rootsCache = new Map<string, Item[]>();
+const ROOTS_CACHE_MAX = 24;
 
 /**
  * The ordered list of top-level rows for a list view — but *without* enrichment.
@@ -16,6 +28,21 @@ import { filterByPrefs } from './filter-expr';
  * are identical to the old full-scan path; it just hands the JS far fewer rows.
  */
 export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
+  // Key on the revision *and* a coarse minute bucket: some predicates are
+  // time-based (today cutoff, defer/due, completion grace), so an entry must
+  // also expire with the clock, not just on the next mutation. A minute keeps
+  // rapid switches hitting while bounding staleness.
+  const rev = currentRevision();
+  const minute = Math.floor(Date.now() / 60_000);
+  const key = `${base} ${rev} ${minute} ${JSON.stringify(prefs)}`;
+  const cached = rootsCache.get(key);
+  if (cached) {
+    // Bump recency (Map preserves insertion order, so re-insert = most-recent).
+    rootsCache.delete(key);
+    rootsCache.set(key, cached);
+    return cached;
+  }
+
   // In advanced mode the expression may reference completed tasks, so don't let the
   // SQL prefilter drop them; the expression itself decides.
   const advanced = prefs.mode === 'advanced' && !!prefs.expr;
@@ -44,7 +71,7 @@ export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
   )) {
     parentOf.set(r.id, r.parent_id);
   }
-  return sorted.filter((i) => {
+  const roots = sorted.filter((i) => {
     let pid = i.parent_id;
     const seen = new Set<string>(); // guard against any parent cycle
     while (pid && !seen.has(pid)) {
@@ -54,4 +81,11 @@ export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
     }
     return true;
   });
+
+  rootsCache.set(key, roots);
+  if (rootsCache.size > ROOTS_CACHE_MAX) {
+    const oldest = rootsCache.keys().next().value; // eldest insertion = least-recent
+    if (oldest !== undefined) rootsCache.delete(oldest);
+  }
+  return roots;
 }

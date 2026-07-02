@@ -4,9 +4,9 @@ Carbon queue processor — reads queued webhook triggers and formats them
 for the Hermes agent. Run by the agent session or a cron job.
 
 Usage:
-    python3 /home/ku7/carbon-process-queue.py          # print next item, mark processed
-    python3 /home/ku7/carbon-process-queue.py --list    # list all unprocessed items
-    python3 /home/ku7/carbon-process-queue.py --clear   # clear the queue
+    python3 /home/user/carbon-process-queue.py          # print next item, mark processed
+    python3 /home/user/carbon-process-queue.py --list    # list all unprocessed items
+    python3 /home/user/carbon-process-queue.py --clear   # clear the queue
 """
 
 import json

@@ -68,7 +68,10 @@ export function SignInGate() {
   }
 
   return (
-    <div className="flex h-full items-center justify-center bg-bg px-6 text-text">
+    <div
+      className="flex h-full items-center justify-center bg-bg px-6 text-text"
+      data-testid="sign-in"
+    >
       <div className="w-full max-w-sm">
         {step === 'url' ? (
           <>

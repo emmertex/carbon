@@ -26,6 +26,9 @@
       agent_start_timer(), agent_stop_timer() — the server fuzzy-matches names, so pass plain
       names (never ids). agent_add() also takes scheduling fields (due_date/reminder_at/
       recurrence) via tasks=[{...}]. See docs/carbon-agent-api.md §6.
+      (Bulk tag add/remove — POST /api/agent/tasks/tag — is available via carbon-nl's
+      `carbon-cli.py tag` but doesn't yet have a helper here; add one if you need it from
+      the webhook flow.)
 
     Natural-language quick example (the server resolves/creates the list + tags):
 
@@ -62,5 +65,5 @@
     
     systemd unit file
     
-    sudo cp /etc/systemd/system/carbon-agent.service ...
+    sudo cp carbon-agent.service /etc/systemd/system/
     sudo systemctl enable --now carbon-agent

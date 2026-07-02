@@ -32,6 +32,7 @@ export function SyncSection({
   return (
     <SettingsSection
       id="sync"
+      testId="settings-sync"
       title="Sync server"
       description="Carbon works fully offline. Log in to a Carbon server to sync across devices. Stay logged out to keep everything local-only."
     >

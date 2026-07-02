@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { bumpRevision, currentRevision } from './dbRevision';
 import {
   getThemeMode,
   getLightTheme,
@@ -161,7 +162,7 @@ function loadIdSet(key: string): Set<string> {
 
 export const useStore = create<AppState>((set, get) => ({
   ready: false,
-  dbRevision: 0,
+  dbRevision: currentRevision(),
   selectedId: null,
   selectedKind: 'item',
   detailOpen: false,
@@ -214,7 +215,7 @@ export const useStore = create<AppState>((set, get) => ({
     localStorage.setItem('carbon.localOnly', v ? '1' : '0');
     set({ localOnly: v });
   },
-  bump: () => set((s) => ({ dbRevision: s.dbRevision + 1 })),
+  bump: () => set(() => ({ dbRevision: bumpRevision() })),
   // Panes are mutually exclusive on compact screens: opening one closes the other.
   // Selecting does NOT auto-open the overlay (mobile needs a 2nd tap); the docked
   // desktop pane shows on selectedId regardless of detailOpen.

@@ -87,6 +87,7 @@ export function QuickAdd({
         )}
         <input
           ref={inputRef}
+          data-testid="quick-add"
           value={value}
           onChange={(e) => {
             setValue(e.target.value);

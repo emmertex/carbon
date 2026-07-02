@@ -36,10 +36,10 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 
 ### PWA & native bridges
 - [Workbox](https://developer.chrome.com/docs/workbox) (`workbox-precaching`) — service-worker precaching.
-- [Capacitor](https://capacitorjs.com/) (`@capacitor/core`, `@capacitor/geolocation`,
+- [Capacitor](https://capacitorjs.com/) (`@capacitor/core`, `@capacitor/device`, `@capacitor/geolocation`,
   `@capacitor/local-notifications`, `@capacitor/push-notifications`) — native runtime for the mobile app.
-- [Tauri](https://tauri.app/) (`@tauri-apps/api`, `@tauri-apps/plugin-notification`) — native runtime
-  for the desktop app.
+- [Tauri](https://tauri.app/) (`@tauri-apps/api`, `@tauri-apps/plugin-notification`,
+  `@tauri-apps/plugin-process`, `@tauri-apps/plugin-updater`) — native runtime for the desktop app.
 
 ### Web build tooling
 - [Vite](https://vite.dev/) (`vite`, `@vitejs/plugin-react`) — dev server and bundler.
@@ -61,7 +61,8 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 ## Desktop app (`@carbon/desktop`)
 
 ### Rust crates
-- [Tauri](https://tauri.app/) (`tauri`, `tauri-build`, `tauri-plugin-notification`) — desktop shell.
+- [Tauri](https://tauri.app/) (`tauri`, `tauri-build`, `tauri-plugin-notification`,
+  `tauri-plugin-global-shortcut`, `tauri-plugin-updater`, `tauri-plugin-process`) — desktop shell.
 - [serde](https://serde.rs/) (`serde`, `serde_json`) — Rust serialization.
 
 ### Tooling
@@ -89,6 +90,10 @@ These are open-source projects Carbon calls at runtime as external services (not
   by default (`https://nominatim.openstreetmap.org`), respecting its ≤1 req/s fair-use policy;
   self-hosted instances are supported via `CARBON_NOMINATIM_URL`. The web client uses the same
   endpoint for browser-side reverse geocoding. Data © OpenStreetMap contributors, [ODbL](https://www.openstreetmap.org/copyright).
+- [Overpass API](https://overpass-api.de/) — used server-side to find the nearest matching brand/POI
+  for the location/where feature, falling back to Nominatim search when it doesn't return a match.
+  The public endpoint (`https://overpass-api.de/api/interpreter`) is used by default; self-hosted
+  instances are supported via `CARBON_OVERPASS_URL`.
 
 ---
 

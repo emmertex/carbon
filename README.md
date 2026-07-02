@@ -91,7 +91,7 @@ Changes made via the API sync to all clients like any other edit.
   - service: rest_command.carbon_geo   # or a notify/rest call
     # POST https://carbon.example.com/api/geo/event
     #   Authorization: Bearer <token with tasks:write>
-    #   {"person":"person.andrew","zone":"Home","event":"enter"}
+    #   {"person":"person.you","zone":"Home","event":"enter"}
   ```
 
   Carbon matches the user's active tasks whose location label equals the zone (or
@@ -122,6 +122,7 @@ Two kinds:
 
 ## Status
 
-Phase A (this build): offline core — capture, projects, Today/Inbox/Flagged/Review, tags,
-due/defer/flag/priority, recurrence, drag-reorder, light/dark, sync.
-Later: richer perspectives & a token-scoped REST API for Home Assistant / Hermes integration.
+Shipped: offline core (capture, projects, Today/Inbox/Flagged/Review, tags,
+due/defer/flag/priority, recurrence, drag-reorder, light/dark, sync), multi-user sync
+server, the token-scoped REST API, push reminders & location, AI agents, CalDAV, and a
+Telegram bot. See [`docs/features.md`](docs/features.md) for the full list.

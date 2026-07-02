@@ -202,6 +202,9 @@ export function TaskRow({
 
   return (
     <div
+      data-testid="task-row"
+      data-title={item.title}
+      data-status={item.status}
       onClick={() => {
         // Collapsed → select (expands). Expanded card → tap opens the full detail.
         // Desktop → select shows the docked pane.

@@ -90,6 +90,34 @@ export async function switchScreen(page: Page, screen: keyof typeof GO_KEY): Pro
   await recordInteraction(page, 'switch', Date.now() - t0);
 }
 
+/** Click the sidebar project with the largest open-count badge and settle on its
+ *  container view. Exercises ContainerView — the project drill-down / full-enrich
+ *  path the list views never hit. */
+export async function openLargestContainer(page: Page): Promise<void> {
+  await blurActive(page);
+  const t0 = Date.now();
+  const ok = await page.evaluate(() => {
+    const links = Array.from(
+      document.querySelectorAll('a[href^="/project/"]'),
+    ) as HTMLAnchorElement[];
+    let best: HTMLAnchorElement | null = null;
+    let bestN = -1;
+    for (const a of links) {
+      // Sidebar rows read "<name> <open-count>"; take the trailing number.
+      const n = parseInt(a.textContent?.match(/(\d+)\s*$/)?.[1] ?? '0', 10);
+      if (n > bestN) {
+        bestN = n;
+        best = a;
+      }
+    }
+    best?.click();
+    return !!best;
+  });
+  if (!ok) return;
+  await page.waitForURL('**/project/**', { timeout: 30_000 });
+  await recordInteraction(page, 'openContainer', Date.now() - t0);
+}
+
 /** Focus the quick-add bar via `c`, type a title, commit with Enter; settle on
  *  the create mutation landing. */
 export async function addTask(page: Page, title: string): Promise<void> {

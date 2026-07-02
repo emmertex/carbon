@@ -39,14 +39,22 @@ function bootApp(): void {
     import.meta.env.DEV &&
     (localStorage.getItem('carbon.perf') === '1' ||
       new URLSearchParams(location.search).has('perf'));
+  const e2eActive =
+    import.meta.env.DEV &&
+    (import.meta.env.VITE_CARBON_E2E === '1' ||
+      localStorage.getItem('carbon.e2e') === '1');
 
   async function boot(): Promise<void> {
     try {
       await initDb();
       registerPersistFlush(); // flush unsaved writes on tab hide/close (no data loss)
-      if (perfActive) {
+      if (perfActive || e2eActive) {
         const { registerDevSeed } = await import('./lib/devSeed');
-        registerDevSeed(); // window.__carbonSeed/__carbonReset for the perf benchmark
+        registerDevSeed(); // window.__carbonSeed/__carbonReset for perf + e2e
+      }
+      if (e2eActive) {
+        const { registerE2eHooks } = await import('./lib/e2e');
+        registerE2eHooks();
       }
       const { initSettingsSync } = await import('./lib/settings-sync');
       initSettingsSync(); // mirror UI prefs / views / perspectives to sync on change
@@ -79,6 +87,6 @@ function bootApp(): void {
   );
 
   createRoot(document.getElementById('root')!).render(
-    perfActive ? tree : <React.StrictMode>{tree}</React.StrictMode>,
+    perfActive || e2eActive ? tree : <React.StrictMode>{tree}</React.StrictMode>,
   );
 }
