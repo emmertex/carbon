@@ -71,29 +71,41 @@ jobs:
           draft: false
           prerelease: false
 
-  # Desktop bundles for Linux + Windows via tauri-action, which also signs the
-  # updater artifacts and publishes/merges latest.json onto the release. Serialised
-  # (max-parallel 1) so the two platforms don't race on the shared latest.json.
-  desktop:
+  # Desktop bundles via tauri-action, which also signs the updater artifacts and
+  # publishes/merges latest.json onto the release. Linux and Windows are SEPARATE
+  # jobs (Linux needs a container, Windows doesn't), serialised via `needs` so the
+  # two don't race on the shared latest.json — desktop-windows runs after
+  # desktop-linux but with `if: always()` so a Linux failure still ships Windows.
+
+  # Linux (.deb/.rpm/.AppImage) is built INSIDE an ubuntu:25.10 container, not on the
+  # bare ubuntu-latest (24.04) runner. 24.04 ships WebKitGTK ~2.44, which aborts with
+  # "Could not create default EGL display: EGL_BAD_PARAMETER" on modern Mesa hosts —
+  # the AppImage bundles that webkit and paints a blank white window. 25.10 ships
+  # WebKitGTK 2.50+, which renders on current GPU stacks. (The .deb/.rpm were never
+  # affected: they use the host's webkit, not a bundled one.) Raising the build base
+  # also raises the AppImage's glibc floor, so it targets current distros; older
+  # hosts use the .deb/.rpm.
+  desktop-linux:
     needs: prepare
-    strategy:
-      max-parallel: 1
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    container: 'ubuntu:25.10'
     steps:
+      # The container image is bare: install the Tauri v2 build deps (and git, so
+      # actions/checkout produces a real .git and the frontend build gets a proper
+      # GIT_HASH). No sudo — we are root in the container.
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git curl wget file ca-certificates build-essential pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf \
+            libssl-dev libsoup-3.0-dev libxdo-dev
+          git config --global --add safe.directory '*'
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Install Linux system deps (Tauri v2)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libappindicator3-dev patchelf
 
       - uses: actions/setup-node@v4
         with:
@@ -108,7 +120,47 @@ jobs:
 
       - run: npm ci
 
-      - name: Build, sign, and upload desktop bundles
+      - name: Build, sign, and upload Linux bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy/appimagetool are themselves AppImages; a container has no FUSE,
+          # so tell them to extract-and-run instead of mounting.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        with:
+          projectPath: apps/desktop
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          # tauri.conf.json single-sources the version from package.json, so no
+          # version args are needed here.
+
+  # Windows (.msi/.exe) on the bare runner. Serialised AFTER desktop-linux (see the
+  # latest.json note above); `if: always()` keeps it running even if Linux failed, as
+  # long as the release was cut — matching the old matrix's fail-fast: false.
+  desktop-windows:
+    needs: [prepare, desktop-linux]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - run: npm ci
+
+      - name: Build, sign, and upload Windows bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
