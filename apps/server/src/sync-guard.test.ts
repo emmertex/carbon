@@ -68,6 +68,17 @@ test('sanitizeOps keeps a write to a shared item but strips an ownership grab', 
   assert.equal('owner_id' in out!.fields, false, 'ownership grab stripped');
 });
 
+test('sanitizeOps does not strip sys_kind (non-identity marker passes through)', () => {
+  const d = db();
+  const [out] = sanitizeOps(
+    d,
+    'alice',
+    [op({ item_id: 'sys1', fields: { type: 'task', title: 'offer', sys_kind: 'federation_offer' } })],
+    NOW,
+  );
+  assert.equal(out!.fields.sys_kind, 'federation_offer', 'sys_kind survives sanitization');
+});
+
 test('sanitizeRecordOps forces comment author to the caller', () => {
   const d = db();
   const it = createItem(d, DEV, { title: 't', ownerId: 'bob' });

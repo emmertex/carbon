@@ -35,6 +35,29 @@ export function isBlocked(db: Db, itemId: string, cache: Map<string, boolean> = 
   return result;
 }
 
+/**
+ * Per-batch memo of each sequential parent's first *active* child, keyed off the
+ * batch's `cache` map so it shares its lifetime. An active child is
+ * sequential-blocked iff it isn't that first active child — computing it once
+ * per parent turns a batch isBlocked pass from O(N²) (one getChildren scan per
+ * sibling) into O(N).
+ */
+const seqFirstActive = new WeakMap<Map<string, boolean>, Map<string, string | null>>();
+
+function firstActiveChildId(db: Db, parentId: string, cache: Map<string, boolean>): string | null {
+  let memo = seqFirstActive.get(cache);
+  if (!memo) {
+    memo = new Map();
+    seqFirstActive.set(cache, memo);
+  }
+  let first = memo.get(parentId);
+  if (first === undefined) {
+    first = getChildren(db, parentId).find((c) => c.status === 'active')?.id ?? null;
+    memo.set(parentId, first);
+  }
+  return first;
+}
+
 function compute(db: Db, itemId: string, cache: Map<string, boolean>): boolean {
   const item = getItem(db, itemId);
   if (!item || item.status !== 'active') return false;
@@ -45,11 +68,11 @@ function compute(db: Db, itemId: string, cache: Map<string, boolean>): boolean {
       // Ancestor cascade: a blocked container blocks everything beneath it.
       if (isBlocked(db, parent.id, cache)) return true;
       // Sequential gating: any earlier sibling still active blocks this one.
+      // `item` is active (guard above), so an earlier active sibling exists
+      // exactly when the parent's first active child is someone else.
       if (parent.order_mode === 'sequential') {
-        for (const sib of getChildren(db, parent.id)) {
-          if (sib.id === item.id) break; // reached self — no earlier blocker
-          if (sib.status === 'active') return true;
-        }
+        const first = firstActiveChildId(db, parent.id, cache);
+        if (first !== null && first !== item.id) return true;
       }
     }
   }

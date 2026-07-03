@@ -14,6 +14,8 @@ import { ensurePushTables, initVapid } from './push';
 import { ensureFcmTable } from './fcm';
 import { ensureAgentTables, ensureAgentUsageTables } from './agents';
 import { ensureUserPrefsTables } from './user-prefs';
+import { ensureNoticeTables } from './notices';
+import { ensureFederationTables, ensureGovernanceTables } from './federation';
 
 export type TestDb = ReturnType<typeof openDb>;
 
@@ -39,6 +41,9 @@ export function makeTestDb(): TestCtx {
   ensureAgentUsageTables(db);
   ensureCaldavTables(db);
   ensureUserPrefsTables(db);
+  ensureNoticeTables(db);
+  ensureFederationTables(db);
+  ensureGovernanceTables(db);
   const deviceId = ensureCaldavDeviceId(db);
   const vapidPublicKey = initVapid(db);
 

@@ -36,6 +36,7 @@ function item(over: Partial<Item>): Item {
     folder_id: null,
     sort_order: 0,
     order_mode: "parallel",
+    sys_kind: null,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     deleted: false,

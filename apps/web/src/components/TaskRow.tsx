@@ -11,6 +11,7 @@ import {
   Ban,
   Eye,
   MoreHorizontal,
+  Sparkles,
 } from 'lucide-react';
 import {
   subtaskProgress,
@@ -29,6 +30,7 @@ import { TagMark } from './TagMark';
 import { abbreviateTagPath } from '@/lib/tagLabel';
 import { ProgressRing } from './ProgressRing';
 import { Avatar } from './Avatar';
+import { RemoteOwnerBadge } from './RemoteOwnerBadge';
 import { RowQuickMenu, type MenuPos } from './RowQuickMenu';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { cn } from '@/lib/cn';
@@ -62,6 +64,9 @@ export interface TaskRowData {
   blocked?: boolean;
   /** Carries an on-hold tag — rendered faded (OmniFocus "on hold"). */
   onHold?: boolean;
+  /** When the item is owned by a federation shadow user, its `home_server` label —
+   *  drives the subtle "from @&lt;host&gt;" badge. Undefined for locally-owned items. */
+  remoteOwner?: string | null;
 }
 
 /** Indentation: subtle, capped, and tighter on phones so deep trees don't run
@@ -102,6 +107,7 @@ export function TaskRow({
   shared,
   blocked,
   onHold,
+  remoteOwner,
   showProject = false,
   indent = 0,
   collapsed,
@@ -269,6 +275,14 @@ export function TaskRow({
               />
             </button>
           )}
+          {item.sys_kind && (
+            // Marks a Carbon-authored system notice (federation offer, billing, …).
+            <Sparkles
+              size={12}
+              className="shrink-0 text-accent"
+              aria-label="From Carbon"
+            />
+          )}
           {titleSlot ?? (
             <span
               className={cn(
@@ -297,6 +311,7 @@ export function TaskRow({
               aria-label="Has comments"
             />
           )}
+          {remoteOwner && <RemoteOwnerBadge homeServer={remoteOwner} />}
         </div>
 
         {showMeta && (item.due_date || (showProject && projectName) || hasChildren) && (

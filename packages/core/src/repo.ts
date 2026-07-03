@@ -50,6 +50,8 @@ interface UserRow extends Row {
   avatar_initial: string | null;
   plan_startup_min: number | null;
   plan_default_estimate_min: number | null;
+  is_remote: number;
+  home_server: string | null;
   created_at: string;
   updated_at: string;
   deleted: number;
@@ -66,6 +68,8 @@ function rowToUser(r: UserRow): User {
     avatar_initial: r.avatar_initial ?? null,
     plan_startup_min: r.plan_startup_min ?? null,
     plan_default_estimate_min: r.plan_default_estimate_min ?? null,
+    is_remote: !!r.is_remote,
+    home_server: r.home_server ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
     deleted: !!r.deleted,
@@ -112,6 +116,8 @@ export function createUser(db: Db, input: CreateUserInput): User {
     avatar_initial: existing?.avatar_initial ?? null,
     plan_startup_min: existing?.plan_startup_min ?? null,
     plan_default_estimate_min: existing?.plan_default_estimate_min ?? null,
+    is_remote: !!existing?.is_remote,
+    home_server: existing?.home_server ?? null,
     created_at: existing?.created_at ?? now,
     updated_at: now,
     deleted: false,
@@ -163,14 +169,15 @@ export function upsertUser(db: Db, user: User): void {
   ]);
   const username = clash ? `${user.username}~${user.id.slice(0, 8)}` : user.username;
   db.run(
-    `INSERT INTO users (id, username, display_name, role, is_bot, avatar_color, avatar_initial, plan_startup_min, plan_default_estimate_min, created_at, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO users (id, username, display_name, role, is_bot, avatar_color, avatar_initial, plan_startup_min, plan_default_estimate_min, is_remote, home_server, created_at, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        username = excluded.username, display_name = excluded.display_name, role = excluded.role,
        is_bot = excluded.is_bot, avatar_color = excluded.avatar_color,
        avatar_initial = excluded.avatar_initial,
        plan_startup_min = excluded.plan_startup_min,
        plan_default_estimate_min = excluded.plan_default_estimate_min,
+       is_remote = excluded.is_remote, home_server = excluded.home_server,
        updated_at = excluded.updated_at, deleted = excluded.deleted`,
     [
       user.id,
@@ -182,6 +189,8 @@ export function upsertUser(db: Db, user: User): void {
       user.avatar_initial,
       user.plan_startup_min,
       user.plan_default_estimate_min,
+      user.is_remote ? 1 : 0,
+      user.home_server,
       user.created_at,
       user.updated_at,
       user.deleted ? 1 : 0,
@@ -230,6 +239,7 @@ interface ItemRow extends Row {
   folder_id: string | null;
   sort_order: number;
   order_mode: string | null;
+  sys_kind: string | null;
   created_at: string;
   updated_at: string;
   deleted: number;
@@ -259,6 +269,7 @@ function rowToItem(r: ItemRow): Item {
     folder_id: r.folder_id,
     sort_order: r.sort_order,
     order_mode: (r.order_mode as OrderMode) || 'parallel',
+    sys_kind: r.sys_kind,
     created_at: r.created_at,
     updated_at: r.updated_at,
     deleted: !!r.deleted,
@@ -388,6 +399,8 @@ export interface CreateItemInput {
   folderId?: string | null;
   sortOrder?: number;
   orderMode?: OrderMode;
+  /** System-notice marker (federation offer, billing issue, …); null = user task. */
+  sysKind?: string | null;
 }
 
 export function createItem(db: Db, deviceId: string, input: CreateItemInput): Item {
@@ -417,6 +430,7 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
     folder_id: input.folderId ?? null,
     sort_order: input.sortOrder ?? nextSortOrder(db, input.parentId ?? null),
     order_mode: input.orderMode ?? 'parallel',
+    sys_kind: input.sysKind ?? null,
     created_at: now,
     updated_at: now,
     deleted: false,
@@ -2137,16 +2151,15 @@ export function itemsMissingCreate(db: Db, ids: string[]): string[] {
   });
 }
 
-export function visibleItemIds(db: Db, userId: string): Set<string> {
+/**
+ * The set of item ids reachable by walking `parent_id` down from `roots`
+ * (the roots themselves plus every descendant). A pure structural BFS over the
+ * `items` tree — no ownership/share/deleted filtering (callers seed `roots` with
+ * whatever they've already authorized). Shared by `visibleItemIds`, the `/sync`
+ * backfill, and (later) per-link federation scope resolution.
+ */
+export function subtreeIds(db: Db, roots: string[]): Set<string> {
   const set = new Set<string>();
-  for (const r of db.all<{ id: string }>('SELECT id FROM items WHERE owner_id = ?', [userId])) {
-    set.add(r.id);
-  }
-  const roots = db
-    .all<{ item_id: string }>('SELECT item_id FROM shares WHERE user_id = ? AND deleted = 0', [
-      userId,
-    ])
-    .map((r) => r.item_id);
   const queue = [...roots];
   roots.forEach((id) => set.add(id));
   while (queue.length) {
@@ -2158,5 +2171,19 @@ export function visibleItemIds(db: Db, userId: string): Set<string> {
       }
     }
   }
+  return set;
+}
+
+export function visibleItemIds(db: Db, userId: string): Set<string> {
+  const set = new Set<string>();
+  for (const r of db.all<{ id: string }>('SELECT id FROM items WHERE owner_id = ?', [userId])) {
+    set.add(r.id);
+  }
+  const roots = db
+    .all<{ item_id: string }>('SELECT item_id FROM shares WHERE user_id = ? AND deleted = 0', [
+      userId,
+    ])
+    .map((r) => r.item_id);
+  for (const id of subtreeIds(db, roots)) set.add(id);
   return set;
 }

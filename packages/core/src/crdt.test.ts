@@ -88,3 +88,23 @@ test('recordOp stamps a monotonic causal ts and applies locally', () => {
   assert.ok(b.ts > a.ts);
   assert.equal(getItem(db, 'item-6')?.title, 'b');
 });
+
+test('sys_kind survives ingest/merge like any nullable field', () => {
+  const db = openMemoryDb();
+  const id = 'item-sys';
+  // A create op carrying sys_kind materialises it on the item.
+  ingestOps(
+    db,
+    [op({ item_id: id, ts: 100, fields: { type: 'task', title: 'offer', sys_kind: 'federation_offer' } })],
+    true,
+  );
+  assert.equal(getItem(db, id)?.sys_kind, 'federation_offer');
+
+  // A later-stamped op can clear it (null = clear this field).
+  ingestOps(db, [op({ item_id: id, ts: 200, fields: { sys_kind: null } })], true);
+  assert.equal(getItem(db, id)?.sys_kind, null);
+
+  // A stale (lower-ts) op must not resurrect it.
+  ingestOps(db, [op({ item_id: id, ts: 150, fields: { sys_kind: 'stale' } })], true);
+  assert.equal(getItem(db, id)?.sys_kind, null);
+});

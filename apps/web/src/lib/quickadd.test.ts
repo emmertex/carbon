@@ -15,6 +15,8 @@ function user(username: string, id = username): User {
     avatar_initial: null,
     plan_startup_min: null,
     plan_default_estimate_min: null,
+    is_remote: false,
+    home_server: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     deleted: false,

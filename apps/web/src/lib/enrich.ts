@@ -94,9 +94,13 @@ export function enrichItems(db: Db, items: Item[]): TaskRowData[] {
   // Shares are almost always absent (single-user); only walk ancestors per row
   // when at least one live share exists.
   const anyShares = !!db.get('SELECT 1 AS x FROM shares WHERE deleted = 0 LIMIT 1');
-  const userById = assigneesByItem.size
-    ? new Map(listUsers(db).map((u) => [u.id, u] as const))
-    : null;
+  // Remote (federation shadow) owners are rare; only build/keep a roster map when a
+  // shadow user actually exists — the same cheap-guard pattern as `anyShares`.
+  const anyRemote = !!db.get('SELECT 1 AS x FROM users WHERE is_remote = 1 AND deleted = 0 LIMIT 1');
+  const userById =
+    assigneesByItem.size || anyRemote
+      ? new Map(listUsers(db).map((u) => [u.id, u] as const))
+      : null;
 
   return items.map((item) => {
     // A task's project is the nearest project ancestor — `parent_id` may be
@@ -113,6 +117,9 @@ export function enrichItems(db: Db, items: Item[]): TaskRowData[] {
           .map((a) => userById.get(a.user_id))
           .filter((u): u is User => !!u && !u.deleted)
       : [];
+    // A "from @host" badge for items owned by a remote peer's (shadow) user.
+    const owner = anyRemote && item.owner_id ? userById?.get(item.owner_id) : undefined;
+    const remoteOwner = owner?.is_remote ? owner.home_server : undefined;
     return {
       item,
       projectId: project?.id ?? null,
@@ -126,6 +133,7 @@ export function enrichItems(db: Db, items: Item[]): TaskRowData[] {
       blocked: item.status === 'active' && isBlocked(db, item.id, blockedCache),
       // On hold = carries an on-hold tag (or a descendant of one). Drives the faded row.
       onHold: held.size > 0 && tags.some((t) => held.has(t.id)),
+      remoteOwner,
     };
   });
 }

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, resolve, join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import {
   migrate,
@@ -11,6 +11,7 @@ import {
   ingestOps,
   ingestRecordOps,
   visibleItemIds,
+  subtreeIds,
   hasWriteAccess,
   listUsers,
   getUser,
@@ -109,6 +110,21 @@ import {
 } from './caldav';
 import { registerAgentApi } from './agent-api';
 import { buildAgentApiDeps } from './agent-ops';
+import { listOpenNotices, getNotice, actOnNotice } from './notices';
+import {
+  resolveHostCeiling,
+  federationRoutes,
+  registerFederationConfigRoutes,
+  bindOfferDelivery,
+  runAllFederationExchanges,
+  fetchFederatedBlob,
+  makeDeliverToPeer,
+  listPeers,
+  type FederationMode,
+  type DeliverToPeer,
+  type BlobStore,
+  type SameHostPeer,
+} from './federation';
 import {
   ensureTelegramTables,
   startTelegramBot,
@@ -117,6 +133,7 @@ import {
   unlinkTelegramUser,
   type TelegramBot,
 } from './telegram';
+import { safeFetch } from './safe-fetch';
 import {
   initTenantDb,
   createTenantRegistry,
@@ -144,6 +161,7 @@ import {
   setTenantAdminEmail,
   setTenantAllowPrivate,
   setTenantHostLmAvailable,
+  setTenantFederationMode,
   deleteTenant,
   provisionTenant,
   validateSubdomain,
@@ -209,6 +227,17 @@ const TENANTS_DIR = resolve(process.env.TENANTS_DIR ?? join(dirname(DB_PATH), 't
 // Days of access a self-service signup gets before the workspace locks (renew gate).
 const SIGNUP_TRIAL_DAYS = Math.max(1, Number(process.env.SIGNUP_TRIAL_DAYS) || 30);
 
+// Federation host ceiling (Gate 1). The maximum federation scope this host permits:
+//   off           — L1 only, no federation anywhere on this host (default)
+//   intra_server  — same-host cross-tenant (L2) allowed, external (L3) blocked
+//   cross_server  — L2 + L3 allowed
+// Per-tenant `federation_mode` (control DB) can pin a tenant below this. Single-tenant
+// self-host (BASE_DOMAIN unset / the 'default' tenant) has no peer, so it resolves to off.
+const FEDERATION_MODE_ENV: 'off' | 'intra_server' | 'cross_server' = (() => {
+  const raw = process.env.FEDERATION_MODE?.trim().toLowerCase();
+  return raw === 'intra_server' || raw === 'cross_server' ? raw : 'off';
+})();
+
 // ----- Telegram bot (optional, per-server) ----------------------------------
 // One bot for the whole server. Users link their individual Carbon user via a one-time code
 // from Settings → Telegram, then drive the same NL agent over chat. Disabled when the token
@@ -265,6 +294,20 @@ function agentsAllowPrivate(rec: TenantRecord | null): boolean {
   return !!rec.allow_private_endpoints;
 }
 
+/** The resolved federation host ceiling (Gate 1) for a tenant: the per-tenant
+ *  `federation_mode` override if set, else the FEDERATION_MODE env default.
+ *  Single-tenant self-host (BASE_DOMAIN unset, or the operator's own 'default'
+ *  tenant) has no meaningful peer and always resolves to `off`. Mirrors the
+ *  `agentsAllowPrivate` env-default-plus-override pattern. */
+function resolveFederationMode(rec: TenantRecord | null): FederationMode {
+  return resolveHostCeiling({
+    override: rec?.federation_mode,
+    envDefault: FEDERATION_MODE_ENV,
+    // No peer for single-tenant self-host or the operator's own 'default' tenant.
+    isSelfHost: !BASE_DOMAIN || !rec || rec.id === 'default',
+  });
+}
+
 /** Total bytes stored in a (flat) content-addressed blobs directory. */
 function blobsDirBytes(dir: string): number {
   let total = 0;
@@ -284,9 +327,21 @@ function blobsDirBytes(dir: string): number {
   return total;
 }
 
-function buildTenantApp(ctx: TenantCtx): FetchApp {
+function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp {
   const { db, serverDeviceId, vapidPublicKey } = ctx;
   const BLOBS_DIR = ctx.blobsDir;
+  // The tenant's content-addressed blob store as a narrow capability, so federation's
+  // blob serve/fetch (Phase 5) shares the SAME on-disk store as `GET/POST /api/blobs/:hash`
+  // without duplicating the fs/path layout. `store` is only ever reached with already
+  // hash-verified bytes (federation.ts `storeVerifiedBlob` re-hashes first, mirroring A4).
+  const blobStore: BlobStore = {
+    has: (hash) => existsSync(join(BLOBS_DIR, hash)),
+    read: (hash) => {
+      const path = join(BLOBS_DIR, hash);
+      return existsSync(path) ? readFileSync(path) : null;
+    },
+    store: (hash, bytes) => writeFileSync(join(BLOBS_DIR, hash), bytes),
+  };
   // Per-request: may this workspace's agents reach private/LAN endpoints? (host-admin flag)
   const allowPrivate = (): boolean =>
     agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id));
@@ -546,18 +601,8 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     // after it synced past those ops). Send the full subtree regardless of cursor —
     // applyOp/record merge are idempotent, so re-sent ops are harmless.
     if (!open && Array.isArray(body.need) && body.need.length) {
-      const subtree = new Set<string>();
-      const queue = body.need.filter((id) => typeof id === 'string' && visible!.has(id));
-      queue.forEach((id) => subtree.add(id));
-      while (queue.length) {
-        const parent = queue.shift()!;
-        for (const k of db.all<{ id: string }>('SELECT id FROM items WHERE parent_id = ?', [parent])) {
-          if (!subtree.has(k.id)) {
-            subtree.add(k.id);
-            queue.push(k.id);
-          }
-        }
-      }
+      const roots = body.need.filter((id) => typeof id === 'string' && visible!.has(id));
+      const subtree = subtreeIds(db, roots);
       if (subtree.size) {
         const seenOps = new Set(ops.map((o) => o.id));
         for (const r of db.all<OpRow>(
@@ -646,13 +691,27 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     return false;
   }
 
-  api.get('/blobs/:hash', (c) => {
+  api.get('/blobs/:hash', async (c) => {
     const hash = c.req.param('hash');
     if (!isHash(hash)) return c.json({ error: 'bad hash' }, 400);
     // 404 (not 403) on no-access so the response never confirms a blob exists.
     if (!canReadBlob(c.get('userId'), hash)) return c.json({ error: 'not found' }, 404);
     const path = join(BLOBS_DIR, hash);
-    if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
+    // Fetch-from-peer fallback (Phase 5): the blob is absent locally but the caller can
+    // see a referencing item. If that hash belongs to a FEDERATED attachment (referenced
+    // within an active inbound link's granted subtree — `fetchFederatedBlob` scopes to
+    // exactly that), fetch it over the link, hash-verify (A4), cache, and serve. A
+    // NON-federated missing blob has no such link, so `fetchFederatedBlob` returns null
+    // and we fall through to the unchanged 404 — the local path is byte-for-byte the same.
+    if (!existsSync(path)) {
+      const fetched = await fetchFederatedBlob(db, deliverToPeer, blobStore, hash);
+      if (fetched) {
+        return new Response(new Uint8Array(fetched), {
+          headers: { 'Content-Type': 'application/octet-stream' },
+        });
+      }
+      return c.json({ error: 'not found' }, 404);
+    }
     return new Response(new Uint8Array(readFileSync(path)), {
       headers: { 'Content-Type': 'application/octet-stream' },
     });
@@ -970,6 +1029,54 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
   api.delete('/telegram', requireScope('tasks:read'), (c) => {
     const removed = unlinkTelegramUser(controlDb, ctx.id, c.get('userId'));
     return c.json({ ok: true, removed });
+  });
+
+  // ----- system notices (the reusable "Carbon task" primitive) ----------------
+  // Human-user routes: acting on a notice is session-authed to the addressed user
+  // only. An API token must never act on someone's notice (a leaked task body
+  // can't be actioned by a third party), so both routes reject token auth — the
+  // same human-session-only posture as requireAdmin.
+  const requireSession: MiddlewareHandler<Env> = async (c, next) => {
+    if (c.get('authMethod') === 'token') return c.json({ error: 'forbidden' }, 403);
+    return next();
+  };
+
+  api.get('/notices', requireSession, (c) => {
+    const userId = c.get('userId');
+    return c.json({ notices: listOpenNotices(db, userId) });
+  });
+
+  api.post('/notices/:id/act', requireSession, async (c) => {
+    const userId = c.get('userId');
+    const notice = getNotice(db, c.req.param('id'));
+    if (!notice) return c.json({ error: 'not found' }, 404);
+    // Gate 3 posture: only the addressed user may act on their own notice.
+    if (notice.user_id !== userId) return c.json({ error: 'forbidden' }, 403);
+    const b = (await c.req.json().catch(() => ({}))) as { action?: string };
+    const action = b.action ?? 'dismiss';
+    const resolved = await actOnNotice(db, serverDeviceId, notice, action);
+    return c.json({ notice: resolved });
+  });
+
+  // ----- federation: the Settings → Federation panel's REST surface -----------
+  // Thin session/admin-authed config routes over the federation storage helpers
+  // (the secret-authed offer/inbound/sync routes live in the `fedApi` sub-app below).
+  registerFederationConfigRoutes(api, {
+    db,
+    resolveMode: () =>
+      resolveFederationMode(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
+    sessionAuth: requireSession,
+    adminAuth: requireAdmin,
+    // Supplied so revoking an outbound (owner) link sends a final retract-all to the
+    // grantee before tearing the link down (the grantee drops the whole shared subtree).
+    deliverToPeer,
+    // Our identity for the mutual-whitelist check (how a peer stores US on its list).
+    myLabel: ctx.subdomain || 'default',
+    myBaseUrl: BASE_DOMAIN && ctx.subdomain ? `${ctx.subdomain}.${BASE_DOMAIN}` : undefined,
+    // Same-host peer access for the directory route's mutual-whitelist gate, resolved
+    // in-process via the registry (no network hop). `registry` is referenced lazily —
+    // this closure only runs at request time, well after module init.
+    sameHostPeer: (peerSubdomain) => makeSameHostPeer(peerSubdomain),
   });
 
   // ----- admin: API tokens ----------------------------------------------------
@@ -1450,8 +1557,27 @@ function buildTenantApp(ctx: TenantCtx): FetchApp {
     }
   });
 
+  // Federation routes (Phase 2): mounted under /api/federation as their OWN sub-app
+  // so the secret-authed inbound/confirm/sync routes bypass the tenant `api`'s global
+  // basicAuth; the outbound /offers route re-applies basicAuth internally (sessionAuth)
+  // to identify the human caller.
+  const fedApi = federationRoutes({
+    db,
+    serverDeviceId,
+    myLabel: ctx.subdomain || 'default',
+    // Our externally-reachable base for an L3 callback: `https://<subdomain>.<apex>`.
+    // Only meaningful on a multi-tenant host (BASE_DOMAIN set); unset for self-host.
+    myBaseUrl: BASE_DOMAIN && ctx.subdomain ? `${ctx.subdomain}.${BASE_DOMAIN}` : undefined,
+    resolveMode: () =>
+      resolveFederationMode(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
+    deliverToPeer,
+    blobStore,
+    sessionAuth: basicAuth(db, !BASE_DOMAIN),
+  });
+
   const tenantApp = new Hono<Env>();
   tenantApp.route('/api', api);
+  tenantApp.route('/api/federation', fedApi);
   return tenantApp;
 }
 
@@ -1468,7 +1594,66 @@ const defaultCtx = initTenantDb({
   blobsDir: BLOBS_DIR,
 });
 bootstrapUsers(defaultCtx.db, process.env.AUTH_USERS);
-const defaultApp = buildTenantApp(defaultCtx);
+
+/** Whether federation's L3 transport may reach a private/loopback/LAN peer over
+ *  HTTPS. `deliverToPeer` is a server-wide seam (it carries no per-request tenant
+ *  identity), so we resolve the allowance globally, reusing the first two clauses of
+ *  `agentsAllowPrivate`: single-tenant self-host always allows (a self-hoster
+ *  federating to a Tailscale/LAN peer), and ALLOW_PRIVATE_AGENT_ENDPOINTS=1 forces it
+ *  on globally. A public multi-tenant host stays SSRF-guarded — `cross_server` is the
+ *  gated advanced tier there anyway, and private/loopback peers are refused. */
+function federationAllowPrivate(): boolean {
+  if (!BASE_DOMAIN) return true; // single-tenant self-host
+  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === '1') return true; // global override
+  return false;
+}
+
+/**
+ * Same-host peer access for the directory route's mutual-whitelist gate: resolve a
+ * peer subdomain to its LIVE tenant ctx via the registry and expose the two reads the
+ * gate needs — whether the peer's whitelist contains US, and its human roster. Returns
+ * null when the subdomain is not a loadable same-host tenant. A `function` declaration
+ * (hoisted) so `buildTenantApp` below can reference it; `registry` is read lazily inside
+ * the returned closures (they only run at request time, well after module init).
+ */
+function makeSameHostPeer(peerSubdomain: string): SameHostPeer | null {
+  const peerCtx = registry.getCtx(peerSubdomain);
+  if (!peerCtx) return null;
+  const peerDb = peerCtx.db;
+  return {
+    // The peer→us half of mutuality: is one of OUR identities on the peer's ALLOW-list?
+    // Matched on either our base_url or our subdomain label, the same shape the offer
+    // gate's `peerWhitelisted` uses (peers may be stored by base_url OR subdomain). Deny
+    // rows live in the same table but must not count as a whitelist ⇒ filter to 'allow'.
+    hasWhitelisted: (myBaseUrl, myLabel) =>
+      listPeers(peerDb, 'allow').some(
+        (p) =>
+          p.subdomain === myLabel ||
+          p.subdomain === myBaseUrl ||
+          p.base_url === myBaseUrl ||
+          p.base_url === myLabel,
+      ),
+    // Humans only: non-deleted (listUsers), non-bot, and non-shadow (is_remote) — we do
+    // not surface a peer's own mirrored remote users. Projected via the shared `publicUser`.
+    roster: () =>
+      listUsers(peerDb)
+        .filter((u) => !u.is_bot && !u.is_remote)
+        .map(publicUser),
+  };
+}
+
+// The peer-delivery seam is built by `makeDeliverToPeer` (federation.ts): one code
+// path for L2 (same-host in-process loopback) and L3 (cross-server HTTPS via safeFetch,
+// SSRF-guarded unless allowPrivate). `registry` is referenced lazily below; this closure
+// only runs at request time, well after module init, so the reference is safe.
+const deliverToPeer: DeliverToPeer = makeDeliverToPeer({
+  getApp: (subdomain) => registry.getApp(subdomain),
+  baseDomain: BASE_DOMAIN,
+  httpFetch: safeFetch,
+  allowPrivate: federationAllowPrivate,
+});
+
+const defaultApp = buildTenantApp(defaultCtx, deliverToPeer);
 
 const controlDb = openControlDb(CONTROL_DB_PATH);
 bootstrapHostAdmins(controlDb, process.env.HOST_ADMINS);
@@ -1481,11 +1666,21 @@ const registry = createTenantRegistry({
   defaultApp,
   resolve: (subdomain) => resolveTenantLocation(controlDb, subdomain),
   listActive: () => listActiveTenants(controlDb),
-  buildApp: buildTenantApp,
+  buildApp: (ctx) => buildTenantApp(ctx, deliverToPeer),
   cap: Number(process.env.TENANT_CACHE_CAP ?? 200),
 });
 
-startReminderScheduler(() => registry.activeDbs());
+// Federation exchange sweep piggybacks the reminder-sweep tick (no competing timer).
+// Each tick runs one bidirectional exchange round for every active link across active
+// tenant DBs; same-host both-tenants-in-one-process is fine (deliverToPeer loops back).
+startReminderScheduler(
+  () => registry.activeDbs(),
+  () =>
+    runAllFederationExchanges(
+      () => registry.activeCtxs().map((ctx) => ({ db: ctx.db, myLabel: ctx.subdomain || 'default' })),
+      deliverToPeer,
+    ),
+);
 startGpsScheduler(() => registry.activeDbs());
 startCaldavScheduler(() =>
   registry.activeCtxs().map((ctx) => ({
@@ -1977,6 +2172,7 @@ host.patch('/tenants/:id', async (c) => {
     maxUsers?: number | null; // human-user cap (null = server default, 0 = unlimited)
     allowPrivateEndpoints?: boolean; // let this workspace's agents reach private/LAN hosts
     hostLmAvailable?: boolean; // let this workspace select the host-shared LM
+    federationMode?: 'off' | 'intra_server' | 'cross_server' | null; // Gate 1 override (null = env default)
   };
   if (b.status) {
     setTenantStatus(controlDb, id, b.status);
@@ -2001,6 +2197,14 @@ host.patch('/tenants/:id', async (c) => {
   }
   if ('hostLmAvailable' in b) {
     setTenantHostLmAvailable(controlDb, id, !!b.hostLmAvailable);
+  }
+  if ('federationMode' in b) {
+    const m = b.federationMode;
+    setTenantFederationMode(
+      controlDb,
+      id,
+      m === 'off' || m === 'intra_server' || m === 'cross_server' ? m : null,
+    );
   }
   return c.json({ ...getTenantById(controlDb, id) });
 });

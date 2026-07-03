@@ -662,6 +662,8 @@ export function publicUser(u: User) {
     avatar_initial: u.avatar_initial,
     plan_startup_min: u.plan_startup_min,
     plan_default_estimate_min: u.plan_default_estimate_min,
+    is_remote: u.is_remote,
+    home_server: u.home_server,
   };
 }
 

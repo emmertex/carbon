@@ -38,6 +38,10 @@ export interface TenantRecord {
   /** 1 = this workspace may select the host-shared LM (see host-lm.ts) for NL commands /
    *  Telegram; 0 = not offered. Host-admin controlled; seeded at provision time. */
   host_lm_available: number | null;
+  /** Host-ceiling override for federation (Gate 1). One of `off`|`intra_server`|
+   *  `cross_server`; null = inherit the FEDERATION_MODE env default. Host-admin
+   *  controlled; lets a host pin one abusive tenant below the global default. */
+  federation_mode: string | null;
 }
 
 /** Lock = derived state. A workspace is "locked" (soft gate) when it is operationally
@@ -140,6 +144,8 @@ export function openControlDb(path: string): Db {
   // (1) for pre-existing tenants; new tenants get an explicit value from
   // HOST_LM_AVAILABLE_NEW_ACCOUNTS at provision time (see provisionTenant below).
   ensureColumn(db, 'tenants', 'host_lm_available', 'INTEGER NOT NULL DEFAULT 1');
+  // Federation host-ceiling override (Gate 1). Null = inherit FEDERATION_MODE env default.
+  ensureColumn(db, 'tenants', 'federation_mode', 'TEXT');
   // Subscription columns added for Square auto-renewing subscriptions.
   ensureColumn(db, 'subscriptions', 'square_customer_id', 'TEXT');
   ensureColumn(db, 'subscriptions', 'square_subscription_id', 'TEXT');
@@ -295,6 +301,16 @@ export function setTenantAllowPrivate(db: Db, id: string, allow: boolean): void 
 /** Host-admin: grant/revoke this workspace's access to the host-shared LM. */
 export function setTenantHostLmAvailable(db: Db, id: string, available: boolean): void {
   db.run('UPDATE tenants SET host_lm_available = ? WHERE id = ?', [available ? 1 : 0, id]);
+}
+
+/** Host-admin federation host-ceiling override (Gate 1). `off`|`intra_server`|
+ *  `cross_server`, or null to reset to the FEDERATION_MODE env default. */
+export function setTenantFederationMode(
+  db: Db,
+  id: string,
+  mode: 'off' | 'intra_server' | 'cross_server' | null,
+): void {
+  db.run('UPDATE tenants SET federation_mode = ? WHERE id = ?', [mode, id]);
 }
 
 /** Soft-delete then remove the tenant's data dir. Caller handles export/grace first. */

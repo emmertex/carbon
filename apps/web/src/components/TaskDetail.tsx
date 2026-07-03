@@ -58,8 +58,11 @@ import {
   type Item,
 } from "@carbon/core";
 import { ColorSwatches } from "./ColorSwatches";
+import { SystemNoticeCard } from "./SystemNoticeCard";
+import { RemoteOwnerBadge } from "./RemoteOwnerBadge";
 import { GeoEditor } from "./GeoEditor";
 import { CalDavSettings } from "./CalDavSettings";
+import { WorkspaceShare } from "./WorkspaceShare";
 import { getServerConfig } from "@/lib/config";
 import { Comments } from "./Comments";
 import { Attachments } from "./Attachments";
@@ -423,6 +426,9 @@ export function TaskDetail({ id }: { id: string }) {
   } = data;
   const isProject = item.type === "project";
   const rosterById = new Map(roster.map((u) => [u.id, u]));
+  // "From @host" provenance: the owner is a federation shadow (remote) user.
+  const ownerUser = item.owner_id ? rosterById.get(item.owner_id) : undefined;
+  const ownerRemoteServer = ownerUser?.is_remote ? ownerUser.home_server : null;
   const assignedIds = new Set(assignees.map((a) => a.user_id));
   const shareableUsers = roster.filter((u) => u.id !== currentUser?.id);
   const done = item.status === "done";
@@ -674,6 +680,10 @@ export function TaskDetail({ id }: { id: string }) {
       </header>
 
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        {/* System notice ("from Carbon") — a distinct card + action(s) for
+            server-authored tasks (federation offers, billing, invoices, …). */}
+        {item.sys_kind && <SystemNoticeCard item={item} />}
+
         {/* Always-visible essentials */}
         <div className="flex items-start gap-2.5">
           <button
@@ -736,6 +746,11 @@ export function TaskDetail({ id }: { id: string }) {
                 </button>
               ))}
             </div>
+            {ownerRemoteServer && (
+              <div className="mt-1.5">
+                <RemoteOwnerBadge homeServer={ownerRemoteServer} />
+              </div>
+            )}
           </div>
         </div>
 
@@ -1360,6 +1375,13 @@ export function TaskDetail({ id }: { id: string }) {
                   })}
                 </div>
               </div>
+            )}
+
+            {/* Share the currently-open item with a user in another Carbon
+                workspace (federation). Only renders when this workspace can
+                federate at all; the server enforces every gate on submit. */}
+            {!!getServerConfig().url && (
+              <WorkspaceShare rootItemId={id} rootTitle={item.title} />
             )}
           </Section>
         )}

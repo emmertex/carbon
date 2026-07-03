@@ -5,6 +5,30 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+## v0.6.0
+**Federation & cross-workspace sharing**
+- Share a project and its subtree with **another workspace** — on the same Carbon server or a
+  different Carbon host — with edits flowing **both ways** (read or write).
+- **Three gates, off by default.** A server-host ceiling (`FEDERATION_MODE`:
+  off / intra_server / cross_server, overridable per workspace), a workspace-admin policy
+  (workspace-only / admin-approved whitelist / user-approved), and per-user approval. Nothing
+  leaves a workspace unless all three allow it.
+- **Approve in your Inbox.** An incoming share offer arrives as a "from Carbon" task with
+  Approve / Decline — no separate notifications screen. Declining notifies the sender and clears
+  the pending link.
+- **Settings → Federation** panel: set the policy, manage the peer whitelist (admin), send an
+  offer, and view/revoke links. You can also share to a workspace straight from a task.
+- **Find people:** between two same-server workspaces that have whitelisted each other, pick a
+  recipient from a directory instead of typing their address.
+- **Attachments** are fetched on demand from the owning peer and hash-verified before caching.
+  Tags aren't federated, and AI agents never run on federated content.
+- **Unsharing retracts:** moving an item out of a shared subtree (or revoking) now removes the
+  peer's copy instead of leaving a stale one.
+- Cross-server (different-host) transport is **new** — behind NAT you'll need a reverse proxy or
+  Tailscale, and it's worth verifying in your own setup. See [docs/federation.md](docs/federation.md).
+- Under the hood: a reusable **system-notice** mechanism (the server can drop a marked task into
+  your Inbox) that federation approvals use and future billing/invoice messages can reuse.
+
 ## v0.5.5
 **UI Polishing**  
 - Made CalDAV Settings less technically worded

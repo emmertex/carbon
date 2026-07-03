@@ -17,6 +17,7 @@ import {
   setTenantStatus,
   setTenantExpiry,
   setTenantLock,
+  setTenantFederationMode,
   deleteTenant,
   tenantLockState,
   validateSubdomain,
@@ -29,6 +30,7 @@ import {
   resolveDeleteToken,
   gcPendingDeletes,
 } from './control';
+import { resolveHostCeiling, type FederationMode } from './federation';
 
 let tenantsDir: string;
 
@@ -228,6 +230,70 @@ describe('tenant status management', () => {
     setTenantLock(db, id, true);
     setTenantLock(db, id, false);
     assert.equal(getTenantById(db, id)!.locked_at, null);
+  });
+});
+
+// ─── federation host-ceiling override (Gate 1) ────────────────────────────────
+
+describe('tenant federation_mode', () => {
+  test('column defaults to null (inherit env) and round-trips through the setter', () => {
+    const db = openControlDb(':memory:');
+    const { id } = provisionTenant(db, tenantsDir, {
+      subdomain: 'fedmode',
+      adminUsername: 'u',
+      adminPassword: 'p',
+    });
+    // New tenants have no override — null means "inherit the FEDERATION_MODE env default".
+    assert.equal(getTenantById(db, id)!.federation_mode, null);
+
+    setTenantFederationMode(db, id, 'intra_server');
+    assert.equal(getTenantById(db, id)!.federation_mode, 'intra_server');
+
+    setTenantFederationMode(db, id, 'cross_server');
+    assert.equal(getTenantById(db, id)!.federation_mode, 'cross_server');
+
+    // null resets back to inheriting the env default.
+    setTenantFederationMode(db, id, null);
+    assert.equal(getTenantById(db, id)!.federation_mode, null);
+  });
+
+  test('resolution: env default applies when the override is null', () => {
+    for (const envDefault of ['off', 'intra_server', 'cross_server'] as FederationMode[]) {
+      assert.equal(
+        resolveHostCeiling({ override: null, envDefault, isSelfHost: false }),
+        envDefault,
+      );
+    }
+  });
+
+  test('resolution: a per-tenant override beats the env default', () => {
+    // env says off, but this tenant is pinned up to cross_server, and vice-versa.
+    assert.equal(
+      resolveHostCeiling({ override: 'cross_server', envDefault: 'off', isSelfHost: false }),
+      'cross_server',
+    );
+    assert.equal(
+      resolveHostCeiling({ override: 'off', envDefault: 'cross_server', isSelfHost: false }),
+      'off',
+    );
+    assert.equal(
+      resolveHostCeiling({ override: 'intra_server', envDefault: 'cross_server', isSelfHost: false }),
+      'intra_server',
+    );
+  });
+
+  test('resolution: single-tenant self-host always collapses to off', () => {
+    assert.equal(
+      resolveHostCeiling({ override: 'cross_server', envDefault: 'cross_server', isSelfHost: true }),
+      'off',
+    );
+  });
+
+  test('resolution: an unrecognised override falls back to the env default', () => {
+    assert.equal(
+      resolveHostCeiling({ override: 'garbage', envDefault: 'intra_server', isSelfHost: false }),
+      'intra_server',
+    );
   });
 });
 

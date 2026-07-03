@@ -39,6 +39,8 @@ test('upsertUser de-collides a duplicate username instead of throwing', () => {
     avatar_initial: null,
     plan_startup_min: null,
     plan_default_estimate_min: null,
+    is_remote: false,
+    home_server: null,
     created_at: '2026-06-24T00:00:00.000Z',
     updated_at: '2026-06-24T00:00:00.000Z',
     deleted: false,

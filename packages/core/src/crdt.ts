@@ -234,6 +234,7 @@ export function createPatch(item: Item): ItemPatch {
     folder_id: item.folder_id,
     sort_order: item.sort_order,
     order_mode: item.order_mode,
+    sys_kind: item.sys_kind,
     deleted: item.deleted,
   };
 }

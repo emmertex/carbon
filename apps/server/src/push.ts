@@ -205,12 +205,18 @@ export async function checkReminders(db: Db): Promise<void> {
 /**
  * Sweep reminders for every active tenant once a minute. `dbs` is re-evaluated each
  * tick so newly-provisioned tenants are picked up; reminders fire even when no
- * client is connected (push to a closed PWA).
+ * client is connected (push to a closed PWA). `onTick` (optional) piggybacks the SAME
+ * timer — the federation exchange sweep rides here rather than adding a competing timer.
  */
-export function startReminderScheduler(dbs: () => Db[]): void {
+export function startReminderScheduler(dbs: () => Db[], onTick?: () => void | Promise<void>): void {
   setInterval(() => {
     for (const db of dbs()) {
       void checkReminders(db).catch((e) => console.error('[carbon] reminder scan failed:', e));
+    }
+    if (onTick) {
+      void Promise.resolve()
+        .then(onTick)
+        .catch((e) => console.error('[carbon] sweep onTick failed:', e));
     }
   }, 60_000);
 }

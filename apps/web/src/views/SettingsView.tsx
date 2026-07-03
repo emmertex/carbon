@@ -19,6 +19,7 @@ import { AppearanceSection } from '@/components/settings/AppearanceSection';
 import { FeaturesSection } from '@/components/settings/FeaturesSection';
 import { GesturesSection } from '@/components/settings/GesturesSection';
 import { SyncSection } from '@/components/settings/SyncSection';
+import { FederationSection } from '@/components/settings/FederationSection';
 import { IntegrationsDocs } from '@/components/settings/IntegrationsDocs';
 import { AboutSection } from '@/components/settings/AboutSection';
 import {
@@ -32,6 +33,7 @@ const GROUPS: NavGroup[] = [
   { id: 'general', label: 'General' },
   { id: 'tasks', label: 'Tasks & Planning' },
   { id: 'account', label: 'Account & Sync' },
+  { id: 'federation', label: 'Federation' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'integrations', label: 'Integrations' },
   { id: 'admin', label: 'Admin' },
@@ -77,6 +79,7 @@ export function SettingsView() {
     { id: 'profile', group: 'account', show: (c) => c.signedIn, render: () => <Profile /> },
     { id: 'sync', group: 'account', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },
     { id: 'subscription', group: 'account', show: (c) => c.isAdmin && c.hasServer, render: () => <Subscription /> },
+    { id: 'federation', group: 'federation', show: (c) => c.signedIn && c.hasServer, render: () => <FederationSection /> },
     { id: 'data', group: 'account', show: () => true, render: () => <DataBackup /> },
     { id: 'reminders', group: 'notifications', show: () => true, render: () => <Reminders /> },
     { id: 'this-device', group: 'notifications', show: (c) => c.signedIn && c.hasServer, render: () => <ThisDevice /> },

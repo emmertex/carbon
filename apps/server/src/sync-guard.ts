@@ -12,6 +12,9 @@ export function sanitizeOps(db: Db, userId: string, ops: Op[], now = Date.now())
   const out: Op[] = [];
   for (const op of ops) {
     if (!op || typeof op !== 'object' || typeof op.item_id !== 'string') continue;
+    // Fields pass through verbatim except `owner_id` (handled below). Non-identity,
+    // non-ownership markers like `color`/`note`/`sys_kind` are not stripped — a
+    // system-notice item legitimately syncs its `sys_kind` to the owner's devices.
     const fields: ItemPatch = { ...(op.fields ?? {}) };
     const existing = db.get<{ owner_id: string | null }>(
       'SELECT owner_id FROM items WHERE id = ?',

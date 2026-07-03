@@ -382,4 +382,27 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 17,
+  // System-notice marker: a first-class item field flagging an item as a
+  // Carbon-authored task (federation offers, billing issues, invoices, …).
+  // NULL = an ordinary user task. A plain nullable TEXT column — no CHECK
+  // constraint, so no table rebuild; it flows through the op-log like any field.
+  up: `ALTER TABLE items ADD COLUMN sys_kind TEXT;`,
+});
+
+MIGRATIONS.push({
+  version: 18,
+  // Federation shadow users: a user row can represent a remote peer's user so
+  // shares/assignees/comments render against them like any local user.
+  // `is_remote=1` + `home_server=<host>`; the row's id is namespaced
+  // `remote:<host>:<remoteUserId>` (see federation.ts provisionShadowUser).
+  // Plain ALTER TABLE — these ride the users record-op stream like the other
+  // user columns, so a shadow user materialises on every client.
+  up: `
+    ALTER TABLE users ADD COLUMN is_remote INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN home_server TEXT;
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

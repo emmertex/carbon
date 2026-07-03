@@ -61,10 +61,27 @@ interface BenchResult {
   ms: number;
 }
 
-function bench(label: string, fn: () => void): number {
-  const start = performance.now();
-  fn();
-  return performance.now() - start;
+/**
+ * Best-of-`runs` timing. A single cold run gates CI on whatever the shared
+ * runner's scheduler happened to do that instant; the minimum of a few runs is
+ * stable while still catching real complexity regressions. `setup` re-creates
+ * any state a repeat run would otherwise skip (fresh DB for ingest, fresh
+ * cache for isBlocked) — it runs outside the timed window.
+ */
+function bench<T = undefined>(
+  label: string,
+  fn: (ctx: T) => void,
+  opts: { runs?: number; setup?: () => T } = {},
+): number {
+  const runs = opts.runs ?? 1;
+  let best = Infinity;
+  for (let i = 0; i < runs; i++) {
+    const ctx = opts.setup?.() as T;
+    const start = performance.now();
+    fn(ctx);
+    best = Math.min(best, performance.now() - start);
+  }
+  return best;
 }
 
 // ─── benchmark suites ────────────────────────────────────────────────────────
@@ -75,7 +92,7 @@ describe('perspective query benchmarks', () => {
   for (const n of MILESTONES) {
     test(`inbox at N=${n}`, () => {
       const { db } = seedInboxTasks(n);
-      const ms = bench('inbox', () => inbox(allItems(db)));
+      const ms = bench('inbox', () => inbox(allItems(db)), { runs: n === 100 ? 3 : 1 });
       results.push({ n, label: 'inbox', ms });
       if (n === 100) assert.ok(ms < HARD_CAP_MS, `inbox at N=100 took ${ms.toFixed(1)}ms > ${HARD_CAP_MS}ms`);
     });
@@ -83,14 +100,14 @@ describe('perspective query benchmarks', () => {
     test(`today at N=${n}`, () => {
       const { db } = seedTasks(n);
       const now = new Date();
-      const ms = bench('today', () => today(allItems(db), now));
+      const ms = bench('today', () => today(allItems(db), now), { runs: n === 100 ? 3 : 1 });
       results.push({ n, label: 'today', ms });
       if (n === 100) assert.ok(ms < HARD_CAP_MS, `today at N=100 took ${ms.toFixed(1)}ms > ${HARD_CAP_MS}ms`);
     });
 
     test(`flagged at N=${n}`, () => {
       const { db } = seedTasks(n);
-      const ms = bench('flagged', () => flagged(allItems(db)));
+      const ms = bench('flagged', () => flagged(allItems(db)), { runs: n === 100 ? 3 : 1 });
       results.push({ n, label: 'flagged', ms });
       if (n === 100) assert.ok(ms < HARD_CAP_MS, `flagged at N=100 took ${ms.toFixed(1)}ms > ${HARD_CAP_MS}ms`);
     });
@@ -116,7 +133,6 @@ describe('perspective query benchmarks', () => {
 describe('CRDT merge benchmarks', () => {
   for (const n of MILESTONES) {
     test(`ingest ${n} ops from 2 devices`, () => {
-      const db = openMemoryDb();
       const now = Date.now();
       const ops: Op[] = [];
       for (let i = 0; i < n; i++) {
@@ -136,7 +152,12 @@ describe('CRDT merge benchmarks', () => {
           fields: { title: `Task from B ${i}` },
         });
       }
-      const ms = bench('crdt-merge', () => ingestOps(db, ops, false));
+      // Fresh DB per run — re-ingesting into the same DB would time the
+      // dedup path, not the merge.
+      const ms = bench('crdt-merge', (db) => ingestOps(db, ops, false), {
+        runs: n === 100 ? 3 : 1,
+        setup: () => openMemoryDb(),
+      });
       if (n === 100) assert.ok(ms < HARD_CAP_MS, `crdt-merge at N=100 took ${ms.toFixed(1)}ms`);
       console.log(`  crdt-merge N=${n}: ${ms.toFixed(1)}ms`);
     });
@@ -153,10 +174,14 @@ describe('availability / blocked check benchmarks', () => {
         createItem(db, dev, { type: 'task', title: `T${i}`, parentId: project.id });
       }
       const items = allItems(db).filter((i) => i.type === 'task');
-      const cache = new Map<string, boolean>();
-      const ms = bench('isBlocked', () => {
-        for (const item of items) isBlocked(db, item.id, cache);
-      });
+      // Fresh cache per run — a warm cache would make repeat runs ~free.
+      const ms = bench(
+        'isBlocked',
+        (cache) => {
+          for (const item of items) isBlocked(db, item.id, cache);
+        },
+        { runs: n === 100 ? 3 : 1, setup: () => new Map<string, boolean>() },
+      );
       if (n === 100) assert.ok(ms < HARD_CAP_MS, `isBlocked at N=100 took ${ms.toFixed(1)}ms`);
       console.log(`  isBlocked N=${n}: ${ms.toFixed(1)}ms`);
     });

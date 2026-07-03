@@ -60,6 +60,9 @@ export interface Item {
   sort_order: number;
   /** How this container sequences its children (see OrderMode). */
   order_mode: OrderMode;
+  /** Non-null marks a Carbon-authored system notice (federation offer, billing
+   *  issue, invoice, …); the value is the notice `kind`. null = ordinary task. */
+  sys_kind: string | null;
   created_at: string;
   updated_at: string;
   deleted: boolean;
@@ -98,6 +101,7 @@ export type ItemPatch = Partial<
     | 'folder_id'
     | 'sort_order'
     | 'order_mode'
+    | 'sys_kind'
     | 'deleted'
   >
 >;
@@ -124,6 +128,7 @@ export const ITEM_PATCH_FIELDS = [
   'folder_id',
   'sort_order',
   'order_mode',
+  'sys_kind',
   'deleted',
 ] as const satisfies readonly (keyof ItemPatch)[];
 
@@ -213,6 +218,11 @@ export interface User {
   plan_startup_min: number | null;
   /** Planning budget: estimate for un-estimated tasks (min). Null → default (20). */
   plan_default_estimate_min: number | null;
+  /** True for a federation shadow user (a remote peer's user, mirrored locally so
+   *  shares/comments render). Id is namespaced `remote:<home_server>:<remoteId>`. */
+  is_remote: boolean;
+  /** The peer host this shadow user lives on (its `subdomain`/base). Null for local users. */
+  home_server: string | null;
   created_at: string;
   updated_at: string;
   deleted: boolean;
