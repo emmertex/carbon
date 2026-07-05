@@ -16,6 +16,27 @@ const rootsCache = new Map<string, Item[]>();
 const ROOTS_CACHE_MAX = 24;
 
 /**
+ * The `id -> parent_id` map used for the ancestor-dedup pass below, cached by
+ * revision alone (unlike `rootsCache`, it doesn't depend on `base`/`prefs` or the
+ * minute bucket — it's pure `deleted=0` structure). Without this, switching
+ * between views (Today -> Flagged -> a project) within the same revision paid
+ * a full non-deleted-items scan on every switch even though nothing had changed.
+ */
+let parentOfCache: { rev: number; map: Map<string, string | null> } | null = null;
+
+function ancestorMap(db: Db, rev: number): Map<string, string | null> {
+  if (parentOfCache && parentOfCache.rev === rev) return parentOfCache.map;
+  const map = new Map<string, string | null>();
+  for (const r of db.all<{ id: string; parent_id: string | null }>(
+    'SELECT id, parent_id FROM items WHERE deleted = 0',
+  )) {
+    map.set(r.id, r.parent_id);
+  }
+  parentOfCache = { rev, map };
+  return map;
+}
+
+/**
  * The ordered list of top-level rows for a list view — but *without* enrichment.
  *
  * This is the cheap half of what `ListView` used to do inline: a SQL prefilter
@@ -65,12 +86,7 @@ export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
   // firing a getItem() per ancestor per row (that walk was a top scaling cost — it
   // grew with both list size and nesting depth on every mutation/switch).
   const matchedIds = new Set(sorted.map((i) => i.id));
-  const parentOf = new Map<string, string | null>();
-  for (const r of db.all<{ id: string; parent_id: string | null }>(
-    'SELECT id, parent_id FROM items WHERE deleted = 0',
-  )) {
-    parentOf.set(r.id, r.parent_id);
-  }
+  const parentOf = ancestorMap(db, rev);
   const roots = sorted.filter((i) => {
     let pid = i.parent_id;
     const seen = new Set<string>(); // guard against any parent cycle

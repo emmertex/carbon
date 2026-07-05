@@ -147,28 +147,143 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 /** Debounced persistence of the in-memory DB to IndexedDB. */
 export function schedulePersist(): void {
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => void persist(), 250);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    persist().catch((e) => console.error('[carbon] debounced persist failed:', e));
+  }, 250);
 }
 
-export async function persist(): Promise<void> {
+// The routine debounced persist hands the exported buffer to a worker so the
+// structured-clone + IndexedDB write (the dominant cost under CPU throttling —
+// see perf/results) doesn't block the main thread's render/interaction work.
+// `sqlDb.export()` itself stays on the main thread (needs the live WASM memory,
+// and is cheap — ~1ms even at 10k items).
+let persistWorker: Worker | null = null;
+// Set when the worker itself errors (script failed to load, message couldn't
+// deserialize): all later persists write directly for the rest of the session.
+let persistWorkerBroken = false;
+let persistReqId = 0;
+const pendingWrites = new Map<number, { resolve: () => void; reject: (e: unknown) => void }>();
+
+function getPersistWorker(): Worker {
+  if (!persistWorker) {
+    const w = new Worker(new URL('./persist.worker.ts', import.meta.url), { type: 'module' });
+    w.onmessage = (e: MessageEvent<{ id: number; ok: boolean; error?: string }>) => {
+      const pending = pendingWrites.get(e.data.id);
+      if (!pending) return;
+      pendingWrites.delete(e.data.id);
+      if (e.data.ok) pending.resolve();
+      else pending.reject(new Error(e.data.error));
+    };
+    // A worker that can't start (CSP, chunk fetch failure while offline) never
+    // answers: without this, every waiter would hang forever and the routine
+    // path would silently stop persisting. Fail the waiters — persistImpl falls
+    // back to a direct write — and don't try the worker again this session.
+    const fail = () => {
+      persistWorkerBroken = true;
+      persistWorker = null;
+      w.terminate();
+      const pending = [...pendingWrites.values()];
+      pendingWrites.clear();
+      for (const p of pending) p.reject(new Error('persist worker failed'));
+    };
+    w.onerror = fail;
+    w.onmessageerror = fail;
+    persistWorker = w;
+  }
+  return persistWorker;
+}
+
+/** Write `data` to IndexedDB off the main thread via a transferable (zero-copy)
+ *  postMessage. Only for the routine debounced path — see `writeSnapshotDirect`
+ *  for the must-land-before-unload path. */
+function writeSnapshotViaWorker(data: Uint8Array): Promise<void> {
+  const id = ++persistReqId;
+  return new Promise((resolve, reject) => {
+    pendingWrites.set(id, { resolve, reject });
+    getPersistWorker().postMessage({ id, key: STORE_KEY, data }, [data.buffer]);
+  });
+}
+
+/** Write `data` to IndexedDB directly on the main thread. Used only by
+ *  `flushPersist()` — a page about to unload can't reliably wait on a worker
+ *  round trip, so that path must not go through the worker. */
+function writeSnapshotDirect(data: Uint8Array): Promise<void> {
+  return localforage.setItem(STORE_KEY, data).then(() => undefined);
+}
+
+async function persistImpl(direct: boolean): Promise<void> {
   if (!sqlDb) return;
   const t0 = performance.now();
   const data = sqlDb.export();
   clearLiveStmtCache(); // export() finalized every prepared statement
   perf.record('persist', 'export', performance.now() - t0);
   const t1 = performance.now();
-  await localforage.setItem(STORE_KEY, data);
+  if (direct || persistWorkerBroken) {
+    await writeSnapshotDirect(data);
+  } else {
+    try {
+      await writeSnapshotViaWorker(data);
+    } catch (e) {
+      // The worker (or its write) failed. The snapshot buffer was transferred
+      // and lost with the message, so re-export (cheap, ~1ms) and land the
+      // write on the main thread rather than dropping it.
+      console.error('[carbon] persist worker write failed; writing directly:', e);
+      if (!sqlDb) return;
+      const retry = sqlDb.export();
+      clearLiveStmtCache();
+      await writeSnapshotDirect(retry);
+    }
+  }
   perf.record('persist', 'idb', performance.now() - t1);
 }
 
-/** Flush any pending debounced save immediately (e.g. the tab is about to hide or
- *  close). Returns the persist promise so callers can await it where possible. */
-export function flushPersist(): Promise<void> {
+export async function persist(): Promise<void> {
+  return persistImpl(false);
+}
+
+/** Cancel the debounced save and kill any in-flight worker write, then run
+ *  `write` (a direct main-thread snapshot write). IndexedDB orders overlapping
+ *  writes by transaction creation, not submission, so without this an older
+ *  worker snapshot could land *after* — and silently roll back — the newer
+ *  direct write. Terminating the worker is safe both ways: an uncommitted
+ *  worker transaction dies with it, and a committed one is simply overwritten
+ *  by `write`. Waiters on the killed writes settle with `write`, whose newer
+ *  snapshot supersedes theirs. */
+function supersedePendingWrites(write: () => Promise<void>): Promise<void> {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  return persist();
+  let superseded: Array<{ resolve: () => void; reject: (e: unknown) => void }> = [];
+  if (persistWorker && pendingWrites.size) {
+    persistWorker.terminate();
+    persistWorker = null;
+    superseded = [...pendingWrites.values()];
+    pendingWrites.clear();
+  }
+  const done = write();
+  for (const p of superseded) done.then(p.resolve, p.reject);
+  return done;
+}
+
+/** Flush any pending debounced save immediately (e.g. the tab is about to hide or
+ *  close). Returns the persist promise so callers can await it where possible.
+ *  Writes directly on the main thread (bypasses the worker) since a page about to
+ *  unload can't reliably wait on a cross-thread round trip; any in-flight worker
+ *  write is killed first so its older snapshot can't land after this one. */
+export function flushPersist(): Promise<void> {
+  return supersedePendingWrites(() => persistImpl(true));
+}
+
+/** The default `registerPersistFlush` handler: flush when a save is still
+ *  debouncing OR still in flight on the worker — a backgrounded page's worker
+ *  can be frozen before its write commits, so only a direct main-thread write
+ *  is safe to rely on here. Exported (as `defaultPersistFlushHandler`) so tests
+ *  can assert `registerPersistFlush` wires it to `pagehide`/`visibilitychange`
+ *  without having to drive a real sql.js/IndexedDB round trip. */
+export function defaultPersistFlushHandler(): void {
+  if (saveTimer || pendingWrites.size) void flushPersist();
 }
 
 /**
@@ -178,12 +293,12 @@ export function flushPersist(): Promise<void> {
  * mobile signal (fires before the OS kills a backgrounded PWA); `pagehide` covers
  * desktop tab close. IndexedDB writes can't be awaited synchronously here, but the
  * browser keeps the page alive long enough for the export+put to land in practice.
+ *
+ * `flush` defaults to `defaultPersistFlushHandler` and is only overridable so
+ * tests can substitute a spy; production callers should never pass it.
  */
-export function registerPersistFlush(): void {
+export function registerPersistFlush(flush: () => void = defaultPersistFlushHandler): void {
   if (typeof document === 'undefined') return;
-  const flush = () => {
-    if (saveTimer) void flushPersist();
-  };
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush();
   });
@@ -198,9 +313,11 @@ export function exportDb(): Uint8Array {
   return data;
 }
 
-/** Overwrite the persisted database with imported bytes. Reload the app after. */
+/** Overwrite the persisted database with imported bytes. Reload the app after.
+ *  Pending debounced/worker writes of the old live DB are killed first — one
+ *  landing after this write would silently undo the import before the reload. */
 export async function importDb(bytes: Uint8Array): Promise<void> {
-  await localforage.setItem(STORE_KEY, bytes);
+  await supersedePendingWrites(() => localforage.setItem(STORE_KEY, bytes).then(() => undefined));
 }
 
 /** Open backup bytes as a throwaway in-memory DB to read from, without touching

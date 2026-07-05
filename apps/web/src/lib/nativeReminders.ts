@@ -53,10 +53,6 @@ function collect(): Pending[] {
   return out;
 }
 
-export async function nativeRemindersSupported(): Promise<boolean> {
-  return !!(await load());
-}
-
 /** Request OS notification permission; resolves true if granted. */
 export async function requestNativePermission(): Promise<boolean> {
   const mod = await load();

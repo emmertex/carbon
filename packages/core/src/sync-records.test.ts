@@ -17,6 +17,10 @@ import {
   getUser,
   getItem,
   ingestRecordOps,
+  startTimer,
+  stopTimer,
+  saveTimeLog,
+  getTimeLogs,
 } from './repo';
 import { getUnsyncedRecordOps } from './records';
 import type { Attachment, Op, User } from './types';
@@ -76,6 +80,44 @@ test('an unshare after observing the share wins, even against a fast-clock peer'
   const tombstone = getUnsyncedRecordOps(dbB).find((o) => o.entity === 'share')!;
   ingestRecordOps(dbA, [tombstone], true);
   assert.equal(listSharesForItem(dbA, 'itemX').length, 0, 'revoke wins on A too');
+});
+
+// SYNC-2 — upsertTimeLog now guards with the standard LWW check (previously absent
+// entirely, since TimeLog had no updated_at column at all): a stale edit that arrives
+// after a genuinely newer one — replay/ingest is rowid/arrival order, not ts order —
+// must not clobber it, e.g. silently reopening a timer that was already stopped.
+test('a stale timelog edit arriving after a newer one does not clobber it', () => {
+  const dbA = openMemoryDb();
+  const dbB = openMemoryDb();
+
+  const log = startTimer(dbA, A, 'itemX', 'bob');
+  const createOp = getUnsyncedRecordOps(dbA).find((o) => o.entity === 'timelog')!;
+  ingestRecordOps(dbB, [createOp], true); // B receives the running timer
+
+  // A edits the note next — soon to be stale, but not yet delivered to B.
+  saveTimeLog(dbA, A, { ...log, note: 'stale note' });
+  const noteOp = getUnsyncedRecordOps(dbA).find(
+    (o) => o.entity === 'timelog' && (o.data as { note: string | null }).note === 'stale note',
+  )!;
+  assert.ok(noteOp, 'A produced a note-edit op');
+
+  // B's clock races far ahead (e.g. it was offline with a fast device clock) and
+  // stops the timer — genuinely later, and applied locally before A's note-edit op
+  // ever arrives.
+  observeTs(dbB, Date.now() + 10 * 365 * 86_400_000);
+  stopTimer(dbB, B, log.id);
+  assert.ok(
+    getTimeLogs(dbB, 'itemX').find((t) => t.id === log.id)?.end_time,
+    'B stopped the timer locally',
+  );
+
+  // A's stale note-edit op arrives afterward. Pre-fix, upsertTimeLog's unconditional
+  // ON CONFLICT DO UPDATE applied it anyway, silently clearing end_time and
+  // un-stopping a completed timer.
+  ingestRecordOps(dbB, [noteOp], true);
+  const finalB = getTimeLogs(dbB, 'itemX').find((t) => t.id === log.id);
+  assert.ok(finalB?.end_time, 'stop survives the later-arriving stale edit');
+  assert.equal(finalB?.note, null, 'the stale note edit itself is dropped, not applied');
 });
 
 // M5 — attachment `deleted` is monotonic; replaying a stale create after a tombstone

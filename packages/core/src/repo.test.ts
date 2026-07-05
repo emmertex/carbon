@@ -13,6 +13,8 @@ import {
   getItemTags,
   inheritedPriority,
   projectAncestor,
+  completedBefore,
+  purgeCompleted,
 } from './repo';
 
 // Minimal in-memory Db backed by node:sqlite (mirrors apps/server/src/sqlite.ts).
@@ -157,6 +159,94 @@ test('setCompleted on a non-recurring task spawns nothing', () => {
   assert.equal(item?.status, 'done');
   assert.equal(spawned, undefined);
   assert.equal(getItem(db, t.id)?.status, 'done');
+});
+
+test('completedBefore/purgeCompleted: scoped by owner (including null for unowned/local), age, and status', () => {
+  const db = openMemoryDb();
+  const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+  const recent = new Date(Date.now() - 1 * 86_400_000).toISOString();
+  const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+
+  // Unowned (owner_id NULL) — the single-user, no-account, offline-only case.
+  const oldUnowned = createItem(db, DEVICE, { title: 'old unowned' });
+  updateItem(db, DEVICE, oldUnowned.id, { status: 'done', completed_at: old });
+  const recentUnowned = createItem(db, DEVICE, { title: 'recent unowned' });
+  updateItem(db, DEVICE, recentUnowned.id, { status: 'done', completed_at: recent });
+  const stillActiveUnowned = createItem(db, DEVICE, { title: 'active unowned' });
+
+  // Owned by a real user — must not leak into the null-owner query, or vice versa.
+  const oldOwned = createItem(db, DEVICE, { title: 'old owned', ownerId: 'alice' });
+  updateItem(db, DEVICE, oldOwned.id, { status: 'done', completed_at: old });
+
+  const unownedDue = completedBefore(db, null, cutoff);
+  assert.deepEqual(unownedDue.map((i) => i.id).sort(), [oldUnowned.id].sort());
+
+  const aliceDue = completedBefore(db, 'alice', cutoff);
+  assert.deepEqual(aliceDue.map((i) => i.id), [oldOwned.id]);
+
+  const purged = purgeCompleted(db, DEVICE, null, cutoff);
+  assert.equal(purged, 1);
+  assert.equal(getItem(db, oldUnowned.id)?.deleted, true);
+  // Untouched: too recent, still active, or owned by someone else.
+  assert.equal(getItem(db, recentUnowned.id)?.deleted, false);
+  assert.equal(getItem(db, stillActiveUnowned.id)?.deleted, false);
+  assert.equal(getItem(db, oldOwned.id)?.deleted, false);
+  // Re-querying finds nothing left to purge for this owner.
+  assert.equal(completedBefore(db, null, cutoff).length, 0);
+});
+
+test('completedBefore/purgeCompleted: cascade safety — a completed parent only qualifies once its whole live subtree does', () => {
+  const db = openMemoryDb();
+  const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+  const recent = new Date(Date.now() - 1 * 86_400_000).toISOString();
+  const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+
+  // Old-done parent with a still-active child: purging it would cascade onto
+  // live work, so it must be held back entirely.
+  const heldParent = createItem(db, DEVICE, { type: 'project', title: 'held' });
+  updateItem(db, DEVICE, heldParent.id, { status: 'done', completed_at: old });
+  const activeChild = createItem(db, DEVICE, { title: 'active child', parentId: heldParent.id });
+
+  // Old-done parent with a too-recently-done child: also held.
+  const recentParent = createItem(db, DEVICE, { type: 'project', title: 'recentish' });
+  updateItem(db, DEVICE, recentParent.id, { status: 'done', completed_at: old });
+  const recentChild = createItem(db, DEVICE, { title: 'recent child', parentId: recentParent.id });
+  updateItem(db, DEVICE, recentChild.id, { status: 'done', completed_at: recent });
+
+  // Old-done child under an ACTIVE parent: the child itself is purgeable — the
+  // common "finished task inside an ongoing project" case.
+  const liveProject = createItem(db, DEVICE, { type: 'project', title: 'ongoing' });
+  const doneLeaf = createItem(db, DEVICE, { title: 'done leaf', parentId: liveProject.id });
+  updateItem(db, DEVICE, doneLeaf.id, { status: 'done', completed_at: old });
+
+  // Fully old-done subtree: parent and child both qualify, and the purge must
+  // record exactly one tombstone op per item (the nested candidate is covered
+  // by its ancestor's cascade, not deleted a second time).
+  const doneParent = createItem(db, DEVICE, { type: 'project', title: 'all done' });
+  updateItem(db, DEVICE, doneParent.id, { status: 'done', completed_at: old });
+  const doneChild = createItem(db, DEVICE, { title: 'done child', parentId: doneParent.id });
+  updateItem(db, DEVICE, doneChild.id, { status: 'done', completed_at: old });
+
+  const due = completedBefore(db, null, cutoff);
+  assert.deepEqual(
+    due.map((i) => i.id).sort(),
+    [doneLeaf.id, doneParent.id, doneChild.id].sort(),
+  );
+
+  const opsBefore = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM ops')!.n;
+  const purged = purgeCompleted(db, DEVICE, null, cutoff);
+  assert.equal(purged, 3);
+  assert.equal(db.get<{ n: number }>('SELECT COUNT(*) AS n FROM ops')!.n - opsBefore, 3);
+
+  assert.equal(getItem(db, doneLeaf.id)?.deleted, true);
+  assert.equal(getItem(db, doneParent.id)?.deleted, true);
+  assert.equal(getItem(db, doneChild.id)?.deleted, true);
+  // Held subtrees and live containers are untouched.
+  assert.equal(getItem(db, heldParent.id)?.deleted, false);
+  assert.equal(getItem(db, activeChild.id)?.deleted, false);
+  assert.equal(getItem(db, recentParent.id)?.deleted, false);
+  assert.equal(getItem(db, recentChild.id)?.deleted, false);
+  assert.equal(getItem(db, liveProject.id)?.deleted, false);
 });
 
 test('inheritedPriority: own priority wins, else inherits nearest ancestor task priority', () => {

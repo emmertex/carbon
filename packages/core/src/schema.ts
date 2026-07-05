@@ -405,4 +405,18 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 19,
+  // TimeLog gains updated_at so upsertTimeLog can guard with the same LWW check
+  // every other record entity (share/assignee/comment/tag/item_tag/item_dep) already
+  // uses (SYNC-2) — previously ON CONFLICT DO UPDATE applied unconditionally, so a
+  // stale replay could silently clobber a newer edit. Backfill from end_time (the
+  // last legitimate edit moment) else start_time — the closest approximation of
+  // "last modified" available for rows that predate this column.
+  up: `
+    ALTER TABLE time_logs ADD COLUMN updated_at TEXT;
+    UPDATE time_logs SET updated_at = COALESCE(end_time, start_time) WHERE updated_at IS NULL;
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

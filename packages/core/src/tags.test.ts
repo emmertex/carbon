@@ -3,12 +3,14 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import type { Db, SqlParams } from './db';
 import { migrate } from './migrate';
+import { observeTs } from './crdt';
+import { getUnsyncedRecordOps } from './records';
 import {
   createItem,
   createTag,
   updateTag,
   moveTag,
-  mergeTag,
+  deleteTag,
   setItemTags,
   getItemTags,
   listTags,
@@ -16,7 +18,6 @@ import {
   normalizeTagName,
   tagParentPath,
   tagLeaf,
-  tagDepth,
   tagId,
   descendantTagIds,
   expandTagIds,
@@ -25,6 +26,7 @@ import {
   heldTagIds,
   itemHasHeldTag,
   reorderTag,
+  ingestRecordOps,
 } from './repo';
 
 function openMemoryDb(): Db {
@@ -60,8 +62,6 @@ test('path helpers parse/normalize colon paths', () => {
   assert.equal(tagParentPath('Shopping:Coles:FreshGoods'), 'Shopping:Coles');
   assert.equal(tagParentPath('Shopping'), '');
   assert.equal(tagLeaf('Shopping:Coles:FreshGoods'), 'FreshGoods');
-  assert.equal(tagDepth('Shopping'), 0);
-  assert.equal(tagDepth('Shopping:Coles:FreshGoods'), 2);
   // id is whitespace/case-insensitive so devices converge.
   assert.equal(tagId('Shopping: Coles'), tagId('shopping:coles'));
 });
@@ -126,7 +126,7 @@ test('moveTag re-keys the subtree and re-points item links', () => {
   assert.deepEqual(itemTags, ['Errands:Coles:FreshGoods']);
 });
 
-test('mergeTag unions links onto the destination', () => {
+test('moveTag onto an existing tag unions links onto the destination', () => {
   const db = openMemoryDb();
   const a = createItem(db, DEV, { title: 'a' });
   const b = createItem(db, DEV, { title: 'b' });
@@ -135,7 +135,7 @@ test('mergeTag unions links onto the destination', () => {
   setItemTags(db, DEV, a.id, [tagId('Coles')]);
   setItemTags(db, DEV, b.id, [tagId('Woolies')]);
 
-  mergeTag(db, DEV, tagId('Coles'), tagId('Woolies'));
+  moveTag(db, DEV, tagId('Coles'), 'Woolies');
 
   assert.deepEqual(getItemTags(db, a.id).map((t) => t.name), ['Woolies']);
   assert.deepEqual(getItemTags(db, b.id).map((t) => t.name), ['Woolies']);
@@ -201,4 +201,35 @@ test('itemHasHeldTag is true when a task carries an on-hold tag or its descendan
   assert.ok(!itemHasHeldTag(db, offTask.id, held));
   // Works without passing a precomputed set, too.
   assert.ok(itemHasHeldTag(db, onTask.id));
+});
+
+// SYNC-3 — tag record-ops now stamp `updated_at` from the causal clock (previously
+// raw wall-clock, unlike every other record entity), so a delete made *after
+// observing* a peer's create wins, instead of losing to a fast-clock peer's inflated
+// wall-clock updated_at (tag resurrection). Mirrors the share/comment Y2 test in
+// sync-records.test.ts.
+test('deleting a tag after observing its creation wins, even against a fast-clock peer', () => {
+  const dbA = openMemoryDb();
+  const dbB = openMemoryDb();
+  const A = 'device-a';
+  const B = 'device-b';
+
+  // Device A has a wildly fast clock.
+  observeTs(dbA, Date.now() + 10 * 365 * 86_400_000);
+  createTag(dbA, A, 'Waiting');
+  const createOp = getUnsyncedRecordOps(dbA).find((o) => o.entity === 'tag')!;
+  assert.ok(createOp, 'A produced a tag create op');
+
+  // B receives the tag (and observes A's inflated clock via the op ts).
+  ingestRecordOps(dbB, [createOp], true);
+  assert.ok(listTags(dbB).some((t) => t.name === 'Waiting'), 'B sees the tag');
+
+  // B deletes it. Pre-fix this used Date.now() and lost to A's future updated_at.
+  deleteTag(dbB, B, tagId('Waiting'));
+  assert.ok(!listTags(dbB).some((t) => t.name === 'Waiting'), 'delete wins on B');
+
+  // And the delete propagates back to A without resurrecting the tag.
+  const tombstone = getUnsyncedRecordOps(dbB).find((o) => o.entity === 'tag')!;
+  ingestRecordOps(dbA, [tombstone], true);
+  assert.ok(!listTags(dbA).some((t) => t.name === 'Waiting'), 'delete wins on A too');
 });

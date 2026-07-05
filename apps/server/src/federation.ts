@@ -10,6 +10,8 @@ import {
   getUser,
   getItem,
   hasWriteAccess,
+  effectiveShares,
+  listAssigneesForItem,
   shareItem,
   unshareItem,
   subtreeIds,
@@ -125,6 +127,14 @@ export function ensureFederationTables(db: Db): void {
       .some((r) => r.name === col);
     if (!present) db.exec(`ALTER TABLE federation_cursors ADD COLUMN ${col} TEXT`);
   }
+  // Federation retraction deletes every record_op keyed on a dropped item. `record_ops`
+  // carries its owning item only inside the JSON `data.item_id` (no column), so index that
+  // extracted value: `applyRetraction` can then match by an indexed lookup instead of a
+  // full-table scan + per-row JSON.parse. `migrate(db)` (which creates `record_ops`) always
+  // runs before this, so the table exists.
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_record_ops_item_id ON record_ops(json_extract(data, '$.item_id'))",
+  );
 }
 
 interface LinkRow {
@@ -550,11 +560,6 @@ export function listPeers(db: Db, listType?: PeerListType): FederationPeer[] {
       )
     : db.all<PeerRow>('SELECT * FROM federation_peers WHERE deleted = 0 ORDER BY approved_at');
   return rows.map(rowToPeer);
-}
-
-/** Live (non-deleted) deny-list peers — a convenience for `listPeers(db, 'deny')`. */
-export function listDenied(db: Db): FederationPeer[] {
-  return listPeers(db, 'deny');
 }
 
 /** Soft-delete a peer (allow OR deny; tombstone by id; idempotent). */
@@ -1156,6 +1161,63 @@ export function ingestFederatedPull(
   if (remappedRecs.length) ingestRecordOps(db, remappedRecs, true);
 }
 
+// ----- push-side identity forgery guard -------------------------------------
+//
+// After `remapUserRef`, a peer-supplied identity ref shaped `remote:<myLabel>:<id>` un-maps
+// to the BARE local id `<id>` — i.e. one of OUR real users. A peer-local id, by contrast,
+// always remaps to a `remote:<peerLabel>:*` shadow. So a bare (non-`remote:`) remapped ref
+// that resolves to a real local user is the ONLY way a peer can name one of our users, and it
+// is exactly the identity-forgery vector: a grantee peer is NOT authoritative for our users,
+// so it must not push a share/assignee/comment/attachment that assigns identity to one of them.
+
+/** The record op's primary identity field VALUE (the local user it assigns identity to):
+ *  share/assignee → `user_id`, comment → `author_id`, attachment → `created_by`. */
+function recordIdentityRef(rec: RecordOp): string | null {
+  const data = rec.data as Record<string, unknown>;
+  const field =
+    rec.entity === 'share' || rec.entity === 'assignee'
+      ? 'user_id'
+      : rec.entity === 'comment'
+        ? 'author_id'
+        : rec.entity === 'attachment'
+          ? 'created_by'
+          : null;
+  if (!field) return null;
+  const v = data[field];
+  return typeof v === 'string' ? v : null;
+}
+
+/** Whether `ref` (a POST-remap value) names an existing, real (non-shadow) local user. A
+ *  `remote:*` shadow ref never does — only a bare id that un-mapped from `remote:<myLabel>:*`
+ *  can, and that is precisely what the peer must not be free to assign identity to. */
+function refIsExistingLocalUser(db: Db, ref: string | null | undefined): boolean {
+  if (!ref || ref.startsWith('remote:')) return false;
+  const u = getUser(db, ref);
+  return !!u && !u.is_remote;
+}
+
+/** Whether `userId` is already a legitimate participant on `itemId` — its owner, someone it
+ *  is (effectively, incl. inherited) shared with, or an assignee. A peer MAY reference such
+ *  a user (e.g. re-echo an existing share, or @mention the owner); it may NOT introduce a
+ *  brand-new grant/authorship for a local user with no prior relationship to the item. */
+function isItemParticipant(db: Db, itemId: string, userId: string): boolean {
+  if (getItem(db, itemId)?.owner_id === userId) return true;
+  if (effectiveShares(db, itemId).some((e) => e.user_id === userId)) return true;
+  if (listAssigneesForItem(db, itemId).some((a) => a.user_id === userId)) return true;
+  return false;
+}
+
+/** Identity-forgery gate for ONE remapped record op on the PUSH (peer-writes-to-us) path:
+ *  true ⇒ the op assigns identity to an EXISTING local user who is not already a participant
+ *  on the item, so the caller must drop it. Returns false for ops naming only shadows /
+ *  already-participating users (the legitimate cases). */
+function forgesLocalIdentity(db: Db, rec: RecordOp): boolean {
+  const itemId = (rec.data as { item_id?: unknown }).item_id;
+  if (typeof itemId !== 'string') return false;
+  const ref = recordIdentityRef(rec);
+  return refIsExistingLocalUser(db, ref) && !isItemParticipant(db, itemId, ref!);
+}
+
 // ----- push side: validate + ingest ops a peer PUSHES to us -----------------
 
 /**
@@ -1207,7 +1269,6 @@ export function sanitizeFederatedPush(
   let maxTs = 0;
   for (const op of sortedOps) {
     if (!op || typeof op.item_id !== 'string') continue;
-    if (op.ts > maxTs) maxTs = op.ts;
     const existing = db.get<{ owner_id: string | null }>(
       'SELECT owner_id FROM items WHERE id = ?',
       [op.item_id],
@@ -1217,6 +1278,9 @@ export function sanitizeFederatedPush(
     const inScope =
       allowed.has(op.item_id) || (typeof parentId === 'string' && allowed.has(parentId));
     if (!inScope) continue; // scope + write-gate reject
+    // Only an accepted (in-scope) op advances OUR clock — a rejected out-of-scope op must
+    // NOT push the local causal clock forward (else a stray peer op silently bumps it).
+    if (op.ts > maxTs) maxTs = op.ts;
     if (!existing) allowed.add(op.item_id); // now writable; its children may follow
 
     const fields = { ...op.fields } as Record<string, unknown>;
@@ -1238,9 +1302,30 @@ export function sanitizeFederatedPush(
   // ----- record ops ---------------------------------------------------------
   const outRecs: RecordOp[] = [];
   for (const rec of records ?? []) {
-    if (rec && rec.ts > maxTs) maxTs = rec.ts;
     const remapped = remapRecordOp(rec, allowed, remap, ensureShadow);
-    if (remapped) outRecs.push(remapped);
+    if (!remapped) continue; // scope-rejected or a dropped entity (tag/item_tag)
+    // Identity-forgery protection (the record-level analogue of the owner_id guard above):
+    // a grantee peer is NOT authoritative for our users, so a share/assignee/comment/
+    // attachment whose remapped identity resolves to an EXISTING local user who is not
+    // already a participant on the item is a forged grant/authorship — drop the whole op.
+    if (forgesLocalIdentity(db, remapped)) continue;
+    // A forged @mention of a non-participant real local user is stripped in place (the rest
+    // of the comment still lands). Shadows and already-participating users are kept.
+    if (remapped.entity === 'comment') {
+      const data = remapped.data as Record<string, unknown>;
+      const itemId = data.item_id;
+      if (Array.isArray(data.mentions) && typeof itemId === 'string') {
+        data.mentions = (data.mentions as unknown[]).filter(
+          (m) =>
+            typeof m === 'string' &&
+            !(refIsExistingLocalUser(db, m) && !isItemParticipant(db, itemId, m)),
+        );
+      }
+    }
+    // Only an accepted record advances OUR clock (see the op loop) — a scope- or
+    // identity-rejected record must NOT push the local causal clock forward.
+    if (remapped.ts > maxTs) maxTs = remapped.ts;
+    outRecs.push(remapped);
   }
 
   // No ts clamp — but advance OUR clock past the batch (peer's causal ts may be huge).
@@ -1717,6 +1802,22 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     return c.json({ link_id: link.id, status: 'pending', permission });
   });
 
+  // --- offer-origin challenge: prove control of a claimed callback_base_url ---
+  // The recipient of an offer calls THIS back on the claimed `callback_base_url` (with the
+  // offer_secret) before trusting that origin for its deny-list / host-ceiling gates. We
+  // answer affirmatively ONLY if WE genuinely minted an offer with this secret, so a caller
+  // can pass the challenge for a host it actually controls — and can NEITHER spoof another
+  // peer's label to dodge the deny list NOR point a recipient at a host it doesn't own. The
+  // offer_secret is 24 bytes of CSPRNG hex, so a positive answer leaks nothing guessable.
+  app.post('/offers/verify', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { offer_secret?: string };
+    if (!body.offer_secret) return c.json({ error: 'unauthorized' }, 401);
+    if (!findLinkByOfferSecret(db, body.offer_secret)) {
+      return c.json({ error: 'unknown_offer' }, 404);
+    }
+    return c.json({ ok: true });
+  });
+
   // --- inbound: receive an offer (authed by the offer/link secret) ---
   app.post('/offers/inbound', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -1736,6 +1837,23 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     }
     // Derive the peer's label from the callback base (its own subdomain).
     const peerLabel = body.callback_base_url;
+    // Origin verification (before ANY policy decision): `callback_base_url` is entirely
+    // attacker-controllable yet is what `tierForLabel`/`peerWhitelisted`/`peerDenied` gate on
+    // and what we later deliver secrets to. Challenge it — POST the offer_secret back to that
+    // origin's /offers/verify — and require it to confirm it actually minted this offer. A
+    // caller can only pass for a host it truly controls, so it cannot forge a benign label to
+    // slip past the deny list. Unreachable / non-confirming ⇒ reject before trusting anything.
+    let originVerified = false;
+    try {
+      const vr = await deps.deliverToPeer(peerLabel, '/api/federation/offers/verify', {
+        offer_secret: body.offer_secret,
+      });
+      originVerified = vr.ok;
+    } catch {
+      originVerified = false;
+    }
+    if (!originVerified) return c.json({ error: 'unverified_origin' }, 403);
+
     const tier = tierForLabel(peerLabel);
     const gate = canAccept({
       mode: deps.resolveMode(),
@@ -1875,6 +1993,13 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     if (!secret) return c.json({ error: 'unauthorized' }, 401);
     const link = findActiveLinkBySecret(db, secret);
     if (!link) return c.json({ error: 'unauthorized' }, 401);
+    // Deny always wins, even for an already-active link: a peer added to the deny list after
+    // its link went active must be blocked on every inbound /sync + /blob request (the peer-
+    // driven direction), not just on our own exchange loop. `findActiveLinkBySecret` only
+    // checks status, so re-check the deny list here.
+    if (peerDenied(db, link.peer_label ?? link.peer_base_url)) {
+      return c.json({ error: 'federation_denied' }, 403);
+    }
     c.set('fedLink', link);
     return next();
   };
@@ -1901,7 +2026,7 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     //       an OUTBOUND link the caller is a GRANTEE and this field is a grantee→owner
     //       signal we must ignore (a grantee can never make us drop owner data).
     if (link.direction === 'inbound' && Array.isArray(body.retract) && body.retract.length) {
-      applyRetraction(db, body.retract);
+      applyRetraction(db, link, body.retract);
     }
 
     // ----- push side: the peer's edits to us (write-gated, sanitized, no agents) ---
@@ -2480,34 +2605,48 @@ function getPushedScope(db: Db, linkId: string): Set<string> {
  * re-sent retraction costs nothing. The caller MUST enforce the direction guard — only an
  * INBOUND link (the peer is the authoritative owner) may drive this; a grantee→owner
  * signal must never reach here.
+ *
+ * SCOPED to the calling link's granted roots: `itemIds` is raw, attacker-controlled JSON
+ * from the peer, so every id (and every descendant it would drag out) is intersected with
+ * `subtreeIds(db, <this link's granted roots>)` before ANYTHING is deleted. A peer may only
+ * retract inside what it was granted — an id outside the grant is silently ignored, never
+ * deleted. This mirrors the scope gate every other ingestion path already applies
+ * (`ingestFederatedPull`/`sanitizeFederatedPush` both intersect against the granted subtree).
  */
-export function applyRetraction(db: Db, itemIds: string[]): void {
+export function applyRetraction(db: Db, link: FederationLink, itemIds: string[]): void {
+  // The scope ceiling: the subtree of THIS link's granted roots as they exist locally. Any
+  // id outside this set is out of the peer's grant and must never be touched.
+  const roots = listLinkRoots(db, link.id).map((r) => r.root_item_id);
+  if (!roots.length) return; // no grant materialized ⇒ nothing this link may retract
+  const allowed = subtreeIds(db, roots);
+
+  // Collect the in-scope ids to drop: each retracted id (if in scope) plus every descendant
+  // still materialized under it, intersected with `allowed` so a peer can never step outside
+  // its granted subtree even via a descendant. Computed BEFORE any delete so a subtree drops
+  // whole even as rows are torn out.
+  const toDrop = new Set<string>();
   for (const rootId of itemIds) {
     if (typeof rootId !== 'string' || !rootId) continue;
-    // The retracted id AND every descendant still materialized under it locally. Computed
-    // per-id BEFORE any delete so a subtree drops as a whole even as we tear rows out.
-    const ids = subtreeIds(db, [rootId]);
-    for (const id of ids) {
-      // record_ops carry the owning item in their JSON `data.item_id`; scan+match rather
-      // than a column filter (the same shape the pull/push scoping uses).
-      for (const r of db.all<{ id: string; data: string }>(
-        'SELECT id, data FROM record_ops',
-      )) {
-        let itemId: unknown;
-        try {
-          itemId = (JSON.parse(r.data) as { item_id?: unknown }).item_id;
-        } catch {
-          continue;
-        }
-        if (itemId === id) db.run('DELETE FROM record_ops WHERE id = ?', [r.id]);
-      }
-      db.run('DELETE FROM ops WHERE item_id = ?', [id]);
-      db.run('DELETE FROM shares WHERE item_id = ?', [id]);
-      db.run('DELETE FROM assignees WHERE item_id = ?', [id]);
-      db.run('DELETE FROM attachments WHERE item_id = ?', [id]);
-      db.run('DELETE FROM comments WHERE item_id = ?', [id]);
-      db.run('DELETE FROM items WHERE id = ?', [id]);
+    if (!allowed.has(rootId)) continue; // out-of-scope retract — refuse
+    for (const id of subtreeIds(db, [rootId])) {
+      if (allowed.has(id)) toDrop.add(id);
     }
+  }
+
+  for (const id of toDrop) {
+    // record_ops carry the owning item only in their JSON `data.item_id`; match it via the
+    // indexed `json_extract` expression (idx_record_ops_item_id) instead of scanning the
+    // whole table and JSON-parsing every row per id.
+    db.run("DELETE FROM record_ops WHERE json_extract(data, '$.item_id') = ?", [id]);
+    db.run('DELETE FROM ops WHERE item_id = ?', [id]);
+    // Dependency edges are keyed on the item at EITHER end — a retracted item can sit on the
+    // predecessor OR successor side, so drop both (previously leaked as dangling edges).
+    db.run('DELETE FROM item_deps WHERE pred_id = ? OR succ_id = ?', [id, id]);
+    db.run('DELETE FROM shares WHERE item_id = ?', [id]);
+    db.run('DELETE FROM assignees WHERE item_id = ?', [id]);
+    db.run('DELETE FROM attachments WHERE item_id = ?', [id]);
+    db.run('DELETE FROM comments WHERE item_id = ?', [id]);
+    db.run('DELETE FROM items WHERE id = ?', [id]);
   }
 }
 
@@ -2533,8 +2672,13 @@ export async function runFederationExchange(
   myLabel: string,
 ): Promise<void> {
   if (link.status !== 'active') return;
-  const deviceId = ensureDeviceId(db);
   const peerLabel = link.peer_label ?? link.peer_base_url;
+  // Deny always wins, even for an already-active link: `peerDenied` was only ever checked at
+  // offer time, so a peer added to the deny list AFTER its link went active kept syncing. Re-
+  // check every exchange round so the deny list actually cuts an existing channel — matching
+  // the UI's "deny-listed peers are ALWAYS blocked" promise.
+  if (peerDenied(db, peerLabel)) return;
+  const deviceId = ensureDeviceId(db);
   const roots = listLinkRoots(db, link.id).map((r) => r.root_item_id);
   if (!roots.length) return; // grant not yet materialized (pre-initial-pull)
 

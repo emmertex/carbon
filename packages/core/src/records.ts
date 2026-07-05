@@ -48,10 +48,16 @@ export function getUnsyncedRecordOps(db: Db): RecordOp[] {
     .map(rowToRecordOp);
 }
 
+// Chunked for the same reason as crdt.ts's markOpsSynced: bound-parameter
+// ceilings vary by SQLite build, and first-sync batches can be large.
+const MARK_SYNCED_BATCH = 500;
+
 export function markRecordOpsSynced(db: Db, ids: string[]): void {
-  if (ids.length === 0) return;
-  const placeholders = ids.map(() => '?').join(',');
-  db.run(`UPDATE record_ops SET synced = 1 WHERE id IN (${placeholders})`, ids);
+  for (let i = 0; i < ids.length; i += MARK_SYNCED_BATCH) {
+    const chunk = ids.slice(i, i + MARK_SYNCED_BATCH);
+    const placeholders = chunk.map(() => '?').join(',');
+    db.run(`UPDATE record_ops SET synced = 1 WHERE id IN (${placeholders})`, chunk);
+  }
 }
 
 export function recordOpExists(db: Db, id: string): boolean {

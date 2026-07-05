@@ -252,6 +252,11 @@ const TOOLS: ToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'tags',
+    description: 'List the tags in use.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'items',
     description:
       'Show tasks in a list or with a tag. status defaults to "active"; pass "done" for completed ' +
@@ -680,45 +685,50 @@ picked to UTC before returning it.`;
   const usage: Usage = { input: 0, output: 0 };
   let lastText = '';
 
-  for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const r = await chatLLM(agent, messages, TOOLS, allowPrivate);
-    usage.input += r.usage.input;
-    usage.output += r.usage.output;
-    lastText = r.text;
+  try {
+    for (let iter = 0; iter < MAX_ITERS; iter++) {
+      const r = await chatLLM(agent, messages, TOOLS, allowPrivate);
+      usage.input += r.usage.input;
+      usage.output += r.usage.output;
+      lastText = r.text;
 
-    let calls = r.toolCalls;
-    let native = true;
-    if (!calls.length) {
-      calls = fallbackToolCalls(r.text); // weak/local model emitted JSON in text
-      native = false;
-    }
-    if (!calls.length) {
-      dbg(`iter ${iter}: no tool calls; text=${JSON.stringify(r.text.slice(0, 200))}`);
-      break; // model is done / just chatting
-    }
-    dbg(`iter ${iter}: ${native ? 'native' : 'json-fallback'} calls=${calls.map((c) => c.name).join(',')}`);
-
-    if (native) messages.push({ role: 'assistant', content: r.text, toolCalls: calls });
-    for (const tc of calls) {
-      const result = await execTool(ops, userId, tc.name, tc.args, anchor);
-      dbg(`  ${tc.name} ${JSON.stringify(tc.args)} -> ${result.ok ? 'ok' : 'ERR ' + result.error}`);
-      executed.push({ tool: tc.name, args: tc.args, result });
-      if (native) {
-        messages.push({
-          role: 'tool',
-          toolCallId: tc.id,
-          name: tc.name,
-          content: JSON.stringify(result.ok ? result.data : { error: result.error }),
-        });
+      let calls = r.toolCalls;
+      let native = true;
+      if (!calls.length) {
+        calls = fallbackToolCalls(r.text); // weak/local model emitted JSON in text
+        native = false;
       }
-    }
-    // A JSON-fallback turn isn't a real tool-calling conversation — execute once and stop.
-    if (!native) break;
-    // If only read tools were called, let the loop continue so the model can act; if a
-    // mutation happened, it usually stops on its own next turn (or hits MAX_ITERS).
-  }
+      if (!calls.length) {
+        dbg(`iter ${iter}: no tool calls; text=${JSON.stringify(r.text.slice(0, 200))}`);
+        break; // model is done / just chatting
+      }
+      dbg(`iter ${iter}: ${native ? 'native' : 'json-fallback'} calls=${calls.map((c) => c.name).join(',')}`);
 
-  recordAgentUsage(deps.db, agent.id, usage, agent.model || '(default)', opts.requestKind ?? 'nl_command');
+      if (native) messages.push({ role: 'assistant', content: r.text, toolCalls: calls });
+      for (const tc of calls) {
+        const result = await execTool(ops, userId, tc.name, tc.args, anchor);
+        dbg(`  ${tc.name} ${JSON.stringify(tc.args)} -> ${result.ok ? 'ok' : 'ERR ' + result.error}`);
+        executed.push({ tool: tc.name, args: tc.args, result });
+        if (native) {
+          messages.push({
+            role: 'tool',
+            toolCallId: tc.id,
+            name: tc.name,
+            content: JSON.stringify(result.ok ? result.data : { error: result.error }),
+          });
+        }
+      }
+      // A JSON-fallback turn isn't a real tool-calling conversation — execute once and stop.
+      if (!native) break;
+      // If only read tools were called, let the loop continue so the model can act; if a
+      // mutation happened, it usually stops on its own next turn (or hits MAX_ITERS).
+    }
+  } finally {
+    // Record whatever usage accumulated even if a later iteration's chatLLM call threw —
+    // otherwise a mid-loop provider error silently drops the earlier successful turns'
+    // token accounting (billing/rate-limit undercounts real usage).
+    recordAgentUsage(deps.db, agent.id, usage, agent.model || '(default)', opts.requestKind ?? 'nl_command');
+  }
   // Conversational surfaces use the model's own final message (the no-tool turn that closes the
   // loop after it has seen the tool results — its narration/answer). The deterministic builder
   // is the fallback if the model ended without saying anything (empty text / hit MAX_ITERS).

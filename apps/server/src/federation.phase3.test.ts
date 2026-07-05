@@ -24,11 +24,13 @@ import {
   getUser,
   ingestOps,
   recordRecordOp,
+  visibleItemIds,
   getUserByUsername,
   createUser as coreCreateUser,
   migrate,
   ensureDeviceId,
   type Op,
+  type RecordOp,
 } from '@carbon/core';
 import { openDb } from './sqlite';
 import {
@@ -51,6 +53,8 @@ import {
   findActiveLinkBySecret,
   runFederationExchange,
   buildIncrementalPullPayload,
+  sanitizeFederatedPush,
+  addPeer,
   memBlobStore,
   type FederationLink,
   type FederationMode,
@@ -608,5 +612,161 @@ describe('federation Phase 3 — buildIncrementalPullPayload excludeDevices', ()
     assert.ok(!excl.payload.ops.some((o) => o.id === 'peer-op-1'), 'peer op excluded');
     assert.ok(excl.payload.ops.some((o) => o.device_id === acme.deviceId), 'local op still present');
     assert.equal(excl.since, all.since, 'cursor high-water unchanged by exclusion (scanned, not sent)');
+  });
+});
+
+// ─── FED-2: identity forgery — a peer cannot assign identity to an existing local user ─
+
+describe('federation Phase 3 — FED-2 identity forgery on push', () => {
+  test('a pushed share/comment naming a non-participant local user is dropped; participant/shadow refs are kept', async () => {
+    const { world, acme, globex, alice, roadmap } = await handshake('write');
+    const deliver = world.deliverToPeer;
+    const l = links(acme, globex);
+
+    // Carol: a real acme user with NO relationship to Roadmap (not owner, share, or assignee).
+    const carol = coreCreateUser(acme.db, { username: 'carol', displayName: 'Carol', role: 'member' });
+    assert.ok(!visibleItemIds(acme.db, carol.id).has(roadmap), 'carol cannot see Roadmap initially');
+
+    const now = new Date().toISOString();
+    // The grantee (globex) pushes four record ops to the owner (acme):
+    const res = await deliver('acme', '/api/federation/sync', {
+      __link_secret: l.acme.secret,
+      push_ops: [],
+      push_records: [
+        // (1) FORGED: grant carol (a real local user, non-participant) access → must drop.
+        {
+          id: 'evil-share', entity: 'share', row_id: 'evil-share', ts: Date.now(), device_id: 'globex-dev',
+          data: { id: 'evil-share', item_id: roadmap, user_id: `remote:acme:${carol.id}`, permission: 'write', created_at: now, updated_at: now, deleted: false },
+        },
+        // (2) FORGED: a comment authored AS carol → must drop.
+        {
+          id: 'evil-comment', entity: 'comment', row_id: 'evil-comment', ts: Date.now(), device_id: 'globex-dev',
+          data: { id: 'evil-comment', item_id: roadmap, author_id: `remote:acme:${carol.id}`, body: 'forged as carol', mentions: [], created_at: now, updated_at: now, deleted: false },
+        },
+        // (3) LEGIT: a comment authored by one of the grantee's OWN users (a shadow) → kept.
+        {
+          id: 'ok-comment', entity: 'comment', row_id: 'ok-comment', ts: Date.now(), device_id: 'globex-dev',
+          data: { id: 'ok-comment', item_id: roadmap, author_id: 'remote:globex:someone', body: 'legit peer comment', mentions: [], created_at: now, updated_at: now, deleted: false },
+        },
+        // (4) LEGIT: a share referencing alice, who is ALREADY a participant (the owner) → kept.
+        {
+          id: 'ok-share', entity: 'share', row_id: 'ok-share', ts: Date.now(), device_id: 'globex-dev',
+          data: { id: 'ok-share', item_id: roadmap, user_id: `remote:acme:${alice.id}`, permission: 'write', created_at: now, updated_at: now, deleted: false },
+        },
+      ],
+      since: 0,
+      rsince: 0,
+    });
+    assert.equal(res.status, 200);
+
+    // (1) The forged grant never landed: no share for carol, and carol still can't see Roadmap.
+    const carolShare = acme.db.get<{ x: number }>(
+      'SELECT 1 AS x FROM shares WHERE item_id = ? AND user_id = ? AND deleted = 0',
+      [roadmap, carol.id],
+    );
+    assert.equal(carolShare, undefined, 'forged share granting carol access was dropped');
+    assert.ok(!visibleItemIds(acme.db, carol.id).has(roadmap), 'carol still cannot see Roadmap');
+
+    // (2) The forged authorship never landed; (3) the legit shadow-authored comment did.
+    const commentAuthors = acme.db
+      .all<{ author_id: string | null }>('SELECT author_id FROM comments WHERE item_id = ? AND deleted = 0', [roadmap])
+      .map((r) => r.author_id);
+    assert.ok(!commentAuthors.includes(carol.id), 'comment forged as carol was dropped');
+    assert.ok(
+      commentAuthors.includes('remote:globex:someone'),
+      'a comment authored by the peer\'s own (shadow) user was kept',
+    );
+
+    // (4) The legit share to the existing participant (alice, the owner) was accepted.
+    const aliceShare = acme.db.get<{ x: number }>(
+      'SELECT 1 AS x FROM shares WHERE item_id = ? AND user_id = ? AND deleted = 0',
+      [roadmap, alice.id],
+    );
+    assert.ok(aliceShare, 'share referencing the already-participating owner was kept');
+  });
+});
+
+// ─── FED-4: deny-list additions cut an already-active link ──────────────────────
+
+describe('federation Phase 3 — FED-4 deny applies to active links', () => {
+  test('denying a peer after its link is active blocks both our exchange and the peer\'s /sync', async () => {
+    const { world, acme, globex, roadmap } = await handshake('write');
+    const deliver = world.deliverToPeer;
+    const l = links(acme, globex);
+
+    // Pre-deny: the channel works — Roadmap syncs to globex.
+    await exchangeBothWays(acme, globex, deliver);
+    assert.ok(getItem(globex.db, roadmap), 'Roadmap synced to globex before the deny');
+
+    // acme adds globex to its DENY list AFTER the link is already active. The UI promises
+    // deny-listed peers are ALWAYS blocked — so the still-active link must stop syncing.
+    addPeer(acme.db, { baseUrl: 'globex', subdomain: 'globex', listType: 'deny' });
+
+    // (a) The peer-driven direction: globex pushing an edit to acme's /sync is now rejected.
+    updateItem(globex.db, globex.deviceId, roadmap, { title: 'edit after deny' });
+    const pushRes = await deliver('acme', '/api/federation/sync', {
+      __link_secret: l.acme.secret,
+      push_ops: [
+        { id: 'post-deny-op', item_id: roadmap, ts: Date.now() + 1000, device_id: 'globex-dev', fields: { title: 'edit after deny' } },
+      ],
+      push_records: [],
+      since: 0,
+      rsince: 0,
+    });
+    assert.equal(pushRes.status, 403, 'denied peer is refused at /sync');
+    assert.equal(getItem(acme.db, roadmap)!.title, 'Roadmap', 'no edit landed on acme after the deny');
+
+    // (b) Our own exchange loop: acme skips the denied link, and globex\'s round can\'t push
+    // through either — so nothing transfers in either direction.
+    await exchangeBothWays(acme, globex, deliver);
+    assert.equal(getItem(acme.db, roadmap)!.title, 'Roadmap', 'acme unchanged (exchange skipped for denied peer)');
+  });
+});
+
+// ─── FED-5: out-of-scope ops/records do not advance the local causal clock ──────
+
+describe('federation Phase 3 — FED-5 maxTs only from scope-passing ops', () => {
+  const readClock = (db: ReturnType<typeof openDb>): number =>
+    Number(db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['op_clock'])?.value ?? 0);
+
+  test('a rejected out-of-scope op/record does not push observeTs forward', async () => {
+    const { acme, globex, alice } = await handshake('write');
+    void globex;
+    const l = links(acme, globex);
+
+    const HUGE = 9_000_000_000_000; // far-future ts a rejected op must NOT leak into our clock
+    assert.ok(readClock(acme.db) < HUGE, 'clock starts below the far-future ts');
+
+    // Both are OUT OF SCOPE (item unrelated to the granted Roadmap subtree) and carry a huge ts.
+    const strayOp: Op = {
+      id: 'stray-op', item_id: 'stray-item', ts: HUGE, device_id: 'globex-dev',
+      fields: { type: 'task', parent_id: null, owner_id: alice.id, title: 'stray' },
+    };
+    const epoch = new Date(0).toISOString();
+    const strayRec: RecordOp = {
+      id: 'stray-rec', entity: 'comment', row_id: 'stray-rec', ts: HUGE + 1, device_id: 'globex-dev',
+      data: { id: 'stray-rec', item_id: 'stray-item', author_id: 'remote:globex:x', body: 'hi', mentions: [], created_at: epoch, updated_at: epoch, deleted: false },
+    };
+
+    const { ops, records } = sanitizeFederatedPush(
+      acme.db, l.acme, 'globex', 'acme', acme.deviceId, [strayOp], [strayRec],
+    );
+    assert.equal(ops.length, 0, 'out-of-scope op dropped');
+    assert.equal(records.length, 0, 'out-of-scope record dropped');
+    assert.ok(readClock(acme.db) < HUGE, 'rejected out-of-scope op/record did NOT advance the causal clock');
+  });
+
+  test('an in-scope op with a far-future ts still advances the clock (control)', async () => {
+    const { acme, globex, roadmap } = await handshake('write');
+    void globex;
+    const l = links(acme, globex);
+
+    const BIG = 8_000_000_000_000;
+    const inScopeOp: Op = {
+      id: 'inscope-op', item_id: roadmap, ts: BIG, device_id: 'globex-dev', fields: { title: 'in-scope future edit' },
+    };
+    const { ops } = sanitizeFederatedPush(acme.db, l.acme, 'globex', 'acme', acme.deviceId, [inScopeOp], []);
+    assert.equal(ops.length, 1, 'in-scope op accepted');
+    assert.ok(readClock(acme.db) >= BIG, 'an accepted in-scope op advances the causal clock unclamped');
   });
 });

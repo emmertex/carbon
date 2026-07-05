@@ -146,6 +146,7 @@ export function TimeTrackedView() {
         end_time: end,
         note: null,
         created_at: now,
+        updated_at: now, // saveTimeLog restamps this from the causal clock anyway
         kind: 'session',
         session_id: null,
         deleted: false,

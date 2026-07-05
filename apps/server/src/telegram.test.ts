@@ -349,6 +349,68 @@ describe('telegram conversation context', () => {
   });
 });
 
+describe('telegram send-failure handling', () => {
+  test('a failed send is logged, and the undelivered reply is not replayed as context', async () => {
+    const cdb = makeControlDb();
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('alice', 'pw');
+    makeAgentOn(db);
+    const sent: Array<{ chatId: string; text: string }> = [];
+    let failNext = false;
+    const deps: TelegramDeps = {
+      ...makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent }),
+      send: async (chatId, text) => {
+        if (failNext) throw new Error('network down');
+        sent.push({ chatId, text });
+      },
+    };
+
+    // Link first (send must succeed for this part).
+    const { code } = createTelegramCode(cdb, { tenantId: 'default', subdomain: null, userId: uid });
+    stubLLM([sayResp('linking')]);
+    await handleTelegramUpdate({ message: { chat: { id: 5 }, text: '/start' } }, deps);
+    await handleTelegramUpdate({ message: { chat: { id: 5 }, text: code } }, deps);
+
+    // The command succeeds and produces a reply, but delivery fails.
+    stubLLM([sayResp('This will not arrive.')]);
+    failNext = true;
+    const realError = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      await handleTelegramUpdate({ message: { chat: { id: 5 }, text: "what's up?" } }, deps);
+    } finally {
+      console.error = realError;
+    }
+    assert.ok(
+      logged.some((a) => a.some((x) => String(x).includes('send failed'))),
+      'the send failure was logged, not silently swallowed',
+    );
+
+    // A later, successfully-delivered turn must not see the undelivered reply replayed as
+    // prior assistant context — the user never actually saw it.
+    failNext = false;
+    const bodies: unknown[][] = [];
+    let i = 0;
+    const responses = [sayResp('ok')];
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+      const parsed = init?.body ? (JSON.parse(init.body) as { messages?: unknown[] }) : {};
+      bodies.push((parsed.messages as unknown[]) ?? []);
+      const body = responses[Math.min(i, responses.length - 1)];
+      i++;
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    await handleTelegramUpdate({ message: { chat: { id: 5 }, text: 'follow up' } }, deps);
+    const msgs = bodies[0] as Array<{ role: string; content: string }>;
+    assert.ok(
+      !msgs.some((m) => typeof m.content === 'string' && m.content.includes('This will not arrive')),
+      'the undelivered reply was not replayed as context',
+    );
+  });
+});
+
 describe('telegram dispatch to the host-shared LM', () => {
   const ENV_KEYS = [
     'HOST_LM_ENABLED',

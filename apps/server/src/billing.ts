@@ -136,7 +136,14 @@ export function recordPaidPeriod(
     [tenantId],
   )?.expires_at;
   const now = Date.now();
-  const base = current ? Math.max(now, Date.parse(current)) : now;
+  const currentMs = current ? Date.parse(current) : NaN;
+  if (current && Number.isNaN(currentMs)) {
+    // Malformed stored value (should never happen, but a corrupt/hand-edited row must not
+    // crash the payment path) — treat as if there were no prior expiry rather than letting
+    // NaN propagate into `new Date()` below and throw RangeError.
+    console.error(`[carbon] tenant ${tenantId} has a malformed expires_at (${JSON.stringify(current)}); treating as expired`);
+  }
+  const base = Number.isFinite(currentMs) ? Math.max(now, currentMs) : now;
   const newExpiry = meta.chargedThrough
     ? new Date(meta.chargedThrough).toISOString()
     : new Date(base + plan.days * DAY_MS).toISOString();

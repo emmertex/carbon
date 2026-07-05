@@ -40,8 +40,8 @@
         # r == {"matched":[{"title":"bread",...}], "unmatched":[{"query":"butter","reason":"no_match"}]}
         m.agent_nearby(tag="coles")                      # "what do I need at Coles?"
 
-    The model's system prompt for these flows is AGENT_API_SYSTEM_PROMPT in
-    apps/server/src/agents.ts (also summarised in docs/hermes.md). Geocoding for
+    The model's system prompt for these flows is SYSTEM_PROMPT in
+    apps/server/src/agent-command.ts (also summarised in docs/hermes.md). Geocoding for
     "nearest Coles" is controlled by CARBON_GEOCODE_* env vars (OpenStreetMap default).
     
     Queue processor: carbon-process-queue.py

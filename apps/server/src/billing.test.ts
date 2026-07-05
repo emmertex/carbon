@@ -162,6 +162,27 @@ describe('recordPaidPeriod', () => {
     const approxDays = delta / (24 * 3600 * 1000);
     assert.ok(approxDays > 80, 'renewal stacks from current expiry');
   });
+
+  test('a malformed stored expires_at does not throw — treated as expired, not stacked', () => {
+    const db = openTestControlDb();
+    db.run(
+      `INSERT INTO tenants (id, subdomain, status, created_at, db_path, blobs_dir, expires_at)
+       VALUES ('t7', 'test7', 'active', ?, '/tmp/t7.db', '/tmp/t7-blobs', 'not-a-real-date')`,
+      [new Date().toISOString()],
+    );
+    const plan = getPlan('q3m')!; // 91 days
+    let newExpiry: string;
+    assert.doesNotThrow(() => {
+      newExpiry = recordPaidPeriod(db, 't7', plan, { provider: 'simulate', externalId: 'sim_bad' });
+    });
+    assert.ok(newExpiry!, 'a valid expiry is still produced');
+    assert.ok(!Number.isNaN(new Date(newExpiry!).getTime()), 'expiry is a valid date');
+    // Malformed prior value must not be trusted as a base to stack from — expiry should land
+    // close to now + plan.days, not further out (which would happen if some garbage timestamp
+    // got parsed and stacked on top).
+    const approxDays = (new Date(newExpiry!).getTime() - Date.now()) / (24 * 3600 * 1000);
+    assert.ok(approxDays > plan.days - 1 && approxDays < plan.days + 1, 'expiry is ~plan.days from now');
+  });
 });
 
 // ─── subscription status update ──────────────────────────────────────────────

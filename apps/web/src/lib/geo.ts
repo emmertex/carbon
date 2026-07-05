@@ -17,9 +17,6 @@ const PREF_KEY = 'carbon.geofence';
 export function geofencingSupported(): boolean {
   return geolocationSupported();
 }
-export function geofencingActive(): boolean {
-  return watch !== null;
-}
 export function geofencePref(): boolean {
   return localStorage.getItem(PREF_KEY) === '1';
 }

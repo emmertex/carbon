@@ -56,11 +56,20 @@ export async function disablePush(): Promise<void> {
   if (!sub) return;
   const cfg = getServerConfig();
   if (cfg.url) {
-    await fetch(url('/api/push/unsubscribe'), {
+    // If the server-side unsubscribe fails, leave the browser subscription in
+    // place so a later retry can still tell the server to drop it, instead of
+    // clearing the only record of a subscription the server thinks is live.
+    const ok = await fetch(url('/api/push/unsubscribe'), {
       method: 'POST',
       headers: authHeaders(cfg),
       body: JSON.stringify({ endpoint: sub.endpoint }),
-    }).catch(() => {});
+    })
+      .then((res) => res.ok)
+      .catch((e) => {
+        console.warn('[carbon] WebPush unsubscribe request failed:', e);
+        return false;
+      });
+    if (!ok) return;
   }
   await sub.unsubscribe();
 }

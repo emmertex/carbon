@@ -86,7 +86,8 @@ Key buckets: `query:listview.roots` (SQL-prefiltered list query — the per-muta
 floor, cached per revision), `query:forecast.data` / `query:container.data` (the
 full-enrich views), `render:list` (windowed render — only visible rows),
 `persist:export` / `persist:idb` (whole-DB serialization + IndexedDB write, both
-debounced/background), and the `interaction:*` end-to-end latencies (`add`,
+debounced/background — `persist:idb` now runs off the main thread via a dedicated
+Worker), and the `interaction:*` end-to-end latencies (`add`,
 `complete`, `switch`, `openContainer`).
 
 The list is virtualized (`VirtualTaskList`) and the query is SQL-prefiltered

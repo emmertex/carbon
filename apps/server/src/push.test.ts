@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 import { Hono } from 'hono';
+import webpush from 'web-push';
 import { makeTestDb, makeHono, appFetch, type TestDb } from './test-app';
-import { saveSubscription, removeSubscription, checkReminders } from './push';
+import { saveSubscription, removeSubscription, checkReminders, notifyTask } from './push';
 import { saveFcmToken, removeFcmToken } from './fcm';
 import { createItem, updateItem, createTag, updateTag, setItemTags, tagId } from '@carbon/core';
 import type { AuthVars } from './auth';
@@ -195,6 +196,76 @@ describe('checkReminders', () => {
       !!db.get('SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ?', [id, 'due']);
     assert.ok(sent(free.id), 'the ordinary task fires its due reminder');
     assert.ok(!sent(held.id), 'the on-hold-tagged task is suppressed');
+  });
+});
+
+// ─── Web Push error handling ──────────────────────────────────────────────────
+
+describe('notifyTask WebPush error handling', () => {
+  test('a non-404/410 send error is logged and the subscription is kept', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser('u', 'pw');
+    const endpoint = 'https://push.example.com/server-error';
+    saveSubscription(db, userId, { endpoint, keys: { p256dh: 'A', auth: 'B' } });
+    const item = createItem(db, deviceId, { title: 'task', ownerId: userId });
+
+    const realSend = webpush.sendNotification;
+    const realError = console.error;
+    const logged: unknown[][] = [];
+    webpush.sendNotification = (async () => {
+      throw Object.assign(new Error('server exploded'), { statusCode: 500 });
+    }) as typeof webpush.sendNotification;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      await notifyTask(db, item.id, { title: 'hi', body: 'there' });
+    } finally {
+      webpush.sendNotification = realSend;
+      console.error = realError;
+    }
+
+    assert.ok(
+      logged.some((a) => a.some((x) => String(x).includes('web push send failed'))),
+      'the 500 error was logged, not silently swallowed',
+    );
+    assert.ok(
+      db.get('SELECT 1 FROM push_subscriptions WHERE endpoint = ?', [endpoint]),
+      'subscription is NOT cleaned up for a non-404/410 error',
+    );
+  });
+
+  test('a 410 (gone) error is not logged as an unexpected failure and cleans up the subscription', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser('u2', 'pw');
+    const endpoint = 'https://push.example.com/gone';
+    saveSubscription(db, userId, { endpoint, keys: { p256dh: 'A', auth: 'B' } });
+    const item = createItem(db, deviceId, { title: 'task2', ownerId: userId });
+
+    const realSend = webpush.sendNotification;
+    const realError = console.error;
+    const logged: unknown[][] = [];
+    webpush.sendNotification = (async () => {
+      throw Object.assign(new Error('gone'), { statusCode: 410 });
+    }) as typeof webpush.sendNotification;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      await notifyTask(db, item.id, { title: 'hi', body: 'there' });
+    } finally {
+      webpush.sendNotification = realSend;
+      console.error = realError;
+    }
+
+    assert.ok(
+      !logged.some((a) => a.some((x) => String(x).includes('web push send failed'))),
+      'a 410 is the expected "subscription gone" path, not an unexpected-error log',
+    );
+    assert.ok(
+      !db.get('SELECT 1 FROM push_subscriptions WHERE endpoint = ?', [endpoint]),
+      'subscription is cleaned up for a 410',
+    );
   });
 });
 

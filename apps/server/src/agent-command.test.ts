@@ -228,6 +228,35 @@ describe('runAgentCommand — scheduling, sharing, assigning, timers, completed 
     assert.deepEqual(rule, { type: 'weekly', interval: 1, daysOfWeek: [2] });
   });
 
+  test('update: a status->done patch still spawns the next recurrence (routed through setCompleted)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { updateItem, queryItems, parseRecurrence } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const due = new Date();
+    due.setDate(due.getDate() + 5);
+    due.setMilliseconds(0);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Water the plants', ownerId: uid, dueDate: due.toISOString() });
+    updateItem(db, deviceId, task.id, { recurrence: JSON.stringify({ type: 'daily', interval: 1 }) });
+    stubLLM([
+      toolResp('update', { updates: [{ query: 'water the plants', patch: { status: 'done' } }] }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'mark water the plants as done', true);
+    assert.match(r.reply, /Updated: Water the plants/);
+    assert.equal(getItem(db, task.id)?.status, 'done');
+    assert.ok(getItem(db, task.id)?.completed_at);
+    // A next occurrence was spawned — proof the update went through setCompleted, not a
+    // raw field write that would have bypassed the recurrence-spawn logic.
+    const spawned = queryItems(db, { tasksOnly: true }).find(
+      (t) => t.title === 'Water the plants' && t.id !== task.id,
+    );
+    assert.ok(spawned, 'expected a spawned next occurrence');
+    assert.equal(spawned!.status, 'active');
+    assert.deepEqual(parseRecurrence(spawned!.recurrence), { type: 'daily', interval: 1 });
+  });
+
   test('reopen: complete done:false finds a completed task by name', async () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
@@ -288,6 +317,22 @@ describe('runAgentCommand — scheduling, sharing, assigning, timers, completed 
     const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'assign book flights to rachel', true);
     assert.match(r.reply, /Assigned Book flights to rachel/);
     assert.ok(listAssigneesForItem(db, task.id).some((a) => a.user_id === rachelId));
+  });
+
+  test('assign: also grants a write share, so the assignee can see it via /api/sync (regression)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const { hasWriteAccess } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Book flights', ownerId: uid });
+    // Rachel isn't shared on the task yet — an agent assign must not leave her unable to see it.
+    assert.equal(hasWriteAccess(db, task.id, rachelId), false);
+    stubLLM([toolResp('assign', { query: 'book flights', users: ['rachel'] }), doneResp()]);
+
+    await runAgentCommand(deps(db, deviceId), agent, uid, 'assign book flights to rachel', true);
+    assert.ok(listAssigneesForItem(db, task.id).some((a) => a.user_id === rachelId));
+    assert.equal(hasWriteAccess(db, task.id, rachelId), true);
   });
 
   test('timers: start auto-stops a prior running timer; stop ends it', async () => {

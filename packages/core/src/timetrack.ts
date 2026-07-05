@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Db, Row } from './db';
 import type { Item, TimeLog, TimeLogKind } from './types';
 import { getItem, getItemTags, rowToTimeLog, recordRecordOp } from './repo';
+import { causalNowIso } from './crdt';
 
 // Time tracking v2 — see docs/time-tracking-design.md.
 // A *session* (kind 'session', item_id = project) contains *task segments*
@@ -23,6 +24,7 @@ interface TLRow extends Row {
   end_time: string | null;
   note: string | null;
   created_at: string;
+  updated_at: string;
   kind: string;
   session_id: string | null;
   deleted: number;
@@ -32,9 +34,13 @@ function userClause(userId: string | null): { c: string; p: string[] } {
   return userId == null ? { c: 'user_id IS NULL', p: [] } : { c: 'user_id = ?', p: [userId] };
 }
 
+/** Stamps a fresh causal-clock `updated_at` on every record before persisting it —
+ *  the single chokepoint all TimeLog writes in this file pass through, so callers
+ *  (and makeLog) don't need to think about the LWW timestamp themselves. */
 function emit(db: Db, dev: string, log: TimeLog): TimeLog {
-  recordRecordOp(db, dev, 'timelog', log.id, log);
-  return log;
+  const stamped: TimeLog = { ...log, updated_at: causalNowIso(db) };
+  recordRecordOp(db, dev, 'timelog', stamped.id, stamped);
+  return stamped;
 }
 
 function makeLog(p: {
@@ -54,6 +60,7 @@ function makeLog(p: {
     end_time: p.end,
     note: p.note ?? null,
     created_at: p.start,
+    updated_at: p.start, // placeholder — emit() always overwrites with the causal clock
     kind: p.kind,
     session_id: p.sessionId,
     deleted: false,

@@ -11,6 +11,7 @@ import { ensureCaldavTables } from './caldav';
 import { ensureUserPrefsTables } from './user-prefs';
 import { ensureNoticeTables } from './notices';
 import { ensureFederationTables, ensureGovernanceTables } from './federation';
+import { ensurePurgeNoticeTable } from './purge-notices';
 
 /** Everything a single tenant's request handlers close over. One per family DB. */
 export interface TenantCtx {
@@ -51,6 +52,7 @@ export function initTenantDb(opts: {
   ensureCaldavTables(db);
   ensureUserPrefsTables(db);
   ensureNoticeTables(db);
+  ensurePurgeNoticeTable(db);
   ensureFederationTables(db);
   ensureGovernanceTables(db);
   const vapidPublicKey = initVapid(db);
@@ -75,6 +77,12 @@ export interface TenantLocation {
 interface Loaded {
   ctx: TenantCtx;
   app: FetchApp;
+  /** Requests currently inside this tenant's app.fetch(); the DB handle must not be
+   *  closed while this is > 0 (see closeOrDefer). */
+  inFlight: number;
+  /** Set when eviction/close was requested while inFlight > 0; closed by the last
+   *  in-flight request to finish instead of by the evictor. */
+  pendingClose: boolean;
 }
 
 export interface TenantRegistry {
@@ -109,6 +117,55 @@ export function createTenantRegistry(opts: {
   const cap = opts.cap ?? 200;
   // Map iteration order = insertion order; we delete+reinsert on access for LRU.
   const cache = new Map<string, Loaded>();
+  // Secondary index so a hot tenant can be found by subdomain without hitting the
+  // control DB (resolveLoaded checks this before calling opts.resolve).
+  const idBySubdomain = new Map<string, string>();
+
+  /** Close now if nothing is in-flight, otherwise let the last in-flight request's
+   *  wrapped fetch() close it when it finishes (see wrapApp). Never closes twice. */
+  function closeOrDefer(entry: Loaded): void {
+    if (entry.inFlight > 0) {
+      entry.pendingClose = true;
+      return;
+    }
+    try {
+      entry.ctx.db.raw.close();
+    } catch {
+      /* already closed */
+    }
+  }
+
+  /** Wrap a built app so concurrent requests are tracked; eviction of a tenant with
+   *  in-flight requests defers the actual DB close instead of closing out from under
+   *  them mid-request. */
+  function wrapApp(entry: Loaded, rawApp: FetchApp): FetchApp {
+    return {
+      fetch(req, ...rest) {
+        entry.inFlight++;
+        const finish = (): void => {
+          entry.inFlight--;
+          if (entry.inFlight === 0 && entry.pendingClose) {
+            entry.pendingClose = false;
+            try {
+              entry.ctx.db.raw.close();
+            } catch {
+              /* already closed */
+            }
+          }
+        };
+        let result: Response | Promise<Response>;
+        try {
+          result = rawApp.fetch(req, ...rest);
+        } catch (e) {
+          finish();
+          throw e;
+        }
+        if (result instanceof Promise) return result.finally(finish);
+        finish();
+        return result;
+      },
+    };
+  }
 
   function evictIfNeeded(): void {
     while (cache.size > cap) {
@@ -116,10 +173,9 @@ export function createTenantRegistry(opts: {
       if (oldest === undefined) break;
       const victim = cache.get(oldest);
       cache.delete(oldest);
-      try {
-        victim?.ctx.db.raw.close();
-      } catch {
-        /* already closed */
+      if (victim) {
+        idBySubdomain.delete(victim.ctx.subdomain);
+        closeOrDefer(victim);
       }
     }
   }
@@ -132,14 +188,26 @@ export function createTenantRegistry(opts: {
       return cached;
     }
     const ctx = initTenantDb(loc);
-    const entry: Loaded = { ctx, app: opts.buildApp(ctx) };
+    const entry: Loaded = { ctx, app: opts.buildApp(ctx), inFlight: 0, pendingClose: false };
+    entry.app = wrapApp(entry, entry.app);
+    idBySubdomain.set(loc.subdomain, loc.id);
     cache.set(loc.id, entry);
     evictIfNeeded();
     return entry;
   }
 
   function resolveLoaded(subdomain: string | null): Loaded | null {
-    if (subdomain === null) return { ctx: opts.defaultCtx, app: opts.defaultApp };
+    if (subdomain === null) return { ctx: opts.defaultCtx, app: opts.defaultApp, inFlight: 0, pendingClose: false };
+    const cachedId = idBySubdomain.get(subdomain);
+    if (cachedId) {
+      const cached = cache.get(cachedId);
+      if (cached) {
+        cache.delete(cachedId); // move to most-recently-used
+        cache.set(cachedId, cached);
+        return cached;
+      }
+      idBySubdomain.delete(subdomain); // stale: entry was evicted
+    }
     const loc = opts.resolve(subdomain);
     if (!loc) return null;
     return load(loc);
@@ -165,11 +233,8 @@ export function createTenantRegistry(opts: {
       const entry = cache.get(id);
       if (!entry) return;
       cache.delete(id);
-      try {
-        entry.ctx.db.raw.close();
-      } catch {
-        /* already closed */
-      }
+      idBySubdomain.delete(entry.ctx.subdomain);
+      closeOrDefer(entry);
     },
   };
 }

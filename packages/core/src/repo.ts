@@ -363,16 +363,6 @@ export function getFolders(db: Db): Item[] {
     .map(rowToItem);
 }
 
-export function searchItems(db: Db, q: string): Item[] {
-  const like = `%${q}%`;
-  return db
-    .all<ItemRow>(
-      `${SELECT} WHERE deleted = 0 AND (title LIKE ? OR note LIKE ?) ORDER BY updated_at DESC LIMIT 200`,
-      [like, like],
-    )
-    .map(rowToItem);
-}
-
 // ----- writes ---------------------------------------------------------------
 
 function nextSortOrder(db: Db, parentId: string | null): number {
@@ -555,20 +545,138 @@ export function deleteItem(db: Db, deviceId: string, id: string): void {
   }
 }
 
-/** Restore a soft-deleted item and its descendants (undo of `deleteItem`). */
-export function restoreItem(db: Db, deviceId: string, id: string): void {
-  const ids = collectDescendants(db, id);
-  for (const childId of ids) {
-    recordOp(db, deviceId, childId, { deleted: false });
+/** Age gate shared by the Settings → Data purge UI and the server's "completed
+ *  items piling up" nudge — both only consider items completed more than this
+ *  many days ago, so the nudge never points at an empty purge section. */
+export const COMPLETED_PURGE_AGE_DAYS = 7;
+
+/** This user's own completed tasks whose `completed_at` is older than `cutoffIso` —
+ *  the candidate set for a "purge old completed items" action. Scoped to items the
+ *  user owns (mirrors the owner half of `visibleItemIds`); shared completed items
+ *  owned by someone else are out of scope. `ownerId: null` scopes to unowned items —
+ *  the normal case for a single-user, no-account, offline-only workspace, where
+ *  `owner_id` is never set (SQLite's `IS` makes NULL = NULL true, unlike `=`).
+ *
+ *  Purging tombstones a whole subtree (`deleteItem` cascades), so an item only
+ *  qualifies if everything live underneath it also qualifies: a completed parent
+ *  with an active, too-recent, or someone-else's descendant is held back until
+ *  its whole subtree is purgeable. That keeps the count shown in the UI equal to
+ *  what a purge actually tombstones. */
+export function completedBefore(db: Db, ownerId: string | null, cutoffIso: string): Item[] {
+  const matched = db
+    .all<ItemRow>(
+      `${SELECT} WHERE owner_id IS ? AND status = 'done' AND deleted = 0
+       AND completed_at IS NOT NULL AND completed_at < ?
+       ORDER BY completed_at`,
+      [ownerId, cutoffIso],
+    )
+    .map(rowToItem);
+  if (matched.length === 0) return matched;
+  // Every live non-candidate disqualifies all its candidate ancestors. Once an
+  // ancestor is already marked, the walk that marked it has climbed everything
+  // above it too, so each chain is walked at most once overall.
+  const matchedIds = new Set(matched.map((i) => i.id));
+  const parentOf = new Map<string, string | null>();
+  for (const r of db.all<{ id: string; parent_id: string | null }>(
+    'SELECT id, parent_id FROM items WHERE deleted = 0',
+  )) {
+    parentOf.set(r.id, r.parent_id);
   }
+  const blocked = new Set<string>();
+  for (const id of parentOf.keys()) {
+    if (matchedIds.has(id)) continue;
+    const seen = new Set<string>(); // guard against any parent cycle
+    let pid = parentOf.get(id) ?? null;
+    while (pid && !seen.has(pid) && !blocked.has(pid)) {
+      seen.add(pid);
+      if (matchedIds.has(pid)) blocked.add(pid);
+      pid = parentOf.get(pid) ?? null;
+    }
+  }
+  return blocked.size ? matched.filter((i) => !blocked.has(i.id)) : matched;
+}
+
+/** Soft-delete every item `completedBefore` qualifies for this owner. Reuses
+ *  `deleteItem` (same cascade semantics as a manual delete), so it stays fully
+ *  CRDT-safe and syncs like any other tombstone — but only subtree tops are
+ *  deleted explicitly: a candidate nested under another candidate is covered by
+ *  its ancestor's cascade, and tombstoning it again would just record duplicate
+ *  ops (which are permanent and sync everywhere). Returns the number of items
+ *  purged, which by construction equals the `completedBefore` count. */
+export function purgeCompleted(
+  db: Db,
+  deviceId: string,
+  ownerId: string | null,
+  cutoffIso: string,
+): number {
+  const items = completedBefore(db, ownerId, cutoffIso);
+  if (items.length === 0) return 0;
+  // A qualifying item's live subtree qualifies in full (see completedBefore), so
+  // "my parent also qualifies" is exactly "some ancestor's cascade covers me".
+  const ids = new Set(items.map((i) => i.id));
+  for (const item of items) {
+    if (item.parent_id && ids.has(item.parent_id)) continue;
+    deleteItem(db, deviceId, item.id);
+  }
+  return items.length;
 }
 
 export type CountScope = 'all' | 'direct';
 
+interface ChildRow {
+  id: string;
+  type: string;
+  status: string;
+}
+
+/** One scan of every live item, grouped by parent — the shared building block
+ *  behind both `subtaskProgress` and `openCountsByContainer` so neither one
+ *  issues a SQL query per BFS node (a single query, followed by an in-memory
+ *  walk, regardless of subtree size or how many containers are queried). */
+function childrenByParent(db: Db): Map<string, ChildRow[]> {
+  const kids = new Map<string, ChildRow[]>();
+  for (const r of db.all<{ id: string; parent_id: string | null; type: string; status: string }>(
+    'SELECT id, parent_id, type, status FROM items WHERE deleted = 0',
+  )) {
+    if (!r.parent_id) continue;
+    const row = { id: r.id, type: r.type, status: r.status };
+    const arr = kids.get(r.parent_id);
+    if (arr) arr.push(row);
+    else kids.set(r.parent_id, [row]);
+  }
+  return kids;
+}
+
+/** BFS over an in-memory parent→children map (see `childrenByParent`), counting
+ *  leaf-descendant tasks — shared by `subtaskProgress('all')` and
+ *  `openCountsByContainer('all')` so the traversal logic lives in one place. */
+function leafTaskProgress(
+  kids: Map<string, ChildRow[]>,
+  rootId: string,
+): { done: number; total: number } {
+  const taskKids = (id: string) => (kids.get(id) ?? []).filter((c) => c.type === 'task');
+  let done = 0;
+  let total = 0;
+  const queue = [...(kids.get(rootId) ?? [])];
+  while (queue.length) {
+    const c = queue.shift()!;
+    if (c.type !== 'task') continue;
+    const tk = taskKids(c.id);
+    if (tk.length === 0) {
+      total++;
+      if (c.status === 'done') done++;
+    } else {
+      queue.push(...tk);
+    }
+  }
+  return { done, total };
+}
+
 /** Sub-task progress for the pie ring and remaining-work counts.
  *  - `direct`: immediate child tasks (done / total).
  *  - `all`: leaf descendant tasks — a task with no task-children counts once.
- *  Both ignore non-task children and deleted items (via `getChildren`). */
+ *  Both ignore non-task children and deleted items. Uses a single query (see
+ *  `childrenByParent`) rather than one `getChildren` query per BFS node. */
 export function subtaskProgress(
   db: Db,
   id: string,
@@ -578,21 +686,7 @@ export function subtaskProgress(
     const kids = getChildren(db, id).filter((c) => c.type === 'task');
     return { done: kids.filter((c) => c.status === 'done').length, total: kids.length };
   }
-  let done = 0;
-  let total = 0;
-  const queue = getChildren(db, id);
-  while (queue.length) {
-    const c = queue.shift()!;
-    if (c.type !== 'task') continue;
-    const taskKids = getChildren(db, c.id).filter((k) => k.type === 'task');
-    if (taskKids.length === 0) {
-      total++;
-      if (c.status === 'done') done++;
-    } else {
-      queue.push(...taskKids);
-    }
-  }
-  return { done, total };
+  return leafTaskProgress(childrenByParent(db), id);
 }
 
 /**
@@ -608,36 +702,12 @@ export function openCountsByContainer(
 ): Map<string, number> {
   const out = new Map<string, number>();
   if (containerIds.length === 0) return out;
-  // One scan of the live items, grouped by parent (order is irrelevant to a count).
-  const kids = new Map<string, { id: string; type: string; status: string }[]>();
-  for (const r of db.all<{ id: string; parent_id: string | null; type: string; status: string }>(
-    'SELECT id, parent_id, type, status FROM items WHERE deleted = 0',
-  )) {
-    if (!r.parent_id) continue;
-    const row = { id: r.id, type: r.type, status: r.status };
-    const arr = kids.get(r.parent_id);
-    if (arr) arr.push(row);
-    else kids.set(r.parent_id, [row]);
-  }
-  const taskKids = (id: string) => (kids.get(id) ?? []).filter((c) => c.type === 'task');
+  const kids = childrenByParent(db);
   const remaining = (id: string): number => {
     if (scope === 'direct') {
-      return taskKids(id).filter((c) => c.status !== 'done').length;
+      return (kids.get(id) ?? []).filter((c) => c.type === 'task' && c.status !== 'done').length;
     }
-    let done = 0;
-    let total = 0;
-    const queue = [...(kids.get(id) ?? [])];
-    while (queue.length) {
-      const c = queue.shift()!;
-      if (c.type !== 'task') continue;
-      const tk = taskKids(c.id);
-      if (tk.length === 0) {
-        total++;
-        if (c.status === 'done') done++;
-      } else {
-        queue.push(...tk);
-      }
-    }
+    const { done, total } = leafTaskProgress(kids, id);
     return total - done;
   };
   for (const id of containerIds) out.set(id, remaining(id));
@@ -886,11 +956,6 @@ export function tagLeaf(name: string): string {
   return segs[segs.length - 1] ?? '';
 }
 
-/** Nesting depth: top-level tags are depth 0. */
-export function tagDepth(name: string): number {
-  return Math.max(0, tagSegments(name).length - 1);
-}
-
 /** Deterministic, content-addressed tag id so the same path converges across devices. */
 export function tagId(name: string): string {
   return 't:' + normalizeTagName(name).toLowerCase();
@@ -914,9 +979,10 @@ function nextTagSortOrder(db: Db, parentPath: string): number {
   return max + 1;
 }
 
-/** Emit a tag record-op from a fully-formed Tag (stamps a fresh updated_at). */
+/** Emit a tag record-op from a fully-formed Tag (stamps a fresh updated_at from the
+ *  causal clock, skew-safe like shareItem/setItemDepLink — see upsertTag's LWW merge). */
 function emitTag(db: Db, deviceId: string, tag: Omit<Tag, 'updated_at'>): Tag {
-  const full: Tag = { ...tag, updated_at: new Date().toISOString() };
+  const full: Tag = { ...tag, updated_at: causalNowIso(db) };
   recordRecordOp(db, deviceId, 'tag', full.id, full);
   return full;
 }
@@ -1044,14 +1110,6 @@ export function moveTag(db: Db, deviceId: string, id: string, newRawName: string
   }
 }
 
-/** Merge `srcId` (and its subtree) into `dstId` by re-pointing links onto dst's path. */
-export function mergeTag(db: Db, deviceId: string, srcId: string, dstId: string): void {
-  if (srcId === dstId) return;
-  const dst = db.get<TagRow>('SELECT name FROM tags WHERE id = ? AND deleted = 0', [dstId]);
-  if (!dst) return;
-  moveTag(db, deviceId, srcId, dst.name);
-}
-
 // ----- tag hierarchy queries -------------------------------------------------
 
 /** Ids of all live descendants of a tag (excludes the tag itself). */
@@ -1117,7 +1175,7 @@ export function deleteTag(db: Db, deviceId: string, id: string): void {
     recordRecordOp(db, deviceId, 'tag', id, {
       ...rowToTag(existing),
       deleted: true,
-      updated_at: new Date().toISOString(),
+      updated_at: causalNowIso(db),
     });
   }
   // Tombstone its links so the removal syncs too.
@@ -1171,7 +1229,7 @@ export function setItemTagLink(
   tag: string,
   deleted: boolean,
 ): void {
-  const row: ItemTag = { item_id: itemId, tag_id: tag, updated_at: new Date().toISOString(), deleted };
+  const row: ItemTag = { item_id: itemId, tag_id: tag, updated_at: causalNowIso(db), deleted };
   recordRecordOp(db, deviceId, 'item_tag', itemTagRowId(itemId, tag), row);
 }
 
@@ -1230,9 +1288,8 @@ export function upsertItemTag(db: Db, row: ItemTag): void {
 // ----- item dependencies (task-to-task blocking) ----------------------------
 //
 // A directed edge pred_id -> succ_id means "pred blocks succ": succ is not
-// available until pred is done/dropped. Synced row-level like item_tags, but
-// stamped with the causal clock (the tag link code uses wall-clock — a known
-// skew bug we deliberately don't copy here).
+// available until pred is done/dropped. Synced row-level like item_tags, and
+// (like item_tags) stamped with the causal clock so LWW merge is skew-safe.
 
 const depRowId = (predId: string, succId: string): string => `dep:${predId}:${succId}`;
 
@@ -1365,6 +1422,7 @@ interface TimeLogRow extends Row {
   end_time: string | null;
   note: string | null;
   created_at: string;
+  updated_at: string;
   kind: string;
   session_id: string | null;
   deleted: number;
@@ -1379,19 +1437,29 @@ export function rowToTimeLog(r: TimeLogRow): TimeLog {
     end_time: r.end_time,
     note: r.note,
     created_at: r.created_at,
+    updated_at: r.updated_at,
     kind: (r.kind as TimeLog['kind']) ?? 'task',
     session_id: r.session_id ?? null,
     deleted: !!r.deleted,
   };
 }
 
+/** Raw op-applier: materializes a TimeLog row with the standard LWW guard (matching
+ *  upsertShare/upsertTag/upsertItemTag/upsertItemDep) — a stale replay whose
+ *  `updated_at` isn't newer than what's stored is dropped rather than clobbering it. */
 export function upsertTimeLog(db: Db, log: TimeLog): void {
+  const existing = db.get<{ updated_at: string }>(
+    'SELECT updated_at FROM time_logs WHERE id = ?',
+    [log.id],
+  );
+  if (existing && existing.updated_at > log.updated_at) return;
   db.run(
-    `INSERT INTO time_logs (id, item_id, user_id, start_time, end_time, note, created_at, kind, session_id, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO time_logs (id, item_id, user_id, start_time, end_time, note, created_at, updated_at, kind, session_id, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        start_time = excluded.start_time, end_time = excluded.end_time, note = excluded.note,
-       kind = excluded.kind, session_id = excluded.session_id, deleted = excluded.deleted`,
+       updated_at = excluded.updated_at, kind = excluded.kind, session_id = excluded.session_id,
+       deleted = excluded.deleted`,
     [
       log.id,
       log.item_id,
@@ -1400,6 +1468,7 @@ export function upsertTimeLog(db: Db, log: TimeLog): void {
       log.end_time,
       log.note,
       log.created_at,
+      log.updated_at,
       log.kind ?? 'task',
       log.session_id ?? null,
       log.deleted ? 1 : 0,
@@ -1410,17 +1479,24 @@ export function upsertTimeLog(db: Db, log: TimeLog): void {
 export function deleteTimeLog(db: Db, deviceId: string, id: string): void {
   const r = db.get<TimeLogRow>('SELECT * FROM time_logs WHERE id = ?', [id]);
   if (!r) return;
-  recordRecordOp(db, deviceId, 'timelog', id, { ...rowToTimeLog(r), deleted: true });
+  recordRecordOp(db, deviceId, 'timelog', id, {
+    ...rowToTimeLog(r),
+    deleted: true,
+    updated_at: causalNowIso(db),
+  });
 }
 
 /**
  * Create or edit a time log AND record it as a sync op. `upsertTimeLog` alone is the
  * raw op-applier — it materializes the row but records nothing, so edits made through
  * it never push and revert on the next inbound timelog op. Always use this from the UI.
+ * Stamps a fresh `updated_at` from the causal clock, ignoring whatever the caller had
+ * on `log` (mirrors shareItem/unshareItem/emitTag) so the LWW guard reflects this edit.
  */
 export function saveTimeLog(db: Db, deviceId: string, log: TimeLog): TimeLog {
-  recordRecordOp(db, deviceId, 'timelog', log.id, log);
-  return log;
+  const stamped: TimeLog = { ...log, updated_at: causalNowIso(db) };
+  recordRecordOp(db, deviceId, 'timelog', stamped.id, stamped);
+  return stamped;
 }
 
 export function getTimeLogs(db: Db, itemId: string): TimeLog[] {
@@ -1447,6 +1523,7 @@ export function startTimer(
     end_time: null,
     note: null,
     created_at: now,
+    updated_at: causalNowIso(db),
     kind: 'task',
     session_id: null,
     deleted: false,
@@ -1458,7 +1535,11 @@ export function startTimer(
 export function stopTimer(db: Db, deviceId: string, logId: string): void {
   const r = db.get<TimeLogRow>('SELECT * FROM time_logs WHERE id = ?', [logId]);
   if (!r || r.end_time) return;
-  const stopped: TimeLog = { ...rowToTimeLog(r), end_time: new Date().toISOString() };
+  const stopped: TimeLog = {
+    ...rowToTimeLog(r),
+    end_time: new Date().toISOString(),
+    updated_at: causalNowIso(db),
+  };
   recordRecordOp(db, deviceId, 'timelog', stopped.id, stopped);
 }
 
@@ -1585,6 +1666,12 @@ export function effectiveShares(db: Db, itemId: string): EffectiveShare[] {
 export function hasWriteAccess(db: Db, itemId: string, userId: string): boolean {
   if (getItem(db, itemId)?.owner_id === userId) return true;
   return effectiveShares(db, itemId).find((e) => e.user_id === userId)?.permission === 'write';
+}
+
+/** True if the user owns the item or has any effective share on it (read or write). */
+export function hasReadAccess(db: Db, itemId: string, userId: string): boolean {
+  if (getItem(db, itemId)?.owner_id === userId) return true;
+  return effectiveShares(db, itemId).some((e) => e.user_id === userId);
 }
 
 interface AssigneeRow extends Row {
@@ -2093,21 +2180,47 @@ export function ingestRecordOps(db: Db, ops: RecordOp[], markSynced: boolean): R
  * already appear in the projects list). The top-most shared item in a chain wins:
  * a shared child whose shared parent is also visible is not listed separately.
  */
+/** Batch-fetch items by id (chunked `IN (...)`, matching `subtreeIds`'s pattern)
+ *  instead of one `getItem` query per id — used by `sharedRoots` so it doesn't
+ *  do up to two per-row lookups. */
+function getItemsByIds(db: Db, ids: string[]): Map<string, Item> {
+  const out = new Map<string, Item>();
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i += SUBTREE_BATCH) {
+    const chunk = unique.slice(i, i + SUBTREE_BATCH);
+    const placeholders = chunk.map(() => '?').join(',');
+    for (const row of db.all<ItemRow>(`${SELECT} WHERE id IN (${placeholders})`, chunk)) {
+      out.set(row.id, rowToItem(row));
+    }
+  }
+  return out;
+}
+
 export function sharedRoots(db: Db, userId: string): Item[] {
   const rows = db.all<{ item_id: string }>(
     'SELECT DISTINCT item_id FROM shares WHERE user_id = ? AND deleted = 0',
     [userId],
   );
-  const out: Item[] = [];
+  const items = getItemsByIds(
+    db,
+    rows.map((r) => r.item_id),
+  );
+  const candidates: Item[] = [];
   for (const { item_id } of rows) {
-    const it = getItem(db, item_id);
+    const it = items.get(item_id);
     if (!it || it.deleted) continue;
     if (it.owner_id === userId) continue; // mine — shown normally
     if (it.type !== 'task') continue; // shared projects appear in the projects list
-    if (it.parent_id && getItem(db, it.parent_id)) continue; // parent visible → seen in context
-    out.push(it);
+    candidates.push(it);
   }
-  return out;
+  // Batch-check parent existence (deleted or not — mirrors the old per-row
+  // `getItem` presence check) instead of one lookup per candidate.
+  const parentIds = candidates
+    .map((it) => it.parent_id)
+    .filter((id): id is string => id !== null && !items.has(id));
+  const parents = getItemsByIds(db, parentIds);
+  const parentExists = (id: string) => items.has(id) || parents.has(id);
+  return candidates.filter((it) => !(it.parent_id && parentExists(it.parent_id)));
 }
 
 /**
@@ -2158,18 +2271,34 @@ export function itemsMissingCreate(db: Db, ids: string[]): string[] {
  * whatever they've already authorized). Shared by `visibleItemIds`, the `/sync`
  * backfill, and (later) per-link federation scope resolution.
  */
+// SQLite's bound-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) varies by build;
+// this keeps a single IN(...) well under any of them regardless of frontier size.
+const SUBTREE_BATCH = 500;
+
 export function subtreeIds(db: Db, roots: string[]): Set<string> {
   const set = new Set<string>();
-  const queue = [...roots];
   roots.forEach((id) => set.add(id));
-  while (queue.length) {
-    const parent = queue.shift()!;
-    for (const k of db.all<{ id: string }>('SELECT id FROM items WHERE parent_id = ?', [parent])) {
-      if (!set.has(k.id)) {
-        set.add(k.id);
-        queue.push(k.id);
+  // Process one tree level at a time via a batched `IN (...)`, instead of one
+  // query per descendant — collapses query count from O(descendants) to
+  // O(depth × descendants/SUBTREE_BATCH), the dominant cost on deep/wide trees
+  // (federation's subtree walks were the main caller feeling this).
+  let frontier = roots;
+  while (frontier.length) {
+    const next: string[] = [];
+    for (let i = 0; i < frontier.length; i += SUBTREE_BATCH) {
+      const chunk = frontier.slice(i, i + SUBTREE_BATCH);
+      const placeholders = chunk.map(() => '?').join(',');
+      for (const k of db.all<{ id: string }>(
+        `SELECT id FROM items WHERE parent_id IN (${placeholders})`,
+        chunk,
+      )) {
+        if (!set.has(k.id)) {
+          set.add(k.id);
+          next.push(k.id);
+        }
       }
     }
+    frontier = next;
   }
   return set;
 }

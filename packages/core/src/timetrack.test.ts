@@ -115,6 +115,7 @@ test('toCsv includes every entry type plus tags', () => {
       end_time: r.end_time,
       note: null,
       created_at: r.start_time,
+      updated_at: r.start_time,
       kind: 'session' as const,
       session_id: null,
       deleted: false,

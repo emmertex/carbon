@@ -62,10 +62,19 @@ async function squareFetch<T>(path: string, method: string, body?: unknown): Pro
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const json = (await res.json().catch(() => ({}))) as T & SquareError;
+  let parseFailed = false;
+  const json = (await res.json().catch(() => {
+    parseFailed = true;
+    return {};
+  })) as T & SquareError;
   if (!res.ok) {
     const msg = json.errors?.map((e) => e.detail || e.code).join('; ') || `Square ${res.status}`;
     throw new Error(`Square API: ${msg}`);
+  }
+  if (parseFailed) {
+    // The request succeeded (2xx) but the body wasn't valid JSON — surface this distinctly
+    // from a genuinely-missing field so it's not mistaken for a normal API response shape.
+    console.error(`[carbon] Square ${method} ${path}: response body was not valid JSON (status ${res.status})`);
   }
   return json;
 }

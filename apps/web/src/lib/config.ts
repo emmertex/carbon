@@ -285,9 +285,6 @@ function resolveTheme(mode: ThemeMode, light: Theme, dark: Theme): Theme {
 export function getActiveTheme(): Theme {
   return resolveTheme(getThemeMode(), getLightTheme(), getDarkTheme());
 }
-export function isDarkActive(): boolean {
-  return isDarkTheme(getActiveTheme());
-}
 
 export function applyTheme(mode: ThemeMode, light: Theme, dark: Theme): void {
   localStorage.setItem(MODE_KEY, mode);

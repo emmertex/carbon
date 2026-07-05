@@ -16,6 +16,7 @@ import { ensureAgentTables, ensureAgentUsageTables } from './agents';
 import { ensureUserPrefsTables } from './user-prefs';
 import { ensureNoticeTables } from './notices';
 import { ensureFederationTables, ensureGovernanceTables } from './federation';
+import { ensurePurgeNoticeTable } from './purge-notices';
 
 export type TestDb = ReturnType<typeof openDb>;
 
@@ -42,6 +43,7 @@ export function makeTestDb(): TestCtx {
   ensureCaldavTables(db);
   ensureUserPrefsTables(db);
   ensureNoticeTables(db);
+  ensurePurgeNoticeTable(db);
   ensureFederationTables(db);
   ensureGovernanceTables(db);
   const deviceId = ensureCaldavDeviceId(db);

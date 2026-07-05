@@ -111,6 +111,7 @@ import {
 import { registerAgentApi } from './agent-api';
 import { buildAgentApiDeps } from './agent-ops';
 import { listOpenNotices, getNotice, actOnNotice } from './notices';
+import { checkPurgeSuggestions } from './purge-notices';
 import {
   resolveHostCeiling,
   federationRoutes,
@@ -538,13 +539,15 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
     // Validate/stamp client-pushed ops before applying (S1). Items first so that a
     // share/assignee pushed alongside a brand-new item sees that item already ingested.
+    // Deliberately skipped in open mode: no-auth single-user has exactly one trusted
+    // caller, so author_id/user_id/ownership spoofing isn't a threat to guard against.
     if (!open && Array.isArray(body.ops)) body.ops = sanitizeOps(db, userId, body.ops);
     if (Array.isArray(body.ops) && body.ops.length) ingestOps(db, body.ops, true);
     if (!open && Array.isArray(body.recordOps))
       body.recordOps = sanitizeRecordOps(db, userId, body.recordOps);
     if (Array.isArray(body.recordOps) && body.recordOps.length) {
       const fresh = ingestRecordOps(db, body.recordOps, true);
-      triggerAgents(db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
+      triggerAgents(ctx.id, db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
     }
 
     const visible = open ? null : visibleItemIds(db, userId);
@@ -842,6 +845,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       'review_interval',
     ] as const;
     for (const k of fields) if (k in b) (patch as Record<string, unknown>)[k] = b[k];
+    // A raw status patch must keep completed_at in step (mirrors setCompleted) —
+    // completed-item age logic (e.g. the purge feature) relies on the stamp.
+    if (typeof patch.status === 'string' && patch.status !== item.status) {
+      patch.completed_at = patch.status === 'done' ? new Date().toISOString() : null;
+    }
     updateItem(db, serverDeviceId, id, patch);
     return c.json(getItem(db, id));
   });
@@ -1670,16 +1678,26 @@ const registry = createTenantRegistry({
   cap: Number(process.env.TENANT_CACHE_CAP ?? 200),
 });
 
-// Federation exchange sweep piggybacks the reminder-sweep tick (no competing timer).
-// Each tick runs one bidirectional exchange round for every active link across active
-// tenant DBs; same-host both-tenants-in-one-process is fine (deliverToPeer loops back).
+// Federation exchange sweep and the "completed items piling up" nudge both piggyback
+// the reminder-sweep tick (no competing timer). Federation runs one bidirectional
+// exchange round for every active link across active tenant DBs; same-host
+// both-tenants-in-one-process is fine (deliverToPeer loops back). The purge-suggestion
+// check is synchronous per-tenant and runs first since it's cheap and unrelated.
 startReminderScheduler(
   () => registry.activeDbs(),
-  () =>
-    runAllFederationExchanges(
+  () => {
+    for (const ctx of registry.activeCtxs()) {
+      try {
+        checkPurgeSuggestions(ctx.db, ctx.serverDeviceId);
+      } catch (e) {
+        console.error('[carbon] purge-suggestion sweep failed:', e);
+      }
+    }
+    return runAllFederationExchanges(
       () => registry.activeCtxs().map((ctx) => ({ db: ctx.db, myLabel: ctx.subdomain || 'default' })),
       deliverToPeer,
-    ),
+    );
+  },
 );
 startGpsScheduler(() => registry.activeDbs());
 startCaldavScheduler(() =>

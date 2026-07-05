@@ -10,6 +10,7 @@ import {
   deleteItem,
 } from "@carbon/core";
 import { safeFetch } from "./safe-fetch";
+import { getUserTimezone } from "./user-prefs";
 import {
   itemToVtodo,
   itemToVevent,
@@ -363,13 +364,28 @@ export class CaldavHttpError extends Error {
   }
 }
 
-function authHeader(cfg: CaldavConfigRow): string {
+/** Basic-auth header value, or null when no credentials are configured. Every request
+ *  path (the DAV methods and the iCal feed GET) applies this same rule, so a credential-
+ *  less target — e.g. a public secret-URL feed or an auth-less CalDAV server — is never
+ *  sent an empty `Basic Og==` header. */
+function authHeader(cfg: CaldavConfigRow): string | null {
+  if (!cfg.username && !cfg.password) return null;
   return (
     "Basic " +
     Buffer.from(`${cfg.username ?? ""}:${cfg.password ?? ""}`).toString(
       "base64",
     )
   );
+}
+
+/** Merge the Basic-auth header into `headers` only when credentials exist. */
+function withAuth(
+  cfg: CaldavConfigRow,
+  headers: Record<string, string>,
+): Record<string, string> {
+  const auth = authHeader(cfg);
+  if (auth) headers.Authorization = auth;
+  return headers;
 }
 
 function normEtag(raw: string | null): string | null {
@@ -411,11 +427,10 @@ async function davListEtags(
     '<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>';
   const res = await safeFetch(collectionUrl, allowPrivate, {
     method: "PROPFIND",
-    headers: {
-      Authorization: authHeader(cfg),
+    headers: withAuth(cfg, {
       Depth: "1",
       "Content-Type": "application/xml; charset=utf-8",
-    },
+    }),
     body,
   });
   if (!res.ok)
@@ -444,7 +459,7 @@ async function davGet(
 ): Promise<{ ics: string; etag: string | null }> {
   const res = await safeFetch(href, allowPrivate, {
     method: "GET",
-    headers: { Authorization: authHeader(cfg) },
+    headers: withAuth(cfg, {}),
   });
   if (!res.ok) throw new CaldavHttpError(res.status, `GET ${href}`);
   return { ics: await res.text(), etag: normEtag(res.headers.get("etag")) };
@@ -462,10 +477,9 @@ async function davPut(
   cfg: CaldavConfigRow,
   allowPrivate: boolean,
 ): Promise<PutResult> {
-  const headers: Record<string, string> = {
-    Authorization: authHeader(cfg),
+  const headers: Record<string, string> = withAuth(cfg, {
     "Content-Type": "text/calendar; charset=utf-8",
-  };
+  });
   if (ifMatch) headers["If-Match"] = `"${ifMatch}"`;
   else headers["If-None-Match"] = "*"; // create-only; 412 ⇒ already exists
   const res = await safeFetch(href, allowPrivate, {
@@ -494,7 +508,7 @@ async function davDelete(
   cfg: CaldavConfigRow,
   allowPrivate: boolean,
 ): Promise<void> {
-  const headers: Record<string, string> = { Authorization: authHeader(cfg) };
+  const headers: Record<string, string> = withAuth(cfg, {});
   if (ifMatch) headers["If-Match"] = `"${ifMatch}"`;
   const res = await safeFetch(href, allowPrivate, {
     method: "DELETE",
@@ -541,10 +555,11 @@ function encode(
   item: Item,
   uid: string,
   defaultMinutes: number,
+  tz: string | null,
 ): string {
   return kind === "todo"
-    ? itemToVtodo(item, uid)
-    : itemToVevent(item, uid, defaultMinutes);
+    ? itemToVtodo(item, uid, tz)
+    : itemToVevent(item, uid, defaultMinutes, tz);
 }
 
 /** Apply a parsed VTODO onto an existing Carbon item via CRDT mutators. */
@@ -580,12 +595,13 @@ function applyParsed(
   itemId: string,
   kind: LinkKind,
   ics: string,
+  tz: string | null,
 ): void {
   if (kind === "todo") {
-    const p = vtodoToItemPatch(ics);
+    const p = vtodoToItemPatch(ics, tz);
     if (p) applyTodo(db, deviceId, itemId, p);
   } else {
-    const p = veventToItemPatch(ics);
+    const p = veventToItemPatch(ics, tz);
     if (p) applyEvent(db, deviceId, itemId, p);
   }
 }
@@ -677,6 +693,7 @@ async function syncKind(
   collectionUrl: string,
   allowPrivate: boolean,
   result: SyncResult,
+  tz: string | null,
 ): Promise<void> {
   const projectId = cfg.project_id;
   const def = cfg.default_event_minutes;
@@ -702,7 +719,9 @@ async function syncKind(
     const got = await davGet(href, cfg, allowPrivate);
     if (detectKind(got.ics) !== kind) continue; // mixed collection — wrong type here
     const parsed =
-      kind === "todo" ? vtodoToItemPatch(got.ics) : veventToItemPatch(got.ics);
+      kind === "todo"
+        ? vtodoToItemPatch(got.ics, tz)
+        : veventToItemPatch(got.ics, tz);
     if (!parsed) continue;
     const uid = parsed.uid ?? href;
     // One task per UID. A second resource sharing a UID (e.g. a recurring event's
@@ -737,7 +756,7 @@ async function syncKind(
 
     if (link && item) {
       // existing (possibly relocated to a new href) → merge remote in, repoint link
-      applyParsed(db, deviceId, link.item_id, kind, got.ics);
+      applyParsed(db, deviceId, link.item_id, kind, got.ics, tz);
       const it = getItem(db, link.item_id)!;
       upsertLink(
         db,
@@ -747,7 +766,7 @@ async function syncKind(
         uid,
         href,
         curEtag,
-        contentHash(kind, it, def),
+        contentHash(kind, it, def, tz),
       );
     } else {
       // genuinely new remote object → create a task under the project
@@ -765,7 +784,7 @@ async function syncKind(
         uid,
         href,
         curEtag,
-        contentHash(kind, it, def),
+        contentHash(kind, it, def, tz),
       );
     }
     result.pulled++;
@@ -802,22 +821,22 @@ async function syncKind(
       result.pushed++;
       continue;
     }
-    const hash = contentHash(kind, want, def);
+    const hash = contentHash(kind, want, def, tz);
     if (link.content_hash === hash) continue; // unchanged locally
-    const ics = encode(kind, want, link.remote_uid, def);
+    const ics = encode(kind, want, link.remote_uid, def, tz);
     let res = await davPut(link.href, ics, link.etag, cfg, allowPrivate);
     if (res.status === 412) {
       // conflict: pull the remote, re-merge through the CRDT, push once more
       const got = await davGet(link.href, cfg, allowPrivate);
-      applyParsed(db, deviceId, link.item_id, kind, got.ics);
+      applyParsed(db, deviceId, link.item_id, kind, got.ics, tz);
       const merged = getItem(db, link.item_id)!;
-      const ics2 = encode(kind, merged, link.remote_uid, def);
+      const ics2 = encode(kind, merged, link.remote_uid, def, tz);
       res = await davPut(link.href, ics2, got.etag, cfg, allowPrivate);
       if (res.status === 412) {
         result.errors.push(`conflict on ${link.item_id.slice(0, 8)} (${kind})`);
         continue;
       }
-      setLinkState(db, link.id, res.etag, contentHash(kind, merged, def));
+      setLinkState(db, link.id, res.etag, contentHash(kind, merged, def, tz));
     } else {
       setLinkState(db, link.id, res.etag, hash);
     }
@@ -829,8 +848,8 @@ async function syncKind(
     if (linkByItem(db, projectId, itemId, kind)) continue;
     const uid = `carbon-${itemId}-${kind}@carbon`;
     const href = newHref(collectionUrl, uid);
-    const hash = contentHash(kind, item, def);
-    const ics = encode(kind, item, uid, def);
+    const hash = contentHash(kind, item, def, tz);
+    const ics = encode(kind, item, uid, def, tz);
     let res = await davPut(href, ics, null, cfg, allowPrivate);
     if (res.status === 412) {
       // a stale object with our UID already exists — adopt + overwrite it
@@ -880,15 +899,15 @@ function setFeedToken(
 
 /** GET a whole calendar feed. Honours a stored ETag via If-None-Match so an
  *  unchanged feed short-circuits (304 ⇒ ics=null). Auth is sent only when
- *  credentials are configured (public secret-URL feeds need none). */
+ *  credentials are configured (public secret-URL feeds need none) — the same
+ *  `withAuth` rule the DAV methods use. */
 async function fetchFeed(
   url: string,
   cfg: CaldavConfigRow,
   token: string | null,
   allowPrivate: boolean,
 ): Promise<{ ics: string | null; token: string | null }> {
-  const headers: Record<string, string> = {};
-  if (cfg.username || cfg.password) headers.Authorization = authHeader(cfg);
+  const headers: Record<string, string> = withAuth(cfg, {});
   if (token) headers["If-None-Match"] = `"${token}"`;
   const res = await safeFetch(url, allowPrivate, { method: "GET", headers });
   if (res.status === 304) return { ics: null, token };
@@ -907,6 +926,7 @@ async function syncIcalKind(
   feedUrl: string,
   allowPrivate: boolean,
   result: SyncResult,
+  tz: string | null,
 ): Promise<void> {
   const projectId = cfg.project_id;
   const token = kind === "todo" ? cfg.todo_sync_token : cfg.event_sync_token;
@@ -915,7 +935,9 @@ async function syncIcalKind(
   setFeedToken(db, projectId, kind, feed.token);
 
   const parsedList: (ParsedTodo | ParsedEvent)[] =
-    kind === "todo" ? parseAllVtodos(feed.ics) : parseAllVevents(feed.ics);
+    kind === "todo"
+      ? parseAllVtodos(feed.ics, tz)
+      : parseAllVevents(feed.ics, tz);
 
   const byUid = new Map<string, LinkRow>();
   for (const l of linksForKind(db, projectId, kind)) byUid.set(l.remote_uid, l);
@@ -955,6 +977,36 @@ async function syncIcalKind(
   }
 }
 
+/** The IANA zone all-day / floating CalDAV dates should be anchored to for a project:
+ *  its owner's reported timezone (`user_prefs`, the same one NL-command date parsing uses).
+ *  Returns null — and logs once per pass — when the owner has no zone on record, in which
+ *  case the encoder/parser falls back to the server process's local clock (its historical,
+ *  UTC-in-Docker behaviour). Anchoring to the owner is what keeps an all-day value on the
+ *  right calendar day when the server's timezone differs from the user's. */
+function resolveProjectTimezone(db: Db, projectId: string): string | null {
+  const ownerId = getItem(db, projectId)?.owner_id ?? null;
+  // Never let a preferences lookup crash a sync pass: a missing/empty record (or table)
+  // just means "no zone on record" → the server-local fallback below.
+  let tz: string | null = null;
+  if (ownerId) {
+    try {
+      tz = getUserTimezone(db, ownerId);
+    } catch {
+      tz = null;
+    }
+  }
+  if (!tz) {
+    const serverTz =
+      Intl.DateTimeFormat().resolvedOptions().timeZone ?? "unknown";
+    console.warn(
+      `[carbon] caldav: no owner timezone for project ${projectId}; ` +
+        `all-day/floating dates fall back to the server clock (${serverTz}). ` +
+        `Set the owner's timezone (any client reports it) or the server's TZ to fix skew.`,
+    );
+  }
+  return tz;
+}
+
 /** Run one full sync pass for a project (both enabled kinds). */
 export async function syncProject(
   db: Db,
@@ -963,6 +1015,9 @@ export async function syncProject(
   allowPrivate: boolean,
 ): Promise<SyncResult> {
   const result: SyncResult = { pulled: 0, pushed: 0, errors: [] };
+  // Anchor zone-less dates (all-day, floating) to the project owner's timezone, resolved
+  // once per pass so push-encode and stored content-hash stay consistent within the pass.
+  const tz = resolveProjectTimezone(db, cfg.project_id);
   // Heal any orphan tasks a pre-owner-inheritance pull left invisible. Cheap: the
   // null-owner guard short-circuits once healed.
   for (const kind of ["todo", "event"] as LinkKind[])
@@ -972,14 +1027,23 @@ export async function syncProject(
   const one = ical ? syncIcalKind : syncKind;
   if (cfg.sync_tasks && cfg.todo_url) {
     try {
-      await one(db, deviceId, cfg, "todo", cfg.todo_url, allowPrivate, result);
+      await one(db, deviceId, cfg, "todo", cfg.todo_url, allowPrivate, result, tz);
     } catch (e) {
       result.errors.push(`tasks: ${(e as Error).message}`);
     }
   }
   if (cfg.sync_events && cfg.event_url) {
     try {
-      await one(db, deviceId, cfg, "event", cfg.event_url, allowPrivate, result);
+      await one(
+        db,
+        deviceId,
+        cfg,
+        "event",
+        cfg.event_url,
+        allowPrivate,
+        result,
+        tz,
+      );
     } catch (e) {
       result.errors.push(`events: ${(e as Error).message}`);
     }
@@ -1089,21 +1153,25 @@ export interface CaldavTenant {
  * Sweep every active tenant once a minute; for each enabled config whose
  * frequency has elapsed since its last sync, enqueue one sync pass. `tenants` is
  * re-evaluated each tick so newly-provisioned tenants are picked up. Mirrors
- * startReminderScheduler.
+ * startReminderScheduler. Started `startDelayMs` after boot so this sweep's
+ * `activeCtxs()` call doesn't force-load every active tenant into the LRU on the
+ * same tick as the reminder/federation sweep and the GPS sweep.
  */
-export function startCaldavScheduler(tenants: () => CaldavTenant[]): void {
-  setInterval(() => {
-    const now = Date.now();
-    for (const t of tenants()) {
-      try {
-        for (const cfg of listEnabledConfigs(t.db)) {
-          const last = cfg.last_sync_at ? Date.parse(cfg.last_sync_at) : 0;
-          if (now - last < cfg.frequency_seconds * 1000) continue;
-          void runSync(t.db, t.deviceId, cfg.project_id, t.allowPrivate);
+export function startCaldavScheduler(tenants: () => CaldavTenant[], startDelayMs = 40_000): void {
+  setTimeout(() => {
+    setInterval(() => {
+      const now = Date.now();
+      for (const t of tenants()) {
+        try {
+          for (const cfg of listEnabledConfigs(t.db)) {
+            const last = cfg.last_sync_at ? Date.parse(cfg.last_sync_at) : 0;
+            if (now - last < cfg.frequency_seconds * 1000) continue;
+            void runSync(t.db, t.deviceId, cfg.project_id, t.allowPrivate);
+          }
+        } catch (e) {
+          console.error("[carbon] caldav sweep failed:", e);
         }
-      } catch (e) {
-        console.error("[carbon] caldav sweep failed:", e);
       }
-    }
-  }, 60_000);
+    }, 60_000);
+  }, startDelayMs);
 }

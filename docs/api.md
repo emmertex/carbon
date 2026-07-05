@@ -19,10 +19,10 @@ recipes see [`home-assistant.md`](home-assistant.md).
 
 Two mechanisms, both on every `/api/*` route:
 
-| Method | Header | Who | Scopes |
-|--------|--------|-----|--------|
-| **Bearer token** | `Authorization: Bearer carbon_xxx` | integrations, bots | the token's scopes |
-| **Basic auth** | `Authorization: Basic base64(user:pass)` | human users | all scopes |
+| Method           | Header                                   | Who                | Scopes             |
+| ---------------- | ---------------------------------------- | ------------------ | ------------------ |
+| **Bearer token** | `Authorization: Bearer carbon_xxx`       | integrations, bots | the token's scopes |
+| **Basic auth**   | `Authorization: Basic base64(user:pass)` | human users        | all scopes         |
 
 Create tokens in **Settings → API tokens** (admin only). A token **acts as its owning
 user** and is limited to its scopes. If the server has no accounts it runs in **open mode**
@@ -69,14 +69,24 @@ curl -X POST "$BASE/api/tasks/<id>/comments" \
   -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
   -d '{"body":"done — see photo"}'
 
-# Attach a file (tasks:write) — multipart; blob is content-addressed
+# Attach a file (tasks:write) — two-step content-addressed upload
+HASH="$(sha256sum photo.jpg | awk '{print $1}')"
+
+# 1) Upload bytes by hash (idempotent)
+curl -X POST "$BASE/api/blobs/$HASH" \
+  -H "Authorization: Bearer carbon_xxx" \
+  --data-binary "@photo.jpg"
+
+# 2) Attach metadata to the task
 curl -X POST "$BASE/api/tasks/<id>/attachments" \
-  -H "Authorization: Bearer carbon_xxx" -F "file=@photo.jpg"
+  -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
+  -d "{\"filename\":\"photo.jpg\",\"mimeType\":\"image/jpeg\",\"size\":12345,\"hash\":\"$HASH\"}"
 ```
 
-Common task fields: `title`, `note`, `due_date`, `defer_date`, `reminder_at` (all ISO 8601),
-`flagged` (bool), `priority` (0–3), `parent_id`, `estimate_minutes`, `geo`
-(`{lat,lng,radius,label}`), `recurrence` (JSON rule).
+`POST /api/tasks` currently accepts `title` (required), plus `note`, `project_id`, `due_date`,
+`flagged`, and `priority`. `PATCH /api/tasks/:id` accepts `title`, `note`, `status`, `due_date`,
+`defer_date`, `flagged`, `priority`, `parent_id`, `geo`, `color`, `recurrence`, and
+`review_interval`.
 
 ## Natural-language agent endpoints (`/api/agent/*`)
 
@@ -85,28 +95,30 @@ natural-language task management — the server fuzzy-matches names and batches 
 model just passes plain names. Same scopes as above. Full contract + worked call sequences:
 [`carbon-agent-api.md` §6](carbon-agent-api.md).
 
-| Method | Path | Scope | Purpose |
-|--------|------|-------|---------|
-| GET  | `/api/agent/lists` | `tasks:read` | Projects as `{id,name}` (`?detail=1` adds counts) |
-| GET  | `/api/agent/tags` | `tasks:read` | Tags as `{id,name,hasGeo}` |
-| GET  | `/api/agent/items` | `tasks:read` | Minimal `{id,title,tags,done}`; filter `?list=&tag=&q=&status=` |
-| GET  | `/api/agent/items/:id` | `tasks:read` | One item + tags + list |
-| POST | `/api/agent/resolve` | `tasks:read` | Fuzzy-resolve a `list`/`tag`/`task` name → ranked candidates |
-| POST | `/api/agent/tasks/batch` | `inbox:write` | Create many tasks; resolve/create list + tags by name |
-| POST | `/api/agent/tasks/complete` | `tasks:write` | Complete by id/fuzzy query → `{matched,unmatched}` |
-| POST | `/api/agent/tasks/update` | `tasks:write` | Batch patch by id/query (note, flag, priority, due/defer/reminder, `recurrence`, status) |
-| POST | `/api/agent/tasks/tag` | `tasks:write` | Bulk add/remove tags on a list/tag/queries |
-| POST | `/api/agent/tags/geo` | `tasks:write` | Set/clear a tag's geofence (explicit or geocoded) |
-| GET  | `/api/agent/nearby` | `tasks:read` | Tasks by `tag`/`zone`/`lat`+`lng` |
-| GET  | `/api/agent/users` | `tasks:read` | People a task can be shared with / assigned to (non-bot) |
-| POST | `/api/agent/tasks/share` | `tasks:write` | Share task(s) with users by name (`remove` to unshare) |
-| POST | `/api/agent/tasks/assign` | `tasks:write` | Assign task(s) to users by name (`remove` to unassign) |
-| POST | `/api/agent/timer/start` | `tasks:write` | Start a timer on a task (auto-stops the prior one) |
-| POST | `/api/agent/timer/stop` | `tasks:write` | Stop the running timer |
-| GET  | `/api/agent/config` | `tasks:read` | `{enabled, keywords}` — drives the in-app Add box |
-| POST | `/api/agent/command` | `inbox:write` | Run an in-app NL command (LLM tool-loop, acts as the user) → `{reply, executed, usage}` |
-| GET/PATCH | `/api/admin/nl-settings` | admin | Pick the NL agent, keyword list, enable flag |
-| GET  | `/api/admin/nl-usage` | admin | Aggregate token usage by request kind |
+| Method    | Path                        | Scope         | Purpose                                                                                  |
+| --------- | --------------------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| GET       | `/api/agent/lists`          | `tasks:read`  | Projects as `{id,name}` (`?detail=1` adds counts)                                        |
+| GET       | `/api/agent/tags`           | `tasks:read`  | Tags as `{id,name,hasGeo}`                                                               |
+| GET       | `/api/agent/items`          | `tasks:read`  | Minimal `{id,title,tags,done}`; filter `?list=&tag=&q=&status=`                          |
+| GET       | `/api/agent/items/:id`      | `tasks:read`  | One item + tags + list                                                                   |
+| POST      | `/api/agent/resolve`        | `tasks:read`  | Fuzzy-resolve a `list`/`tag`/`task` name → ranked candidates                             |
+| POST      | `/api/agent/tasks/batch`    | `inbox:write` | Create many tasks; resolve/create list + tags by name                                    |
+| POST      | `/api/agent/tasks/complete` | `tasks:write` | Complete by id/fuzzy query → `{matched,unmatched}`                                       |
+| POST      | `/api/agent/tasks/update`   | `tasks:write` | Batch patch by id/query (note, flag, priority, due/defer/reminder, `recurrence`, status) |
+| POST      | `/api/agent/tasks/tag`      | `tasks:write` | Bulk add/remove tags on a list/tag/queries                                               |
+| POST      | `/api/agent/tags/geo`       | `tasks:write` | Set/clear a tag's geofence (explicit or geocoded)                                        |
+| GET       | `/api/agent/nearby`         | `tasks:read`  | Tasks by `tag`/`zone`/`lat`+`lng`                                                        |
+| GET       | `/api/agent/users`          | `tasks:read`  | People a task can be shared with / assigned to (non-bot)                                 |
+| POST      | `/api/agent/tasks/share`    | `tasks:write` | Share task(s) with users by name (`remove` to unshare)                                   |
+| POST      | `/api/agent/tasks/assign`   | `tasks:write` | Assign task(s) to users by name (`remove` to unassign)                                   |
+| POST      | `/api/agent/timer/start`    | `tasks:write` | Start a timer on a task (auto-stops the prior one)                                       |
+| POST      | `/api/agent/timer/stop`     | `tasks:write` | Stop the running timer                                                                   |
+| GET       | `/api/agent/config`         | `tasks:read`  | `{enabled, keywords}` — drives the in-app Add box                                        |
+| POST      | `/api/agent/command`        | `inbox:write` | Run an in-app NL command (LLM tool-loop, acts as the user) → `{reply, executed, usage}`  |
+| POST      | `/api/agent/filter`         | `tasks:read`  | NL → advanced-filter expression builder (`{expr}`)                                       |
+| POST      | `/api/agent/geocode`        | `tasks:read`  | Place lookup helper for location inputs (`{candidates}`)                                 |
+| GET/PATCH | `/api/admin/nl-settings`    | admin         | Pick the NL agent, keyword list, enable flag                                             |
+| GET       | `/api/admin/nl-usage`       | admin         | Aggregate token usage by request kind                                                    |
 
 **In-app NL commands (Stage 2):** when the Add box's first word matches a configured keyword
 (default `can, add, check off, mark off, mark as`), the entry posts to `/api/agent/command`

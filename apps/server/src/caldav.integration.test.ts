@@ -20,6 +20,7 @@ import {
   syncProject,
 } from "./caldav";
 import { detectKind } from "./caldav-ical";
+import { ensureUserPrefsTables, setUserTimezone } from "./user-prefs";
 
 // ----- a tiny in-process CalDAV collection (one collection at /cal/) ---------
 
@@ -438,4 +439,56 @@ test("a past remote VEVENT is never imported (CalDAV pull)", async () => {
   const kids = getChildren(db, proj.id);
   assert.ok(kids.some((k) => k.title === "Future DAV event"));
   assert.ok(!kids.some((k) => k.title === "Past DAV event"));
+});
+
+test("all-day task syncs on the owner's calendar day (owner timezone threaded through)", async () => {
+  // End-to-end proof that syncProject resolves the project owner's timezone (from
+  // user_prefs, the same store NL parsing uses) and threads it into the encoder — so an
+  // all-day value lands on the right calendar day even when the server clock differs.
+  ensureUserPrefsTables(db);
+  const mock2 = await startMock(); // isolated collection, uncontaminated by other tests
+  try {
+    const ownerId = "owner-melb";
+    setUserTimezone(db, ownerId, "Australia/Melbourne"); // UTC+10 in July
+    const project = createItem(db, dev, {
+      type: "project",
+      title: "Melbourne",
+      ownerId,
+    });
+    // "due July 10, all day" exactly as a Melbourne browser stores it: 23:59 AEST = 13:59Z.
+    createItem(db, dev, {
+      type: "task",
+      title: "All day thing",
+      parentId: project.id,
+      ownerId,
+      dueDate: "2026-07-10T13:59:00.000Z",
+    });
+    const url = `${mock2.base}/cal/`;
+    upsertCaldavConfig(db, project.id, {
+      username: "u",
+      password: "p",
+      todo_url: url,
+      event_url: url,
+      sync_tasks: true,
+      sync_events: true,
+    });
+    const r = await syncProject(db, dev, getCaldavConfigRow(db, project.id)!, true);
+    assert.deepEqual(r.errors, []);
+
+    let event: string | undefined;
+    let todo: string | undefined;
+    for (const [, v] of mock2.store) {
+      if (detectKind(v.ics) === "event") event = v.ics;
+      if (detectKind(v.ics) === "todo") todo = v.ics;
+    }
+    assert.ok(event, "a VEVENT was pushed");
+    assert.ok(todo, "a VTODO was pushed");
+    // All-day on July 10 (owner's zone) — not a timed 13:59Z event, not shifted a day.
+    assert.match(event!, /DTSTART;VALUE=DATE:20260710/);
+    assert.match(event!, /DTEND;VALUE=DATE:20260711/);
+    assert.doesNotMatch(event!, /DTSTART:20260710T135900Z/);
+    assert.match(todo!, /DUE;VALUE=DATE:20260710/);
+  } finally {
+    mock2.close();
+  }
 });

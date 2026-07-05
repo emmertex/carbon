@@ -35,11 +35,6 @@ export function isStandalone(): boolean {
   );
 }
 
-export function isIos(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return /iphone|ipad|ipod/i.test(navigator.userAgent);
-}
-
 /** Subscribe to install-availability changes. Returns an unsubscribe fn. */
 export function onInstallChange(cb: () => void): () => void {
   listeners.add(cb);

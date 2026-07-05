@@ -94,7 +94,13 @@ const minuteHits = new Map<string, number[]>();
 const sixHourHits = new Map<string, number[]>();
 const weekHits = new Map<string, number[]>();
 
-function checkWindow(
+/** Prunes every tenant's stale hits out of `map` (not just `tenantId`'s), so a tenant
+ *  that stops calling the shared LM doesn't leave a permanent entry — same pattern as
+ *  the signup limiter map (A6, index.ts). Returns whether `tenantId` is still under
+ *  `cap` for this window; does not record a hit (see `recordHit`). Exported so its
+ *  pruning behavior can be unit-tested directly, not just indirectly through
+ *  checkHostRateLimit. */
+export function checkWindow(
   map: Map<string, number[]>,
   tenantId: string,
   windowMs: number,
@@ -103,14 +109,18 @@ function checkWindow(
 ): boolean {
   if (cap <= 0) return true; // 0/unset = unlimited
   const cutoff = now - windowMs;
-  const hits = (map.get(tenantId) ?? []).filter((t) => t > cutoff);
-  if (hits.length >= cap) {
-    map.set(tenantId, hits);
-    return false;
+  for (const [k, v] of map) {
+    const fresh = v.filter((t) => t > cutoff);
+    if (fresh.length) map.set(k, fresh);
+    else map.delete(k);
   }
+  return (map.get(tenantId) ?? []).length < cap;
+}
+
+function recordHit(map: Map<string, number[]>, tenantId: string, now: number): void {
+  const hits = map.get(tenantId) ?? [];
   hits.push(now);
   map.set(tenantId, hits);
-  return true;
 }
 
 /** Checks (and records, on success) one call against all three windows for a tenant. All three
@@ -118,39 +128,21 @@ function checkWindow(
  *  the hits are recorded (the caller didn't actually make the call). */
 export function checkHostRateLimit(tenantId: string, cfg: HostLmConfig): { ok: boolean; message?: string } {
   const now = Date.now();
-  const cutoffMin = now - MINUTE_MS;
-  const cutoff6h = now - SIX_HOUR_MS;
-  const cutoffWeek = now - WEEK_MS;
-  const minHits = (minuteHits.get(tenantId) ?? []).filter((t) => t > cutoffMin);
-  const sixHits = (sixHourHits.get(tenantId) ?? []).filter((t) => t > cutoff6h);
-  const wkHits = (weekHits.get(tenantId) ?? []).filter((t) => t > cutoffWeek);
 
-  if (cfg.limits.perMinute > 0 && minHits.length >= cfg.limits.perMinute) {
-    minuteHits.set(tenantId, minHits);
+  if (!checkWindow(minuteHits, tenantId, MINUTE_MS, cfg.limits.perMinute, now)) {
     return { ok: false, message: 'The shared assistant is busy right now — try again in a minute.' };
   }
-  if (cfg.limits.per6h > 0 && sixHits.length >= cfg.limits.per6h) {
-    sixHourHits.set(tenantId, sixHits);
+  if (!checkWindow(sixHourHits, tenantId, SIX_HOUR_MS, cfg.limits.per6h, now)) {
     return { ok: false, message: 'This workspace has used up its shared-assistant quota for now — try again later.' };
   }
-  if (cfg.limits.perWeek > 0 && wkHits.length >= cfg.limits.perWeek) {
-    weekHits.set(tenantId, wkHits);
+  if (!checkWindow(weekHits, tenantId, WEEK_MS, cfg.limits.perWeek, now)) {
     return { ok: false, message: "This workspace has used up its shared-assistant quota for the week." };
   }
 
   // Only track windows that actually have a cap — an unlimited window shouldn't accumulate
   // bookkeeping (and would otherwise leak stale hits into a window that later gets a cap set).
-  if (cfg.limits.perMinute > 0) {
-    minHits.push(now);
-    minuteHits.set(tenantId, minHits);
-  }
-  if (cfg.limits.per6h > 0) {
-    sixHits.push(now);
-    sixHourHits.set(tenantId, sixHits);
-  }
-  if (cfg.limits.perWeek > 0) {
-    wkHits.push(now);
-    weekHits.set(tenantId, wkHits);
-  }
+  if (cfg.limits.perMinute > 0) recordHit(minuteHits, tenantId, now);
+  if (cfg.limits.per6h > 0) recordHit(sixHourHits, tenantId, now);
+  if (cfg.limits.perWeek > 0) recordHit(weekHits, tenantId, now);
   return { ok: true };
 }

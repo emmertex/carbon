@@ -1,6 +1,7 @@
 import webpush from 'web-push';
 import { type Db, getItem, listAssigneesForItem, heldTagIds, itemHasHeldTag } from '@carbon/core';
 import { sendFcmToUser } from './fcm';
+import { alreadySent, markSent } from './reminders-sent';
 
 function getMeta(db: Db, key: string): string | null {
   return db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [key])?.value ?? null;
@@ -100,7 +101,11 @@ async function sendToUser(db: Db, userId: string, payload: PushPayload): Promise
         );
       } catch (err) {
         const code = (err as { statusCode?: number }).statusCode;
-        if (code === 404 || code === 410) removeSubscription(db, s.endpoint); // gone
+        if (code === 404 || code === 410) {
+          removeSubscription(db, s.endpoint); // gone
+        } else {
+          console.error('[carbon] web push send failed:', err);
+        }
       }
     }),
     // FCM (Capacitor / Android) — no-op unless a service account is configured
@@ -118,20 +123,6 @@ export async function notifyTask(db: Db, itemId: string, payload: PushPayload): 
   await Promise.all([...recipients].map((uid) => sendToUser(db, uid, payload)));
 }
 
-function alreadySent(db: Db, itemId: string, kind: string, marker: string): boolean {
-  return !!db.get('SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ? AND marker = ?', [
-    itemId,
-    kind,
-    marker,
-  ]);
-}
-function markSent(db: Db, itemId: string, kind: string, marker: string): void {
-  db.run(
-    `INSERT INTO reminders_sent (item_id, kind, marker, sent_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT DO NOTHING`,
-    [itemId, kind, marker, new Date().toISOString()],
-  );
-}
 
 interface DueRow {
   id: string;

@@ -273,11 +273,15 @@ const chatHits = new Map<string, number[]>();
 function hitAllowed(chatId: string): boolean {
   const now = Date.now();
   const cutoff = now - 3_600_000;
-  const hits = (chatHits.get(chatId) ?? []).filter((t) => t > cutoff);
-  if (hits.length >= PER_CHAT_HOUR) {
-    chatHits.set(chatId, hits);
-    return false;
+  // Prune every chat's stale hits (not just chatId's), so a chat that goes quiet doesn't
+  // leave a permanent entry — same pattern as host-lm.ts's checkWindow.
+  for (const [k, v] of chatHits) {
+    const fresh = v.filter((t) => t > cutoff);
+    if (fresh.length) chatHits.set(k, fresh);
+    else chatHits.delete(k);
   }
+  const hits = chatHits.get(chatId) ?? [];
+  if (hits.length >= PER_CHAT_HOUR) return false;
   hits.push(now);
   chatHits.set(chatId, hits);
   return true;
@@ -375,11 +379,16 @@ export async function handleTelegramUpdate(update: unknown, deps: TelegramDeps):
   const chatId = String(chatRaw);
   const db = deps.controlDb;
   const send = deps.send ?? ((cid: string, t: string) => tgSend(deps.botToken, cid, t));
-  const reply = async (t: string) => {
+  // Returns whether delivery succeeded, so callers that need to know (e.g. runLinkedCommand,
+  // which shouldn't record a reply as conversation context if the user never actually saw it)
+  // can react — but reply() itself never throws, so a send failure can't break the dispatcher.
+  const reply = async (t: string): Promise<boolean> => {
     try {
       await send(chatId, t);
+      return true;
     } catch (e) {
       console.error('[telegram] send failed:', e);
+      return false;
     }
   };
 
@@ -488,7 +497,7 @@ async function redeemAndReply(
   deps: TelegramDeps,
   chatId: string,
   code: string,
-  reply: (t: string) => Promise<void>,
+  reply: (t: string) => Promise<boolean>,
   multiTenant: boolean,
   expectedSubdomain?: string | null,
 ): Promise<void> {
@@ -514,7 +523,7 @@ async function runLinkedCommand(
   chatId: string,
   link: TelegramLink,
   text: string,
-  reply: (t: string) => Promise<void>,
+  reply: (t: string) => Promise<boolean>,
 ): Promise<void> {
   const ctx = deps.registry.getCtx(link.subdomain);
   if (!ctx) {
@@ -557,11 +566,14 @@ async function runLinkedCommand(
       history,
     });
     const out = r.reply || 'Done.';
-    await reply(out);
-    // Record the exchange for follow-up context (only on success, so a failed turn
-    // doesn't poison the thread).
-    appendHistory(deps.controlDb, chatId, 'user', text);
-    appendHistory(deps.controlDb, chatId, 'assistant', out);
+    const delivered = await reply(out);
+    // Record the exchange for follow-up context only if the command succeeded AND the
+    // reply actually reached the user — if delivery failed, the user never saw `out`, so
+    // replaying it as prior "assistant" context next turn would be misleading.
+    if (delivered) {
+      appendHistory(deps.controlDb, chatId, 'user', text);
+      appendHistory(deps.controlDb, chatId, 'assistant', out);
+    }
   } catch (e) {
     console.error('[telegram] command failed:', e);
     await reply("Sorry — something went wrong running that. Please try again.");

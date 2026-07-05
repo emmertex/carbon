@@ -44,13 +44,27 @@ export function isOverdue(item: Item, now: Date = new Date()): boolean {
   return new Date(item.due_date).getTime() < now.getTime();
 }
 
-/** Due on today's calendar day. */
+/** True when two instants land on the same calendar day, as measured by the
+ *  local timezone of whichever process evaluates this (`getFullYear`/`getMonth`/
+ *  `getDate` are local-time getters). Both `a` and `b` must be compared in that
+ *  same frame — see `isDueToday` below for why that isn't automatically true. */
+function sameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+/** Due on today's calendar day, compared in the local timezone of whoever calls
+ *  this (typically the browser tab currently rendering the perspective). Note
+ *  this is a different frame than the one `due_date` was necessarily *written*
+ *  in: an all-day due is encoded as local 23:59 on the authoring device, so if
+ *  that device was in a different timezone than the one reading it here, the
+ *  calendar day extracted from the UTC instant can disagree with the day the
+ *  due date's author intended (same class of skew as CAL-1 for CalDAV, just
+ *  scoped to this client-side perspective filter rather than sync). */
 export function isDueToday(item: Item, now: Date = new Date()): boolean {
   if (item.due_date === null) return false;
-  const d = new Date(item.due_date);
-  return (
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  );
+  return sameLocalDay(new Date(item.due_date), now);
 }

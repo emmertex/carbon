@@ -290,6 +290,9 @@ export function updateAgent(
 
 export function deleteAgent(db: Db, id: string): void {
   db.run('DELETE FROM agents WHERE id = ?', [id]);
+  // Otherwise every deleted agent leaves its accumulated usage-log rows orphaned,
+  // keyed by an agent_id nothing references anymore.
+  db.run('DELETE FROM agent_usage WHERE agent_id = ?', [id]);
 }
 
 // ----- LLM provider call ----------------------------------------------------
@@ -614,41 +617,6 @@ Work only from the details and discussion provided — you have limited informat
 assumptions instead of asking for more. Be practical and specific. Reply with a single short paragraph \
 (a few sentences at most): no greeting, no sign-off, no markdown headings or bullet lists.`;
 
-/**
- * System prompt for the natural-language agent flow (Stage 1+): a small LLM (e.g. Qwen
- * 2.5 1.5B) driving the `/api/agent/*` primitives via Hermes. Unlike DEFAULT_SYSTEM_PROMPT
- * (the comment-reply path), this teaches the call sequences for shopping-list-style task
- * management. Example-driven on purpose — tiny models follow worked examples far better
- * than rules. The server does fuzzy matching, so the model passes names, never ids.
- */
-export const AGENT_API_SYSTEM_PROMPT = `You manage a user's tasks in Carbon through a small HTTP API. \
-The server resolves names to ids by fuzzy match, so always pass plain names (a list name, a tag, a task title) — never invent ids.
-
-Endpoints (base /api/agent):
-- POST /tasks/batch {list, titles:[...], tags:[...]}  → add tasks to a list (creates the list/tags if missing). For dates/repeat use tasks:[{title, due_date, reminder_at, recurrence}] instead of titles.
-- POST /tasks/complete {queries:[...], list}          → tick off tasks; returns matched + unmatched. done:false re-opens (finds completed tasks).
-- POST /tasks/update {updates:[{query, patch:{...}}]}  → change fields: note, flagged, priority, due_date/defer_date/reminder_at (ISO), recurrence (rule, null clears), status.
-- POST /tasks/tag {list, add:[...], remove:[...]}      → bulk add/remove tags on every task in a list (or by queries/ids/tag).
-- POST /resolve {kind:"list"|"tag"|"task", q}          → check a name; best.confident tells you if it's a sure match.
-- GET  /lists ; GET /tags ; GET /items?list=&tag=&status=  → small lists of names (status active|done|all; use when unsure).
-- GET  /nearby?tag=NAME                                → active tasks carrying a location tag.
-- POST /tags/geo {tag, geo:{lat,lng,radius,label}}     → set a tag's location.
-- GET  /users                                          → people you can share/assign to (not bots).
-- POST /tasks/share {query, users:[NAME], permission?} ; POST /tasks/assign {query, users:[NAME]}  → share/assign by name (remove:true reverses).
-- POST /timer/start {query} ; POST /timer/stop {}      → start/stop time tracking (one timer at a time).
-
-Rules:
-1. "Add X and Y to my LIST" → ONE call: POST /tasks/batch {list:"LIST", titles:["X","Y"]}.
-2. "Remind me to get X when I'm at PLACE" → add X to the shopping list AND attach a tag for PLACE: POST /tasks/batch {list:"shopping", tags:["PLACE"], titles:["X"]}. The tag carries the location.
-3. "Mark/tick/check off X and Y" → POST /tasks/complete {queries:["X","Y"]}. Then tell the user EXACTLY what came back: report each matched item as done and each unmatched item as "couldn't find". Never claim you completed something that is in unmatched.
-4. "What do I need at PLACE?" → GET /nearby?tag=PLACE. If empty, say so and offer the shopping list (GET /items?list=shopping).
-4b. "Tag everything in LIST with X" / "add the X tag to all items in LIST" → ONE call: POST /tasks/tag {list:"LIST", add:["X"]}. The server tags every task in the list — you do NOT need to list the items first.
-5. If a name is ambiguous or you're unsure, call /resolve first; if best.confident is false, ask the user which they meant instead of guessing.
-6. Scheduling: a stated time → due_date; "remind me N before" → reminder_at (= due − N); a repeat ("every Tuesday", "weekly") → recurrence, e.g. weekly on Tuesday is {"type":"weekly","interval":1,"daysOfWeek":[2]} (daysOfWeek 0=Sun…6=Sat). Set these on creation via /tasks/batch {tasks:[{title,…}]} or later via /tasks/update.
-7. "Share/assign X with/to NAME" → POST /tasks/share {query:"X", users:["NAME"]} (or /tasks/assign). Use /users if unsure who exists. "Start/stop a timer on X" → /timer/start {query:"X"} / /timer/stop.
-8. Write task titles cleanly: fix obvious spelling and capitalize normally (first word + proper nouns like "Coles"); keep just the item. Tags stay short and lowercase.
-9. Keep replies short and conversational. Do exactly what was asked — don't add or complete tasks that weren't mentioned.`;
-
 const PRIORITY_LABEL = ['None', 'Low', 'Medium', 'High'];
 
 function buildContext(db: Db, agent: FullAgentRow, taskId: string, reason: TriggerReason): string {
@@ -695,25 +663,36 @@ function buildContext(db: Db, agent: FullAgentRow, taskId: string, reason: Trigg
   return lines.join('\n');
 }
 
-/** Allow only one provider call at a time (simple sequential queue). */
-const queue: Array<() => Promise<void>> = [];
-let pumping = false;
-function enqueue(fn: () => Promise<void>): void {
-  queue.push(fn);
-  void pump();
+/** Allow only one provider call at a time per tenant (simple sequential queue), so a
+ *  slow/misconfigured LLM or webhook endpoint in one tenant can't head-of-line-block
+ *  agent replies for every other tenant sharing the process. */
+interface TenantQueue {
+  jobs: Array<() => Promise<void>>;
+  pumping: boolean;
 }
-async function pump(): Promise<void> {
-  if (pumping) return;
-  pumping = true;
-  while (queue.length) {
-    const fn = queue.shift()!;
+const queues = new Map<string, TenantQueue>();
+function enqueue(tenantId: string, fn: () => Promise<void>): void {
+  let q = queues.get(tenantId);
+  if (!q) {
+    q = { jobs: [], pumping: false };
+    queues.set(tenantId, q);
+  }
+  q.jobs.push(fn);
+  void pump(tenantId, q);
+}
+async function pump(tenantId: string, q: TenantQueue): Promise<void> {
+  if (q.pumping) return;
+  q.pumping = true;
+  while (q.jobs.length) {
+    const fn = q.jobs.shift()!;
     try {
       await fn();
     } catch (e) {
       console.error('[carbon] agent run error:', e);
     }
   }
-  pumping = false;
+  q.pumping = false;
+  if (q.jobs.length === 0) queues.delete(tenantId); // don't leak an entry per tenant forever
 }
 
 /**
@@ -832,6 +811,7 @@ async function runAgent(
  * ignored (no loops). Runs are queued and processed asynchronously.
  */
 export function triggerAgents(
+  tenantId: string,
   db: Db,
   deviceId: string,
   fresh: Array<{ entity: string; data: unknown }>,
@@ -843,13 +823,13 @@ export function triggerAgents(
       if (c.author_id && getUser(db, c.author_id)?.is_bot) continue; // ignore bot comments
       for (const uid of c.mentions ?? []) {
         const agent = getAgentForUser(db, uid);
-        if (agent) enqueue(() => runAgent(db, deviceId, agent, c.item_id, 'mention', allowPrivate));
+        if (agent) enqueue(tenantId, () => runAgent(db, deviceId, agent, c.item_id, 'mention', allowPrivate));
       }
     } else if (op.entity === 'assignee') {
       const a = op.data as { item_id: string; user_id: string; deleted?: boolean };
       if (a.deleted) continue;
       const agent = getAgentForUser(db, a.user_id);
-      if (agent) enqueue(() => runAgent(db, deviceId, agent, a.item_id, 'assigned', allowPrivate));
+      if (agent) enqueue(tenantId, () => runAgent(db, deviceId, agent, a.item_id, 'assigned', allowPrivate));
     }
   }
 }

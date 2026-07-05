@@ -89,7 +89,8 @@ items are matched by `UID` and re-applied only when their mapped fields change.
 
 The VEVENT mappings are exact inverses (`DTSTART ↔ due_date`,
 duration ↔ `estimate_minutes`) so a push → pull round-trip is stable. All-day
-values use Carbon's local 23:59 marker ⇄ `VALUE=DATE`.
+values use Carbon's 23:59 marker — resolved in the **project owner's** timezone
+(see [Time zones](#limitations-mvp)) — ⇄ `VALUE=DATE`.
 
 ## Behaviour
 
@@ -113,11 +114,20 @@ values use Carbon's local 23:59 marker ⇄ `VALUE=DATE`.
 - **Conflict resolution favours the server.** On a simultaneous edit (a `412` on
   push), the connector re-fetches the remote object and the remote values win for
   mapped fields.
-- **Time zones**: UTC (`Z`), all-day (`VALUE=DATE`), and `TZID`-qualified times are all
-  resolved exactly — a `DTSTART`/`DUE` carrying a `TZID` (e.g. `Australia/Melbourne`) is
+- **Time zones**: `Z` (UTC) and `TZID`-qualified times carry their own zone and are
   converted to the correct UTC instant via the IANA tz database bundled with Node (DST
-  included). Only a *floating* time (no `Z`, no `TZID`) falls back to the server's local
-  wall-clock, since it has no zone to resolve against. Outbound writes are always UTC.
+  included), independent of where the server runs. Values that carry **no** zone of their
+  own — all-day (`VALUE=DATE`) dates and *floating* times (no `Z`, no `TZID`) — are
+  anchored to the **project owner's** timezone: the IANA zone their client last reported
+  (the same per-user preference the natural-language date parser uses). That anchoring is
+  what keeps an all-day date on the right calendar day when the server's own timezone
+  differs from the user's — e.g. the documented Docker self-host defaults to UTC, so a
+  Melbourne user's "due July 10, all day" would otherwise export as a timed event and, on
+  import, land on July 11. If the owner has never reported a timezone, these values fall
+  back to the server process's local clock (the previous behaviour) and a warning is
+  logged per sync pass; a non-UTC self-hoster should either sign in once from a client
+  (which reports the zone) or set the container's `TZ` to their own zone. Outbound writes
+  of timed values are always UTC.
 - **Change detection (CalDAV)** uses `PROPFIND` + ETag diffing, not the WebDAV
   `sync-collection` REPORT — every sync pass lists the whole collection.
 - **Secrets**: the CalDAV password is stored in the tenant DB in plaintext (same as

@@ -95,14 +95,27 @@ Example — "due within 1 day, or due within 2 days and high priority, or flagge
 ]}`;
 }
 
-/** Find the first balanced JSON object in a string (fallback when no native tool call). */
-function extractJsonObject(text: string): unknown {
+/** Find the first balanced JSON object in a string (fallback when no native tool call).
+ *  Tracks whether we're inside a quoted string (respecting backslash escapes) so a brace
+ *  inside a string value (e.g. a titleContains text) doesn't throw off the depth count.
+ *  Exported test-only. */
+export function extractJsonObject(text: string): unknown {
   const start = text.indexOf('{');
   if (start < 0) return null;
   let depth = 0;
+  let inString = false;
+  let escaped = false;
   for (let i = start; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    else if (text[i] === '}') {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
       depth--;
       if (depth === 0) {
         try {

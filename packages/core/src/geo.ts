@@ -1,6 +1,6 @@
 import type { GeoReminder, Item } from './types';
 import type { Db } from './db';
-import { allItems, getItem, getItemTags, projectAncestor } from './repo';
+import { queryItems, getItem, getItemTags, projectAncestor } from './repo';
 
 export function parseGeo(json: string | null): GeoReminder | null {
   if (!json) return null;
@@ -69,10 +69,11 @@ function geoMatches(geo: GeoReminder, loc: CurrentLocation): boolean {
 
 /**
  * Active tasks that are location-matched to the user's current location, where a
- * task matches if the task ITSELF, ANY of its parents, OR its project ancestor has
- * a geo reminder matching `loc` — by HA zone name (case-insensitive label equality)
- * OR by GPS point-in-radius. Walking ancestors needs the item graph, so this takes
- * the `Db` (uses `getItem`/`projectAncestor`). Results are de-duplicated.
+ * task matches if the task ITSELF, ANY of its parents, its project ancestor, OR
+ * any of its TAGS has a geo reminder matching `loc` — by HA zone name
+ * (case-insensitive label equality) OR by GPS point-in-radius. Walking ancestors
+ * needs the item graph, so this takes the `Db` (uses `getItem`/`projectAncestor`/
+ * `getItemTags`). Results are de-duplicated.
  */
 export function tasksNearLocation(db: Db, loc: CurrentLocation): Item[] {
   // Nothing to match against → no nearby tasks.
@@ -103,8 +104,11 @@ export function tasksNearLocation(db: Db, loc: CurrentLocation): Item[] {
     });
 
   const out: Item[] = [];
-  for (const t of allItems(db)) {
-    if (t.type !== 'task' || t.status !== 'active' || t.deleted) continue;
+  // Pushed into SQL (type = 'task' AND deleted = 0) so a tenant's projects/folders/
+  // deleted rows never get materialised here at all — the exact 'active' status check
+  // (vs. 'done'/'dropped') stays in JS since queryItems has no matching flag for it.
+  for (const t of queryItems(db, { tasksOnly: true })) {
+    if (t.status !== 'active') continue;
 
     // Precedence: the task (and its parents), then its tags, then its project.
     let matched = itemMatches(t.id);

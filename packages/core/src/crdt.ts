@@ -172,20 +172,18 @@ export function getUnsyncedOps(db: Db): Op[] {
     .map(rowToOp);
 }
 
-export function markOpsSynced(db: Db, ids: string[]): void {
-  if (ids.length === 0) return;
-  const placeholders = ids.map(() => '?').join(',');
-  db.run(`UPDATE ops SET synced = 1 WHERE id IN (${placeholders})`, ids);
-}
+// SQLite's bound-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) varies by build,
+// and a first sync or bulk operation can mark thousands of ops in one call —
+// chunk the IN(...) like repo.ts's SUBTREE_BATCH. Idempotent, so a failure
+// between chunks just leaves a suffix unsynced for the server-deduped retry.
+const MARK_SYNCED_BATCH = 500;
 
-/** All ops with ts strictly greater than `sinceTs` (server side: serve to peers). */
-export function getOpsSince(db: Db, sinceTs: number): Op[] {
-  return db
-    .all<OpRow>(
-      'SELECT id, item_id, ts, device_id, fields FROM ops WHERE ts > ? ORDER BY ts',
-      [sinceTs],
-    )
-    .map(rowToOp);
+export function markOpsSynced(db: Db, ids: string[]): void {
+  for (let i = 0; i < ids.length; i += MARK_SYNCED_BATCH) {
+    const chunk = ids.slice(i, i + MARK_SYNCED_BATCH);
+    const placeholders = chunk.map(() => '?').join(',');
+    db.run(`UPDATE ops SET synced = 1 WHERE id IN (${placeholders})`, chunk);
+  }
 }
 
 /**

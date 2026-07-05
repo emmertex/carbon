@@ -19,8 +19,10 @@ import {
   saveServerConfig,
   authHeaders,
   saveCurrentUser,
+  defaultServerUrl,
   type CurrentUser,
 } from './config';
+import { isNative } from './platform';
 import { useStore } from './store';
 import { uploadPendingBlobs } from './blobs';
 import { getNlConfig } from './admin';
@@ -77,12 +79,17 @@ function grantedRoots(recordOps: RecordOp[], myUserId: string): string[] {
 
 /**
  * Ask the current origin what it is (apex landing / tenant workspace / unknown /
- * single-tenant self-host) so the UI can show the right entry screen. Always hits
- * the current origin, independent of any configured sync URL.
+ * single-tenant self-host) so the UI can show the right entry screen. Hits the
+ * current origin, independent of any configured sync URL — except on native shells
+ * (Capacitor/Tauri), where the app isn't served from the real server's origin
+ * (Capacitor uses https://localhost, Tauri a tauri:// scheme), so we ask the
+ * configured (or default hosted) server instead, purely to learn its version.
  */
 export async function fetchHostInfo(): Promise<void> {
   try {
-    const res = await fetch(`${window.location.origin}/api/health`);
+    const origin = isNative ? getServerConfig().url || defaultServerUrl() : window.location.origin;
+    if (!origin) return;
+    const res = await fetch(`${origin}/api/health`);
     if (!res.ok) return;
     const h = (await res.json()) as {
       role?: 'single' | 'apex' | 'app' | 'tenant' | 'unknown';
@@ -100,6 +107,11 @@ export async function fetchHostInfo(): Promise<void> {
         version: h.version ?? null,
       });
       useStore.getState().setWorkspaceLock(!!h.locked, h.expiresAt ?? null);
+      // The role-driven server-config wiring below only makes sense when `origin`
+      // is where the app is actually served from (the browser/PWA case) — on native
+      // it's just the sync target, and role there doesn't mean the same thing (e.g.
+      // the default hosted server IS the 'app' offline host at the origin level).
+      if (isNative) return;
       // The dedicated offline host never syncs — detach from any server so it's a
       // pure local-first PWA, and remember the choice for this origin.
       if (h.role === 'app') {

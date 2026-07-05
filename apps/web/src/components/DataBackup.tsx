@@ -1,15 +1,51 @@
 import { useRef, useState } from 'react';
-import { Download, Upload, Loader2 } from 'lucide-react';
+import { Download, Upload, Loader2, Trash2 } from 'lucide-react';
+import { completedBefore, purgeCompleted, COMPLETED_PURGE_AGE_DAYS } from '@carbon/core';
 import { exportBackup, inspectBackup, applyImport, type ParsedBackup, type UserMapping } from '@/lib/backup';
 import { ImportModal } from './ImportModal';
 import { SettingsSection } from './settings/SettingsSection';
 import { btnSecondary } from './settings/controls';
+import { useQuery } from '@/hooks/useQuery';
+import { getCurrentUserId } from '@/lib/store';
+import { mutate } from '@/lib/mutate';
+
+const purgeCutoff = () =>
+  new Date(Date.now() - COMPLETED_PURGE_AGE_DAYS * 86_400_000).toISOString();
 
 export function DataBackup() {
-  const [busy, setBusy] = useState<'export' | 'import' | null>(null);
+  const [busy, setBusy] = useState<'export' | 'import' | 'purge' | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [parsed, setParsed] = useState<ParsedBackup | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const userId = getCurrentUserId();
+  const completedCount = useQuery(
+    (db) => completedBefore(db, userId, purgeCutoff()).length,
+    [userId],
+  );
+
+  async function doPurge() {
+    if (!completedCount) return;
+    if (
+      !window.confirm(
+        `Purge ${completedCount} completed item${completedCount === 1 ? '' : 's'}? ` +
+          `The purge syncs to your other devices and can't be undone from here.`,
+      )
+    ) {
+      return;
+    }
+    setBusy('purge');
+    setMsg(null);
+    // Yield a tick so the spinner paints before the synchronous purge work.
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+      const n = mutate((db, dev) => purgeCompleted(db, dev, userId, purgeCutoff()), 'purge');
+      setMsg({ ok: true, text: `Purged ${n} completed item${n === 1 ? '' : 's'}.` });
+    } catch {
+      setMsg({ ok: false, text: 'Purge failed.' });
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function doExport() {
     setBusy('export');
@@ -102,6 +138,24 @@ export function DataBackup() {
           onCancel={() => setParsed(null)}
           onConfirm={runImport}
         />
+      )}
+
+      {!!completedCount && (
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="text-xs text-text-faint">
+            There {completedCount === 1 ? 'is' : 'are'} <strong>{completedCount}</strong> completed
+            item{completedCount === 1 ? '' : 's'} older than {COMPLETED_PURGE_AGE_DAYS} days.
+            Consider exporting a backup above before purging.
+          </p>
+          <button
+            onClick={doPurge}
+            disabled={busy !== null}
+            className={`mt-2 ${btnSecondary}`}
+          >
+            {busy === 'purge' ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+            Purge items completed more than {COMPLETED_PURGE_AGE_DAYS} days ago
+          </button>
+        </div>
       )}
     </SettingsSection>
   );

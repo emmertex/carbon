@@ -25,6 +25,9 @@ works fully offline, local-only, with no account.
 - Debounced local persistence (250 ms) plus an immediate flush on tab hide/close, so a reload
   or app-kill never drops the last edit.
 - **Full export/import** of the entire database plus attachment blobs.
+- **Purge completed tasks** — bulk-delete (soft-delete/tombstone, syncs like any other change)
+  your own completed items older than 7 days. A proactive Inbox notice **(sync server)** nudges
+  you once your purgeable count crosses a threshold.
 - **Copy any task/project subtree as a Markdown checklist** for pasting into chats or notes.
 - Multi-device task sync **(sync server)**, with monotonic cursors and authorization-scoped
   backfill.

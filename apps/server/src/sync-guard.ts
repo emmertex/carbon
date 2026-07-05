@@ -1,4 +1,11 @@
-import { hasWriteAccess, type Db, type Op, type RecordOp, type ItemPatch } from '@carbon/core';
+import {
+  hasWriteAccess,
+  hasReadAccess,
+  type Db,
+  type Op,
+  type RecordOp,
+  type ItemPatch,
+} from '@carbon/core';
 
 // ----- sync push validation (S1) --------------------------------------------
 // The sync handler used to apply client-pushed ops verbatim. A client could then
@@ -52,6 +59,9 @@ export function sanitizeRecordOps(
     const itemId = typeof data.item_id === 'string' ? data.item_id : null;
     switch (op.entity) {
       case 'comment':
+        // Read access is the right bar: comments (and their @mentions, which can
+        // trigger agent runs) are visible to anyone who can see the item.
+        if (!itemId || !hasReadAccess(db, itemId, userId)) continue;
         data.author_id = userId; // can't author as another user
         break;
       case 'share':
@@ -60,12 +70,33 @@ export function sanitizeRecordOps(
         break;
       case 'attachment':
       case 'item_tag':
-        if (itemId && !hasWriteAccess(db, itemId, userId)) continue;
+        if (!itemId || !hasWriteAccess(db, itemId, userId)) continue;
         break;
+      case 'item_dep': {
+        // Edge touches two items (pred blocks succ); require write access to both
+        // endpoints, mirroring the item_tag gate above.
+        const predId = typeof data.pred_id === 'string' ? data.pred_id : null;
+        const succId = typeof data.succ_id === 'string' ? data.succ_id : null;
+        if (
+          !predId ||
+          !succId ||
+          !hasWriteAccess(db, predId, userId) ||
+          !hasWriteAccess(db, succId, userId)
+        )
+          continue;
+        break;
+      }
       case 'timelog':
       case 'plan':
-      case 'setting':
         data.user_id = userId; // per-user rows: only your own
+        break;
+      case 'setting':
+        // No matching case in packages/core's applyRecordOp — intentional, not a
+        // gap. Settings are UI/localStorage blobs, not part of the CRDT item
+        // graph; the client applies them directly off the raw record-op log
+        // (see apps/web/src/lib/settings-sync.ts). This case only forces
+        // ownership before the op is stored/relayed.
+        data.user_id = userId;
         break;
       case 'tag':
         break; // global shared vocabulary

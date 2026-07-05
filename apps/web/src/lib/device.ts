@@ -76,11 +76,6 @@ export function getDeviceName(): string {
   return localStorage.getItem(NAME_KEY) || localStorage.getItem(NATIVE_NAME_KEY) || uaFallback();
 }
 
-/** True when the user has set their own name (vs an auto/native one). */
-export function hasUserDeviceName(): boolean {
-  return !!localStorage.getItem(NAME_KEY);
-}
-
 /** Set (or clear, with null) the user's chosen device name. */
 export function setDeviceName(name: string | null): void {
   const n = name?.trim();

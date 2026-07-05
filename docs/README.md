@@ -7,6 +7,7 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 ## Guides
 
 ### Using Carbon
+
 - [**Complete feature list**](features.md) — the full inventory of what Carbon does, grouped by
   area, marking what works offline vs what needs a sync server.
 - [**Usage & keyboard shortcuts**](usage-and-shortcuts.md) — quick capture, natural-language
@@ -16,10 +17,12 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
   comparison, including where Carbon falls short.
 
 ### Security & data
+
 - [**Data security**](data-security.md) — workspace isolation, TLS, authentication, local-only
   mode, data ownership, and the model's boundaries.
 
 ### Apps & integrations
+
 - [**Native apps (desktop + Android)**](native-apps.md) — building and running the Tauri desktop
   and Capacitor Android apps, plus the desktop global-hotkey / tray quick-add.
 - [**Calendar sync (CalDAV & iCal)**](caldav.md) — two-way CalDAV sync and read-only iCal feed
@@ -32,14 +35,15 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
   for natural-language task control.
 
 ### Developer / API reference
+
 - [**REST API guide**](api.md) — endpoints, authentication, scopes.
 - [**Agent API**](carbon-agent-api.md) — webhook contract + callbacks for building a skill.
 
 ### Credits
+
 - [**Open source projects used**](open-source.md) — every direct library and tool Carbon is built on.
 
 ---
 
-*Engineering notes, design plans, and internal reviews live in [`internal/`](internal/README.md)
-and are not part of this public documentation set.*
-</content>
+_Engineering notes, design plans, and internal reviews are intentionally kept outside this
+public documentation set._

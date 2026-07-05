@@ -25,7 +25,6 @@ import {
   setFederationPolicy,
   addPeer,
   listPeers,
-  listDenied,
   peerDenied,
   removePeer,
   hostCeilingAllows,
@@ -188,7 +187,7 @@ describe('federation policy + peer whitelist', () => {
     assert.equal(listPeers(db).length, 0, 'removed peer no longer listed');
   });
 
-  test('allow + deny entries: listPeers filters by type; listDenied + peerDenied work', () => {
+  test('allow + deny entries: listPeers filters by type; peerDenied works', () => {
     const { db } = makeTestDb();
     const allow = addPeer(db, { baseUrl: 'allowed', subdomain: 'allowed', listType: 'allow' });
     const deny = addPeer(db, { baseUrl: 'blocked', subdomain: 'blocked', listType: 'deny' });
@@ -205,7 +204,6 @@ describe('federation policy + peer whitelist', () => {
       [deny.id],
       'listPeers(deny) is just the deny entry',
     );
-    assert.deepEqual(listDenied(db).map((p) => p.id), [deny.id], 'listDenied == listPeers(deny)');
     assert.equal(deny.list_type, 'deny', 'addPeer persists the list type');
 
     // peerDenied matches a deny row by subdomain OR base_url, and only deny rows.
@@ -216,7 +214,7 @@ describe('federation policy + peer whitelist', () => {
     // Removing the deny row clears the denial.
     removePeer(db, deny.id);
     assert.equal(peerDenied(db, 'blocked'), false, 'removed deny row no longer blocks');
-    assert.equal(listDenied(db).length, 0);
+    assert.equal(listPeers(db, 'deny').length, 0);
   });
 });
 

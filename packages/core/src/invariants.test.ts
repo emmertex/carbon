@@ -25,6 +25,7 @@ import {
 } from './index';
 import { openMemoryDb } from './test-helpers';
 import { migrate } from './migrate';
+import { MIGRATIONS } from './schema';
 
 // ─── CRDT commutativity ──────────────────────────────────────────────────────
 
@@ -151,6 +152,42 @@ describe('schema migration idempotency', () => {
     const item = createItem(db, dev, { type: 'task', title: 'Survivor' });
     migrate(db); // must not wipe data
     assert.equal(getItem(db, item.id)?.title, 'Survivor');
+  });
+
+  // SYNC-2 — time_logs.updated_at (added in migration v19) must backfill sensibly for
+  // rows that predate the column, since this migration runs on every self-hosted
+  // upgrade with real user data: a closed log backfills from its end_time (the last
+  // legitimate edit moment), a still-open log falls back to its start_time.
+  test('time_logs.updated_at backfills from end_time (else start_time) on upgrade', () => {
+    const db = freshDb();
+    // Bring the DB to just before the updated_at migration, as a pre-existing
+    // self-hosted install would be.
+    db.transaction(() => {
+      for (const m of MIGRATIONS) {
+        if (m.version >= 19) continue;
+        db.exec(m.up);
+        db.run(
+          `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          [String(m.version)],
+        );
+      }
+    });
+    db.run(
+      `INSERT INTO time_logs (id, item_id, start_time, end_time, note, created_at, kind, session_id, deleted)
+       VALUES ('closed', 'itemX', '2026-01-01T00:00:00.000Z', '2026-01-01T01:00:00.000Z', NULL, '2026-01-01T00:00:00.000Z', 'task', NULL, 0)`,
+    );
+    db.run(
+      `INSERT INTO time_logs (id, item_id, start_time, end_time, note, created_at, kind, session_id, deleted)
+       VALUES ('open', 'itemX', '2026-01-02T00:00:00.000Z', NULL, NULL, '2026-01-02T00:00:00.000Z', 'task', NULL, 0)`,
+    );
+
+    migrate(db); // runs the v19 backfill
+
+    const closed = db.get<{ updated_at: string }>(`SELECT updated_at FROM time_logs WHERE id = 'closed'`);
+    const open = db.get<{ updated_at: string }>(`SELECT updated_at FROM time_logs WHERE id = 'open'`);
+    assert.equal(closed?.updated_at, '2026-01-01T01:00:00.000Z', 'closed log backfills from end_time');
+    assert.equal(open?.updated_at, '2026-01-02T00:00:00.000Z', 'open log backfills from start_time');
   });
 });
 

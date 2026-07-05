@@ -66,6 +66,26 @@ describe('subtreeIds', () => {
     assert.equal(subtreeIds(db, []).size, 0);
   });
 
+  test('a level wider than the internal batch size is still fully gathered', () => {
+    // Exercises the chunked `IN (...)` level-batching: a frontier wider than the
+    // batch size must not silently drop its tail. Every child gets a grandchild
+    // because SQL row order (and so chunk membership) is unspecified — only full
+    // coverage guarantees a dropped frontier chunk would actually lose
+    // descendants rather than just re-query nothing.
+    const db = openMemoryDb();
+    const project = createItem(db, DEVICE, { type: 'project', title: 'Wide' });
+    const children = Array.from({ length: 620 }, (_, i) =>
+      createItem(db, DEVICE, { title: `c${i}`, parentId: project.id }),
+    );
+    const grandkids = children.map((c, i) =>
+      createItem(db, DEVICE, { title: `g${i}`, parentId: c.id }),
+    );
+    const ids = subtreeIds(db, [project.id]);
+    assert.equal(ids.size, 1 + children.length + grandkids.length);
+    for (const c of children) assert.ok(ids.has(c.id));
+    for (const g of grandkids) assert.ok(ids.has(g.id));
+  });
+
   test('visibleItemIds is unchanged by the refactor (owner items + shared subtree)', () => {
     const db = openMemoryDb();
     const alice = createUser(db, { username: 'alice' });

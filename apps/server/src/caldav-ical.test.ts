@@ -162,6 +162,153 @@ test("an unrecognised TZID falls back without throwing", () => {
   assert.ok(parsed.patch.due_date);
 });
 
+// ----- all-day timezone skew (CAL-1) ----------------------------------------
+// Carbon stores an all-day date as "local 23:59 on that day". The encode/decode here
+// must anchor that "local" to the *item owner's* zone (threaded in as the `tz` arg),
+// not the server process's. These tests run the same logic under several owner zones —
+// the deterministic analogue of the review's "run under TZ=UTC / Australia/Melbourne /
+// America/Los_Angeles" reproduction — and assert the round-tripped calendar day and the
+// all-day classification survive regardless of where the server (or these tests) run.
+
+/** Wall-clock fields of an instant as seen in an IANA zone — the test-side mirror of the
+ *  connector's zone resolution, used to assert what a user in `tz` actually sees. */
+function partsInZone(
+  iso: string,
+  tz: string,
+): { y: number; mo: number; da: number; hh: number; mm: number } {
+  const f: Record<string, number> = {};
+  for (const p of new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date(iso)))
+    if (p.type !== "literal") f[p.type] = Number(p.value);
+  return {
+    y: f.year,
+    mo: f.month,
+    da: f.day,
+    hh: f.hour === 24 ? 0 : f.hour,
+    mm: f.minute,
+  };
+}
+
+function veventAllDay(ymd: string): string {
+  return (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ad\r\n" +
+    `DTSTART;VALUE=DATE:${ymd}\r\nDTEND;VALUE=DATE:${ymd}\r\n` +
+    "SUMMARY:All day\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+  );
+}
+
+function vtodoAllDay(ymd: string): string {
+  return (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:ad\r\n" +
+    `DUE;VALUE=DATE:${ymd}\r\nSUMMARY:All day\r\nEND:VTODO\r\nEND:VCALENDAR\r\n`
+  );
+}
+
+const OWNER_ZONES = ["UTC", "Australia/Melbourne", "America/Los_Angeles"];
+
+for (const tz of OWNER_ZONES) {
+  test(`all-day VEVENT round-trips on the same calendar day for an owner in ${tz}`, () => {
+    // Import: an external all-day "2026-07-10" (no time, no zone) for this owner.
+    const parsed = veventToItemPatch(veventAllDay("20260710"), tz);
+    assert.ok(parsed);
+    const due = parsed.patch.due_date;
+    assert.ok(due);
+    // Classified all-day → no meaningful duration.
+    assert.equal(parsed.patch.estimate_minutes, undefined);
+    // The stored instant is this owner's "local 23:59" on the intended day — so on their
+    // own device it reads back as 2026-07-10 23:59, never sliding to the 9th or 11th.
+    assert.deepEqual(partsInZone(due, tz), {
+      y: 2026,
+      mo: 7,
+      da: 10,
+      hh: 23,
+      mm: 59,
+    });
+    // Export: back out to the calendar as an all-day VALUE=DATE on the same day...
+    const ics = itemToVevent(
+      item({ title: "All day", due_date: due }),
+      "u",
+      30,
+      tz,
+    );
+    assert.match(ics, /DTSTART;VALUE=DATE:20260710/);
+    assert.match(ics, /DTEND;VALUE=DATE:20260711/); // exclusive end = next day
+    // ...and NOT misclassified as a timed event (the export-side half of the bug).
+    assert.doesNotMatch(ics, /DTSTART:20260710T/);
+  });
+
+  test(`all-day VTODO DUE round-trips on the same calendar day for an owner in ${tz}`, () => {
+    const parsed = vtodoToItemPatch(vtodoAllDay("20260710"), tz);
+    assert.ok(parsed);
+    const due = parsed.patch.due_date;
+    assert.ok(due);
+    assert.deepEqual(partsInZone(due, tz), {
+      y: 2026,
+      mo: 7,
+      da: 10,
+      hh: 23,
+      mm: 59,
+    });
+    const ics = itemToVtodo(item({ title: "All day", due_date: due }), "u", tz);
+    assert.match(ics, /DUE;VALUE=DATE:20260710/);
+    assert.doesNotMatch(ics, /DUE:20260710T/);
+  });
+}
+
+test("anchoring all-day to the owner's zone (not the server's) fixes the day shift", () => {
+  // The exact bug from the review: a Melbourne (UTC+10) owner against a UTC server. If the
+  // all-day date is anchored to the wrong (server/UTC) zone, the stored 23:59Z instant reads
+  // back in Melbourne as 09:59 the *next* day — July 10 becomes July 11.
+  const wrong = veventToItemPatch(veventAllDay("20260710"), "UTC");
+  assert.ok(wrong?.patch.due_date);
+  assert.equal(partsInZone(wrong.patch.due_date, "Australia/Melbourne").da, 11);
+  // Anchoring to the owner's own zone keeps the calendar day intact.
+  const right = veventToItemPatch(veventAllDay("20260710"), "Australia/Melbourne");
+  assert.ok(right?.patch.due_date);
+  assert.equal(partsInZone(right.patch.due_date, "Australia/Melbourne").da, 10);
+  assert.equal(partsInZone(right.patch.due_date, "Australia/Melbourne").hh, 23);
+});
+
+test("export: a Melbourne owner's all-day instant is not misclassified as timed", () => {
+  // A Melbourne browser stores "due July 10, all day" as 23:59 AEST = 2026-07-10T13:59:00Z.
+  // Under the old server-local (UTC) logic that instant looked like 13:59 → a timed event.
+  // With the owner zone threaded in, it's correctly an all-day VALUE=DATE on July 10.
+  const melbAllDay = "2026-07-10T13:59:00.000Z";
+  assert.deepEqual(partsInZone(melbAllDay, "Australia/Melbourne"), {
+    y: 2026,
+    mo: 7,
+    da: 10,
+    hh: 23,
+    mm: 59,
+  });
+  const ics = itemToVevent(
+    item({ title: "All day", due_date: melbAllDay }),
+    "u",
+    30,
+    "Australia/Melbourne",
+  );
+  assert.match(ics, /DTSTART;VALUE=DATE:20260710/);
+  assert.doesNotMatch(ics, /DTSTART:20260710T135900Z/);
+});
+
+test("with no owner zone, all-day falls back to the server-local marker (unchanged)", () => {
+  // tz omitted → historical behaviour: the local 23:59 marker round-trips as VALUE=DATE.
+  const due = new Date(2026, 5, 28, 23, 59, 0, 0).toISOString();
+  const ics = itemToVevent(item({ title: "All day", due_date: due }), "u", 30);
+  assert.match(ics, /DTSTART;VALUE=DATE:20260628/);
+  const back = veventToItemPatch(ics);
+  assert.ok(back);
+  assert.equal(back.patch.due_date, due);
+  assert.equal(back.patch.estimate_minutes, undefined);
+});
+
 test("contentHash is stable for unmapped changes, changes for mapped ones", () => {
   const base = item({
     title: "X",

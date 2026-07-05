@@ -97,9 +97,9 @@ The Python helper module (`hermes/carbon-webhook-listener.py`) ships matching wr
 7. "Share/assign X with/to NAME" → `agent_share(query="X", users=["NAME"])` / `agent_assign(...)`; call `agent_users()` if unsure who exists (bots can't be assigned). "Start/stop a timer on X" → `agent_start_timer(query="X")` / `agent_stop_timer()`.
 8. To reach a **completed** task (reopen/re-tag/report), pass `done=false` (complete) or `status="all"`/`include_done=True`.
 
-The exact, example-driven system prompt is exported as `AGENT_API_SYSTEM_PROMPT`
-(`apps/server/src/agents.ts`) — use it (or a close paraphrase) as the model's system message.
-Point a local LLM at it through your Hermes profile; geocoding for "nearest PLACE" is
+The exact, example-driven system prompt lives in `apps/server/src/agent-command.ts`
+(`SYSTEM_PROMPT` / `CONVERSATIONAL_SYSTEM_PROMPT`) — use it (or a close paraphrase)
+as the model's system message. Point a local LLM at it through your Hermes profile; geocoding for "nearest PLACE" is
 controlled by the `CARBON_GEOCODE_*` env vars (OpenStreetMap by default).
 
 ## Testing & operations

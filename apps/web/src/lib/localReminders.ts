@@ -24,9 +24,6 @@ export function localRemindersSupported(): boolean {
 export function localRemindersPref(): boolean {
   return localStorage.getItem(PREF_KEY) === '1';
 }
-export function localRemindersActive(): boolean {
-  return timer !== null;
-}
 
 /** True when the server is handling reminders for us (so local would duplicate). */
 function pushActive(): boolean {
@@ -110,9 +107,4 @@ export function stopLocalReminders(): void {
     timer = null;
   }
   if (isCapacitor) void cancelAllNative();
-}
-
-/** Re-reconcile the native schedule now (call after data sync on Capacitor). */
-export function refreshLocalReminders(): void {
-  if (isCapacitor && localRemindersPref()) void syncNativeSchedule();
 }

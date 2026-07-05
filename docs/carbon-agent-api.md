@@ -32,12 +32,12 @@ In **Settings → AI agents** create an agent of kind **Agentic webhook
 
 On creation Carbon issues a **one-time API token** (shown once). This token belongs
 to the bot user, so anything you post appears authored by the bot and is correctly
-permissioned. **Save it** and configure your skill with:
-Configure your skill with:
+permissioned. **Save it**, and configure your skill with:
+
 - `CARBON_URL` — base URL with workspace subdomain (e.g. `https://my.carbon.etx.sx`), or `https://carbon.etx.sx` for self-hosted without subdomains
 - `CARBON_TOKEN` — the issued agent token
 
-> You *can* instead use a human's token (e.g. your Home Assistant token). It works,
+> You _can_ instead use a human's token (e.g. your Home Assistant token). It works,
 > but replies will be authored by **that user**, not the bot, and bot scoping won't
 > apply. Prefer the agent token.
 
@@ -56,7 +56,8 @@ Tokens carry scopes: `tasks:read`, `tasks:write`, `inbox:write` (the agent token
 all three). Tokens can never access admin endpoints.
 
 **Bot permissions** (enforced server-side):
-- **Read**: a bot may read *all* tasks.
+
+- **Read**: a bot may read _all_ tasks.
 - **Comment / attach**: only on tasks where the bot is **assigned** or **@mentioned**.
 - **Complete**: only tasks **assigned** to the bot.
 
@@ -74,20 +75,29 @@ Content-Type: application/json
 
 ```jsonc
 {
-  "event": "mention",            // "mention" | "assigned" | "test"
-  "agent": "Hermes",             // the agent's display name
-  "instructions": "…",           // the agent's configured instructions, if any (optional)
+  "event": "mention", // "mention" | "assigned" | "test"
+  "agent": "Hermes", // the agent's display name
+  "instructions": "…", // the agent's configured instructions, if any (optional)
   "task": {
-    "id": "f3a1…",               // task id — use this in the REST calls below
+    "id": "f3a1…", // task id — use this in the REST calls below
     "title": "Book campsite",
     "note": "Prefer riverside, need a vehicle pass.",
-    "status": "active",          // active | done | dropped
-    "due_date": "2026-07-10T00:00:00Z"   // ISO-8601 or null
+    "status": "active", // active | done | dropped
+    "due_date": "2026-07-10T00:00:00Z", // ISO-8601 or null
   },
-  "comments": [                  // full thread, oldest first
-    { "author": "andrew", "body": "We are going the second week of July.", "created_at": "…" },
-    { "author": "andrew", "body": "@hermes what should we do here?", "created_at": "…" }
-  ]
+  "comments": [
+    // full thread, oldest first
+    {
+      "author": "andrew",
+      "body": "We are going the second week of July.",
+      "created_at": "…",
+    },
+    {
+      "author": "andrew",
+      "body": "@hermes what should we do here?",
+      "created_at": "…",
+    },
+  ],
 }
 ```
 
@@ -110,38 +120,45 @@ REST API below.
 Base path is `<CARBON_URL>/api`. All examples assume the `Authorization` and
 `Content-Type` headers from §2.
 
-### Reply with a comment  ★ the main one
+### Reply with a comment ★ the main one
+
 ```
 POST /api/tasks/{id}/comments
 { "body": "I'd reserve the riverside loop for 6–13 Jul and add a vehicle pass." }
 → 201  { id, item_id, author_id, body, created_at, … }
 ```
+
 Markdown is allowed in `body`, including links and images:
 `![chart](https://…/chart.png)` / `[booking](https://…)`. The comment syncs to all
 clients on the task.
 
 ### Complete an assigned task
+
 ```
 POST /api/tasks/{id}/complete          # ?done=false to re-open
 → 200  { …task, "status": "done" }
 ```
 
 ### Read a task (full context)
+
 ```
 GET /api/tasks/{id}
 → 200  { id, title, note, status, priority, due_date, defer_date, parent_id, … }
 ```
 
 ### List / search tasks
+
 ```
 GET /api/tasks?perspective=today        # inbox | today | flagged   (optional)
 GET /api/tasks?project={id}             # children of a project     (optional)
 GET /api/tasks?status=active            # active | done | dropped   (optional)
 → 200  { "tasks": [ …Item ] }
 ```
+
 (Bots see all tasks here; humans see only what they own or are shared on.)
 
 ### Create a task (e.g. follow-up)
+
 ```
 POST /api/tasks
 { "title": "Confirm vehicle pass", "note": "…", "project_id": "…",
@@ -150,6 +167,7 @@ POST /api/tasks
 ```
 
 ### Update a task
+
 ```
 PATCH /api/tasks/{id}
 { "title": "…", "note": "…", "status": "active", "due_date": "…",
@@ -158,7 +176,9 @@ PATCH /api/tasks/{id}
 ```
 
 ### Attach a file (optional)
+
 Two steps — upload the bytes by content hash, then attach the metadata:
+
 ```
 # 1) sha256 the file, upload it (idempotent; skipped if already present)
 POST /api/blobs/{sha256hex}        body: raw file bytes
@@ -169,10 +189,12 @@ POST /api/tasks/{id}/attachments
 { "filename": "quote.pdf", "mimeType": "application/pdf", "size": 18234, "hash": "{sha256hex}" }
 → 201  { …attachment }
 ```
+
 Image attachments render inline in Carbon. To download a blob:
 `GET /api/blobs/{sha256hex}` (returns the bytes).
 
 ### Identity / health
+
 ```
 GET  /api/me        → who the token authenticates as { id, username, role, is_bot, … }
 GET  /api/health    → { status: "ok", version }  (no auth)
@@ -195,6 +217,7 @@ on POST <webhook>:
 ```
 
 Notes:
+
 - You usually don't need extra reads — the webhook payload already contains the task
   and the whole comment thread. Use `GET /api/tasks…` only for broader context.
 - Keep replies focused; they appear in a shared comment thread.
@@ -205,7 +228,7 @@ Notes:
 
 ## 6. Natural-language agent API (`/api/agent/*`)
 
-A second, **granular** surface designed for a *small* LLM (e.g. Qwen 2.5 1.5B) to drive
+A second, **granular** surface designed for a _small_ LLM (e.g. Qwen 2.5 1.5B) to drive
 natural-language task management — "add milk and eggs to my shopping list", "mark off
 bread and milk", "what do I need at Coles?". The model can't reliably fuzzy-match names
 or hold big contexts, so the **server does the matching and batching** and responses are
@@ -213,11 +236,11 @@ or hold big contexts, so the **server does the matching and batching** and respo
 
 > The in-app **Add box** and the built-in **[Telegram bot](telegram-bot.md)** both drive this
 > same tool layer server-side (you don't call these endpoints yourself for those) — the bot just
-> runs it in a conversational mode. This section documents the HTTP surface for *your own* skill.
+> runs it in a conversational mode. This section documents the HTTP surface for _your own_ skill.
 
 Same auth/scopes as the rest of the API (`tasks:read` for reads, `inbox:write` to create,
 `tasks:write` to complete/update). This is a **personal-assistant surface**: use a token
-that *acts as the user* (a human's token, a per-user token, or open mode). Writes are gated
+that _acts as the user_ (a human's token, a per-user token, or open mode). Writes are gated
 per item by the normal rule — a user can act on their own tasks; a pure bot token is still
 limited to tasks assigned to it. Batch ops never fail the whole request for one bad item;
 the failure is reported under `unmatched`.
@@ -227,6 +250,7 @@ the failure is reported under `unmatched`.
 > you already have one.
 
 ### Read (small payloads)
+
 ```
 GET /api/agent/lists                 → { lists: [{ id, name }] }            (?detail=1 adds open_count)
 GET /api/agent/tags                  → { tags: [{ id, name, hasGeo }] }     (?detail=1 adds color/status/geo)
@@ -235,11 +259,17 @@ GET /api/agent/items?list=&tag=&q=&status=active&limit=50
 GET /api/agent/items/{id}            → full item + { tags, list }
 POST /api/agent/resolve  { kind:"list"|"tag"|"task", q, list? }
                                      → { candidates:[{id,name,score,reason}], best:{id,confident} }
+POST /api/agent/filter   { text:"due tomorrow and flagged" }
+                                     → { expr: FilterExpr }   // NL → advanced filter expression
+POST /api/agent/geocode  { q:"coles", near:{lat,lng} }
+                                     → { candidates:[{lat,lng,radius,label}] }
 ```
+
 `status` is `active` (default), `done`, or `all`. `resolve` is the workhorse: call it when a
 name is uncertain — if `best.confident` is false, ask the user rather than guess.
 
 ### Write (batch)
+
 ```
 POST /api/agent/tasks/batch
 { "list":"shopping list", "titles":["milk","eggs"],
@@ -248,6 +278,7 @@ POST /api/agent/tasks/batch
   "create_tags_if_missing":true }         // default true
 → 201 { list:{id,name,created}, tags:[{id,name,created}], created:[{id,title}] }
 ```
+
 Resolves (or creates) the list and tags once, then creates the tasks under the list. Use
 `tasks:[{title,note,due_date,defer_date,reminder_at,recurrence,estimate_minutes,flagged,priority,tags}]`
 instead of `titles` for per-task fields (`due_date`/`defer_date`/`reminder_at` are ISO datetimes;
@@ -266,6 +297,7 @@ POST /api/agent/tasks/complete
 { "queries":["bread","milk"], "list":"shopping list", "done":true }   // and/or "ids":[...]
 → { matched:[{query,id,title}], unmatched:[{query, reason:"no_match"|"ambiguous"|"forbidden"}] }
 ```
+
 Tick off by fuzzy query and/or id. **Report the envelope back to the user verbatim** —
 "marked off milk, couldn't find bread". Unmatched queries do nothing. Re-opening (`done:false`)
 searches completed tasks automatically; pass `include_done:true` to reach a finished task in any
@@ -278,6 +310,7 @@ POST /api/agent/tasks/tag
    # or tasks already carrying a tag:  { "tag":"coles", "add":["sale"] }
 → { updated:[{id,title}], tags_added:[names], tags_removed:[names], unmatched:[...] }
 ```
+
 Bulk add/remove tags on existing tasks. The server enumerates the targets, so a caller (or
 LLM) never has to list the items first — "add the woolworths tag to everything in the shopping
 list" is one call. Missing add-tags are created (unless `create_tags_if_missing:false`).
@@ -288,6 +321,7 @@ POST /api/agent/tasks/update
   "include_done":false }
 → { matched:[...], unmatched:[...] }
 ```
+
 Patch fields: `title, note, due_date, defer_date, reminder_at` (ISO), `recurrence` (rule object, or
 `null` to clear), `estimate_minutes, flagged, priority, status` ("active"|"done"|"dropped"). Set
 `include_done:true` to match an already-completed task.
@@ -299,11 +333,13 @@ POST /api/agent/tags/geo
    # or:  { "tag":"coles", "geo":null }                                                 (clear)
 → { tag:{id,name}, geo:GeoReminder|null, source:"explicit"|"geocoded" }
 ```
+
 Stamps a geofence on a tag so location reminders fire. `near_name` resolves the nearest
 matching place to `near` via the geocoder (see env below); if geocoding is disabled or finds
 nothing it returns `400` and you should pass explicit coords.
 
 ### Geo query
+
 ```
 GET /api/agent/nearby?tag=coles               → { items:[{id,title,tags}] }
 GET /api/agent/nearby?lat=&lng=[&near_name=]   → tasks whose location (task/tag/project) matches the point
@@ -311,9 +347,11 @@ GET /api/agent/nearby?zone=Home               → tasks whose location label mat
 ```
 
 ### People, sharing & assigning
+
 ```
 GET  /api/agent/users                → { users:[{ id, name, username }] }
 ```
+
 The people a task can be shared with or assigned to. Call it when you're unsure a name exists.
 **Bots are not listed** — you can't share or assign to a bot through this API.
 
@@ -328,18 +366,23 @@ POST /api/agent/tasks/assign
 { "query":"book flights", "users":["Rachel"] }                      // "remove":true unassigns
 → { updated:[{id,title}], users:[{id,name}], unknown_users:[names], removed, unmatched:[...] }
 ```
-Share grants a user access; assign makes them responsible. Both resolve people by name (fuzzy) and
+
+Share grants a user access; assign makes them responsible — and also grants access (a write
+share) if the assignee doesn't already have any. Both resolve people by name (fuzzy) and
 are **write-gated** — you can only share/assign a task you own or have write access to; anything you
 can't is reported under `unmatched` with `reason:"forbidden"`.
 
 ### Time tracking
+
 ```
 POST /api/agent/timer/start  { "query":"write report" }   → { started:{id,title}, stopped:{id,title}|null }
 POST /api/agent/timer/stop   { }                          → { stopped:{id,title}|null }
 ```
+
 One timer runs per user — starting a new one auto-stops the previous (reported as `stopped`).
 
 ### Worked sequences (canonical utterances)
+
 - **"Add milk and eggs to my shopping list."** → `POST /tasks/batch {list:"shopping list", titles:["milk","eggs"]}`.
 - **"Remind me to get bread next time I'm at Coles."** → `POST /tasks/batch {list:"shopping", tags:["coles"], titles:["bread"]}` (+ once: `POST /tags/geo {tag:"coles", near_name:"coles", near:{lat,lng}}` to locate it).
 - **"Mark off bread and milk."** → `POST /tasks/complete {queries:["bread","milk"]}` → tell the user matched vs unmatched.
@@ -350,7 +393,9 @@ One timer runs per user — starting a new one auto-stops the previous (reported
 - **"Start a timer on the report."** → `POST /timer/start {query:"report"}`; later **"stop the timer"** → `POST /timer/stop {}`.
 
 ### Geocoding env (place lookup for "nearest Coles")
+
 Pluggable, OpenStreetMap by default, all outbound calls go through the SSRF guard.
+
 - `CARBON_GEOCODE_ENABLED` — `1`/`0`. Default **on** for single-tenant self-host, **off** under a base domain.
 - `CARBON_NOMINATIM_URL` (default `https://nominatim.openstreetmap.org`), `CARBON_OVERPASS_URL`
   (default `https://overpass-api.de/api/interpreter`) — point at a self-hosted instance to avoid public rate limits.
@@ -358,7 +403,7 @@ Pluggable, OpenStreetMap by default, all outbound calls go through the SSRF guar
 - `CARBON_GEOCODE_RADIUS_M` — brand-search radius (default 5000 m).
 
 A refined system prompt tuned for a 1.5B model lives in
-[`hermes.md`](hermes.md#natural-language-flows) (exported as `AGENT_API_SYSTEM_PROMPT`).
+[`hermes.md`](hermes.md#natural-language-flows) (`SYSTEM_PROMPT` in `agent-command.ts`).
 
 ## 7. Quick check (curl)
 

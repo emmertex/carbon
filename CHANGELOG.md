@@ -5,6 +5,36 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+
+## v0.6.2
+**Security hardening & CalDAV fixes**
+- Fixed all-day CalDAV tasks/events landing on the wrong calendar day (and showing a
+  bogus specific time instead of "all day") when your server and device are in different
+  timezones — the common case for most self-hosted setups. All-day dates now anchor to
+  your own timezone instead of the server's.
+- Task dependency links ("blocks" / "blocked by") now correctly sync to the server and
+  your other devices — they were previously accepted locally but silently dropped on
+  push in multi-user setups.
+- Hardened federation (cross-workspace sharing): a linked workspace can no longer act
+  outside what was actually shared with it, deny-listing a peer now cuts an
+  already-active link immediately, and a few other trust-boundary edges were tightened.
+- Comment permissions tightened — commenting/@mentioning now correctly requires access
+  to the task, closing a gap that could otherwise also trigger an AI agent on a task you
+  couldn't see.
+- Hardened the outbound-request guard (agent endpoints, webhooks, CalDAV) against
+  redirect-based bypass and DNS-rebinding.
+- A round of smaller reliability, performance, and error-handling fixes across sync,
+  billing, push notifications, the Telegram bot, and the AI agent tool loop.
+
+
+## v0.6.1
+**Performance and Reliability**
+- Added option to purge completed tasks (soft-delete, not removed from database)  
+- Added reminders to purge when large amounts of completed tasks (to keep performance)
+- More batched queries, to increase performance
+- Lots and lots of sanity checks and other hardening
+
+
 ## v0.6.0
 **Federation & cross-workspace sharing**
 - Share a project and its subtree with **another workspace** — on the same Carbon server or a

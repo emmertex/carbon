@@ -212,11 +212,11 @@ perspectives — **sync across your devices** (see below). Turn this off per dev
 
 Appearance (mode/theme/accent) · **Features & UI complexity** (presets + per-feature, per-device
 toggles + settings sync) · Gestures & mobile · Planning budget / Profile (signed in) · Sync server
-(URL + sign-in) · Subscription (admin) · Data backup (full export/import) · Reminders & location
-(push / foreground geofence) · This device (location sources) · Home Assistant (person link) ·
-API tokens (admin) · AI agents (admin, incl. token usage) · Natural-language commands (admin,
-incl. token usage) · Users (admin) · About (version) · Install app (browser only; links to the
-app stores).
+(URL + sign-in) · Subscription (admin) · Data backup (full export/import, purge completed tasks) ·
+Reminders & location (push / foreground geofence) · This device (location sources) ·
+Home Assistant (person link) · API tokens (admin) · AI agents (admin, incl. token usage) ·
+Natural-language commands (admin, incl. token usage) · Users (admin) · About (version) ·
+Install app (browser only; links to the app stores).
 
 ## Offline & sync
 

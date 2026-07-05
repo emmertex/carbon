@@ -13,6 +13,7 @@ import {
   createAgent,
   updateAgent,
   deleteAgent,
+  recordAgentUsage,
 } from './agents';
 import { getUserByUsername } from '@carbon/core';
 
@@ -339,6 +340,38 @@ describe('admin agent management', () => {
     });
     assert.equal(delRes.status, 200);
     assert.ok(!getAgent(db, id), 'agent removed');
+  });
+
+  test('DELETE /admin/agents/:id also removes its agent_usage rows', async () => {
+    const { db, addUser } = makeTestDb();
+    const { basic } = addUser('admin', 'pw', 'admin');
+    const app = buildAdminApp(db);
+
+    const createRes = await appFetch(app, '/admin/agents', {
+      method: 'POST',
+      headers: { Authorization: basic, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Chatty', username: 'chatty', kind: 'openai' }),
+    });
+    const { id } = (await createRes.json()) as { id: string };
+
+    recordAgentUsage(db, id, { input: 10, output: 5 }, 'm', 'comment_reply');
+    recordAgentUsage(db, id, { input: 20, output: 8 }, 'm', 'nl_command');
+    assert.equal(
+      db.get<{ n: number }>('SELECT COUNT(*) AS n FROM agent_usage WHERE agent_id = ?', [id])!.n,
+      2,
+      'usage rows recorded before delete',
+    );
+
+    const delRes = await appFetch(app, `/admin/agents/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: basic },
+    });
+    assert.equal(delRes.status, 200);
+    assert.equal(
+      db.get<{ n: number }>('SELECT COUNT(*) AS n FROM agent_usage WHERE agent_id = ?', [id])!.n,
+      0,
+      'usage rows are cleaned up, not left orphaned',
+    );
   });
 
   test('non-admin cannot manage agents', async () => {

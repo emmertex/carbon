@@ -1,5 +1,5 @@
 import { exportDb, openSnapshot, getDb, persist } from './db';
-import { exportBlobs, replaceBlobs, addImportedBlobs } from './blobs';
+import { exportBlobs, addImportedBlobs } from './blobs';
 import { ingestOps, ingestRecordOps, type Op, type RecordOp } from '@carbon/core';
 
 // A full local backup: the SQLite database plus every cached attachment blob,
@@ -216,15 +216,4 @@ export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): P
   // Bring attachment blobs along, queued for upload (skip dropped ones' files lazily).
   await addImportedBlobs(parsed.blobs);
   await persist();
-}
-
-/**
- * Legacy whole-snapshot restore (REPLACES all local data). Kept for callers that
- * want a verbatim device restore rather than a user-remapped merge.
- */
-export async function importBackup(file: File): Promise<void> {
-  const parsed = await inspectBackup(file);
-  const { importDb } = await import('./db');
-  await importDb(parsed.dbBytes);
-  await replaceBlobs(parsed.blobs);
 }

@@ -136,7 +136,6 @@ function saveOverrides(overrides: SourceOverrides): void {
 let state: WhereState = { ...EMPTY, overrides: loadOverrides() };
 const listeners = new Set<() => void>();
 let started = false;
-let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 function emit(next: Partial<WhereState>): void {
   state = { ...state, ...next, resolved: true };
@@ -399,7 +398,7 @@ export function startWhere(): void {
   started = true;
   void resolveDeviceName(); // populate the native device name (Capacitor) for self-report
   void resolve();
-  refreshTimer = setInterval(() => void resolve(), 5 * 60_000);
+  setInterval(() => void resolve(), 5 * 60_000);
 }
 
 export function subscribeWhere(listener: () => void): () => void {
@@ -439,12 +438,3 @@ useStore.subscribe((s) => {
     if (started) refreshWhere();
   }
 });
-
-export function stopWhere(): void {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
-  started = false;
-  state = { ...EMPTY, overrides: loadOverrides() };
-}

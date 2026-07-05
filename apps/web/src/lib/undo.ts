@@ -62,12 +62,6 @@ export function redo(): void {
   sync();
 }
 
-export function clearUndo(): void {
-  undoStack.length = 0;
-  redoStack.length = 0;
-  sync();
-}
-
 /**
  * Run a field-mutating action while capturing an inverse: snapshots `fields` on each
  * of `ids` beforehand, runs `apply`, and registers undo (write the snapshot back) /

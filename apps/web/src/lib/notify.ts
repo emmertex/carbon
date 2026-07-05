@@ -105,11 +105,20 @@ const fcmProvider: NotifyProvider = {
     const token = localStorage.getItem(FCM_TOKEN_KEY);
     const cfg = getServerConfig();
     if (token && cfg.url) {
-      await fetch(serverUrl('/api/push/fcm/unsubscribe'), {
+      // If the server-side unsubscribe fails, keep the local token so a later
+      // retry has something to send instead of silently leaving the server
+      // subscribed with no way for the client to know it should retry.
+      const ok = await fetch(serverUrl('/api/push/fcm/unsubscribe'), {
         method: 'POST',
         headers: authHeaders(cfg),
         body: JSON.stringify({ token }),
-      }).catch(() => {});
+      })
+        .then((res) => res.ok)
+        .catch((e) => {
+          console.warn('[carbon] FCM unsubscribe request failed:', e);
+          return false;
+        });
+      if (!ok) return;
     }
     localStorage.removeItem(FCM_TOKEN_KEY);
   },

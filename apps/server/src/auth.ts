@@ -13,6 +13,7 @@ import {
   itemHasHeldTag,
 } from '@carbon/core';
 import { notifyTask } from './push';
+import { alreadySent, markSent } from './reminders-sent';
 
 export type AuthMethod = 'basic' | 'token' | 'session' | 'open';
 export const SCOPES = ['tasks:read', 'tasks:write', 'inbox:write'] as const;
@@ -504,33 +505,23 @@ export function checkGpsProximity(db: Db): void {
   }
 }
 
-function alreadySent(db: Db, itemId: string, kind: string, marker: string): boolean {
-  return !!db.get(
-    'SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ? AND marker = ?',
-    [itemId, kind, marker],
-  );
-}
-
-function markSent(db: Db, itemId: string, kind: string, marker: string): void {
-  db.run(
-    `INSERT INTO reminders_sent (item_id, kind, marker, sent_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT DO NOTHING`,
-    [itemId, kind, marker, new Date().toISOString()],
-  );
-}
-
-/** Start a 1-minute GPS proximity check across all tenants (also sweeps stale devices). */
-export function startGpsScheduler(dbs: () => Db[]): void {
-  setInterval(() => {
-    for (const db of dbs()) {
-      try {
-        checkGpsProximity(db);
-        pruneStaleDeviceLocations(db);
-      } catch (e) {
-        console.error('[carbon] gps proximity check failed:', e);
+/** Start a 1-minute GPS proximity check across all tenants (also sweeps stale devices).
+ *  Started `startDelayMs` after boot (default: offset from the reminder/federation
+ *  sweep, which fires on-the-minute) so the two don't force-load every active tenant
+ *  into the LRU on the same tick. */
+export function startGpsScheduler(dbs: () => Db[], startDelayMs = 20_000): void {
+  setTimeout(() => {
+    setInterval(() => {
+      for (const db of dbs()) {
+        try {
+          checkGpsProximity(db);
+          pruneStaleDeviceLocations(db);
+        } catch (e) {
+          console.error('[carbon] gps proximity check failed:', e);
+        }
       }
-    }
-  }, 60_000);
+    }, 60_000);
+  }, startDelayMs);
 }
 
 /**

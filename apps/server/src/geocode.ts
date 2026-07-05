@@ -133,6 +133,19 @@ interface NominatimResult {
   };
 }
 
+/** Minimal runtime shape check: an array of objects each carrying string lat/lon. Nominatim's
+ *  contract is a JSON array, but nothing stops an upstream error page or proxy from returning
+ *  something else with a 200 — this keeps a malformed body from crashing the `.map`/property
+ *  access below instead of degrading to "no hits" like every other failure mode in this file. */
+function isNominatimResultArray(v: unknown): v is NominatimResult[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (r) => r && typeof r === 'object' && typeof (r as NominatimResult).lat === 'string' && typeof (r as NominatimResult).lon === 'string',
+    )
+  );
+}
+
 /** "Coles, Ringwood" — append a locality to the place name when one is known. */
 function withLocality(name: string, locality: string | undefined): string {
   const loc = locality?.trim();
@@ -245,7 +258,12 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
       );
       return [];
     }
-    const rows = (await res.json()) as NominatimResult[];
+    const rawJson: unknown = await res.json();
+    if (!isNominatimResultArray(rawJson)) {
+      geoDbg(`nominatim returned an unexpected shape for "${query}" (bounded=${bounded}) — treating as no hits`);
+      return [];
+    }
+    const rows = rawJson;
     const hits: Array<{ point: GeoPoint; label: string; dist: number }> = [];
     for (const r of rows) {
       const lat = Number(r.lat);

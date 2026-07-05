@@ -103,6 +103,68 @@ test('sanitizeRecordOps drops a share for an item the caller cannot write', () =
   assert.equal(out.length, 0);
 });
 
+test('sanitizeRecordOps keeps an item_dep link when the caller can write both endpoints', () => {
+  const d = db();
+  const a = createItem(d, DEV, { title: 'a', ownerId: 'bob' });
+  const b = createItem(d, DEV, { title: 'b', ownerId: 'bob' });
+  const [out] = sanitizeRecordOps(
+    d,
+    'bob',
+    [rec({ entity: 'item_dep', data: { pred_id: a.id, succ_id: b.id, deleted: false } })],
+    NOW,
+  );
+  assert.equal((out!.data as { pred_id: string }).pred_id, a.id, 'op kept');
+});
+
+test('sanitizeRecordOps drops an item_dep link when the caller lacks write access to one endpoint', () => {
+  const d = db();
+  const a = createItem(d, DEV, { title: 'a', ownerId: 'bob' });
+  const b = createItem(d, DEV, { title: 'b', ownerId: 'alice' }); // bob has no access here
+  const out = sanitizeRecordOps(
+    d,
+    'bob',
+    [rec({ entity: 'item_dep', data: { pred_id: a.id, succ_id: b.id, deleted: false } })],
+    NOW,
+  );
+  assert.equal(out.length, 0, 'no write access to succ → op dropped');
+});
+
+test('sanitizeRecordOps drops a comment against an item the caller cannot see', () => {
+  const d = db();
+  const it = createItem(d, DEV, { title: 't', ownerId: 'alice' });
+  const out = sanitizeRecordOps(
+    d,
+    'bob',
+    [rec({ entity: 'comment', data: { item_id: it.id, author_id: 'bob', body: 'hi' } })],
+    NOW,
+  );
+  assert.equal(out.length, 0, 'no read access → comment dropped');
+});
+
+test('sanitizeRecordOps keeps a comment on an item the caller has read-only access to', () => {
+  const d = db();
+  const it = createItem(d, DEV, { title: 't', ownerId: 'alice' });
+  shareItem(d, DEV, it.id, 'bob', 'read');
+  const [out] = sanitizeRecordOps(
+    d,
+    'bob',
+    [rec({ entity: 'comment', data: { item_id: it.id, author_id: 'mallory', body: 'hi' } })],
+    NOW,
+  );
+  assert.equal((out!.data as { author_id: string }).author_id, 'bob', 'read access is enough to comment');
+});
+
+test('sanitizeRecordOps drops an item_tag/attachment op with a missing item_id', () => {
+  const d = db();
+  const out = sanitizeRecordOps(
+    d,
+    'bob',
+    [rec({ entity: 'item_tag', data: { tag_id: 'tag1' } })],
+    NOW,
+  );
+  assert.equal(out.length, 0, 'malformed op (no item_id) fails closed, not open');
+});
+
 test('sanitizeRecordOps forces per-user rows (timelog) to the caller and drops user rows', () => {
   const d = db();
   const it = createItem(d, DEV, { title: 't', ownerId: 'bob' });

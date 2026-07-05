@@ -532,3 +532,89 @@ describe('federation Phase 2 — /sync link-secret auth', () => {
     assert.equal((await sync(link.secret)).status, 401, 'revoked link rejected');
   });
 });
+
+// ─── FED-3: /offers/inbound verifies the claimed callback_base_url origin ───────
+
+describe('federation Phase 2 — /offers/inbound origin verification', () => {
+  test('a spoofed callback_base_url that never minted the offer is rejected (no link, no notice)', async () => {
+    const modes: Record<string, FederationMode> = { acme: 'intra_server', globex: 'intra_server' };
+    const world = makeWorld(() => modes);
+    const acme = world.makeTenant('acme');
+    const globex = world.makeTenant('globex');
+    setFederationPolicy(acme.db, 'user_open');
+    setFederationPolicy(globex.db, 'user_open');
+    acme.addUser('alice', 'pw');
+    const bob = globex.addUser('bob', 'pw');
+
+    // An attacker POSTs an offer to globex claiming to be acme — but acme never minted this
+    // offer_secret, so it never went through acme's /offers route (no federation_offers row).
+    const hostile = await globex.app.fetch(
+      new Request('http://globex.test/api/federation/offers/inbound', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: 'bob',
+          from_address: 'attacker@acme',
+          from_label: 'Totally Acme',
+          root_label: 'Shared thing',
+          permission: 'write',
+          callback_base_url: 'acme', // spoofed: acme is a real peer but did NOT issue this offer
+          link_secret: 'attacker-minted-link-secret',
+          offer_secret: 'attacker-minted-offer-secret',
+        }),
+      }),
+    );
+    // globex challenges acme's /offers/verify with the fabricated offer_secret → acme has no
+    // such offer → 404 → globex refuses to trust the origin. (Read the body ONCE.)
+    const j = (await hostile.json().catch(() => ({}))) as { error?: string };
+    assert.equal(hostile.status, 403);
+    assert.equal(j.error, 'unverified_origin');
+    assert.equal(listLinks(globex.db).length, 0, 'no inbound link minted for an unverified origin');
+    assert.equal(listOpenNotices(globex.db, bob.id).length, 0, 'no offer notice for an unverified origin');
+  });
+
+  test('an unreachable claimed callback_base_url is rejected', async () => {
+    const modes: Record<string, FederationMode> = { acme: 'intra_server', globex: 'intra_server' };
+    const world = makeWorld(() => modes);
+    const globex = world.makeTenant('globex');
+    setFederationPolicy(globex.db, 'user_open');
+    const bob = globex.addUser('bob', 'pw');
+
+    // callback_base_url names a host with no live peer at all — the challenge can't even be
+    // delivered, so the origin is unverified and the offer is refused.
+    const hostile = await globex.app.fetch(
+      new Request('http://globex.test/api/federation/offers/inbound', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: 'bob',
+          callback_base_url: 'ghost',
+          link_secret: 's1',
+          offer_secret: 's2',
+        }),
+      }),
+    );
+    assert.equal(hostile.status, 403);
+    assert.equal(listLinks(globex.db).length, 0);
+    void bob;
+  });
+
+  test('the legitimate offer flow still passes the challenge (real issuer confirms its offer)', async () => {
+    const modes: Record<string, FederationMode> = { acme: 'intra_server', globex: 'intra_server' };
+    const world = makeWorld(() => modes);
+    const acme = world.makeTenant('acme');
+    const globex = world.makeTenant('globex');
+    setFederationPolicy(acme.db, 'user_open');
+    setFederationPolicy(globex.db, 'user_open');
+    const alice = acme.addUser('alice', 'pw');
+    const bob = globex.addUser('bob', 'pw');
+    const { roadmap } = seedRoadmap(acme, alice.id);
+
+    // The real /offers route mints + records the offer_secret before delivering, so globex's
+    // challenge back to acme's /offers/verify succeeds and the inbound link + notice are made.
+    const res = await offer(acme, alice.token, 'bob@globex', roadmap, 'read');
+    assert.equal(res.status, 200, await res.text().catch(() => ''));
+    assert.equal(listLinks(globex.db).length, 1, 'a verified origin mints the inbound link');
+    assert.equal(listOpenNotices(globex.db, bob.id).length, 1, 'bob gets exactly one offer notice');
+  });
+});

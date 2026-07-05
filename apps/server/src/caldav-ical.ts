@@ -10,15 +10,56 @@ import { parseRecurrence, type Item, type ItemPatch } from "@carbon/core";
 //
 // Known limitations (MVP, documented in docs/caldav.md):
 //  - RRULE is encoded outbound only; inbound RRULE is ignored (no recurrence import).
-//  - Non-UTC DTSTART/DUE with a TZID are interpreted as local wall-clock time (we
-//    don't carry a full tz database); UTC ("Z") and all-day (VALUE=DATE) are exact.
+//
+// Timezone handling: dates carrying no zone information — all-day (VALUE=DATE) values
+// and floating times — are anchored to the *item owner's* IANA zone, threaded in as `tz`
+// by caldav.ts (resolved via getUserTimezone). This matters because Carbon's all-day
+// convention stores an all-day date as "local 23:59 on that day", and "local" must mean
+// the owner's zone, not the server process's. When no owner zone is known, `tz` is null
+// and these fall back to the server's local clock (today's behaviour). UTC ("Z") and
+// TZID-qualified times carry their own zone and resolve exactly regardless of `tz`.
 
 const PRODID = "-//Carbon//CalDAV Connector//EN";
 
 const pad = (n: number, l = 2): string => String(n).padStart(l, "0");
 
-/** Carbon stores an all-day defer/due at the local 23:59 marker (see core repo). */
-function isAllDay(iso: string): boolean {
+/** Wall-clock fields of an instant as seen in an IANA zone, or null when the zone name
+ *  isn't recognised (the caller then falls back to the server's own local clock). Reuses
+ *  the same Intl tz database (h23) as zoneOffsetMs/zonedWallClockToUtc — no external dep. */
+function zonedParts(
+  iso: string,
+  tz: string,
+): { y: number; mo: number; da: number; hh: number; mm: number } | null {
+  let dtf: Intl.DateTimeFormat;
+  try {
+    dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return null; // not a valid IANA zone
+  }
+  const f: Record<string, number> = {};
+  for (const p of dtf.formatToParts(new Date(iso)))
+    if (p.type !== "literal") f[p.type] = Number(p.value);
+  // 'hour' can come back as 24 at midnight under h23; normalise to 0.
+  const hh = f.hour === 24 ? 0 : f.hour;
+  return { y: f.year, mo: f.month, da: f.day, hh, mm: f.minute };
+}
+
+/** Carbon stores an all-day defer/due at the "local 23:59" marker, where "local" is the
+ *  item owner's zone (`tz`). Evaluated in that zone so the server process's own timezone
+ *  can't misclassify an all-day value as timed. Falls back to server-local when tz is null. */
+function isAllDay(iso: string, tz?: string | null): boolean {
+  if (tz) {
+    const p = zonedParts(iso, tz);
+    if (p) return p.hh === 23 && p.mm === 59;
+  }
   const d = new Date(iso);
   return d.getHours() === 23 && d.getMinutes() === 59;
 }
@@ -31,10 +72,25 @@ function toICalUTC(iso: string): string {
   );
 }
 
-/** Local calendar date for an all-day value (the 23:59 marker is local). */
-function toICalDate(iso: string): string {
+/** Calendar date (YYYYMMDD) of an all-day value, taken in the owner's zone (`tz`) — the
+ *  23:59 marker belongs to that zone, not the server's. Falls back to server-local. */
+function toICalDate(iso: string, tz?: string | null): string {
+  if (tz) {
+    const p = zonedParts(iso, tz);
+    if (p) return `${p.y}${pad(p.mo)}${pad(p.da)}`;
+  }
   const d = new Date(iso);
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
+
+/** The calendar day after an all-day YYYYMMDD date (exclusive DTEND for all-day VEVENTs).
+ *  Pure calendar arithmetic in UTC, so it's independent of any process/zone offset. */
+function nextIcalDate(ymd: string): string {
+  const y = Number(ymd.slice(0, 4));
+  const mo = Number(ymd.slice(4, 6));
+  const da = Number(ymd.slice(6, 8));
+  const d = new Date(Date.UTC(y, mo - 1, da + 1));
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
 }
 
 /** Offset (ms) of an IANA zone at a given instant: how far the zone is ahead of UTC.
@@ -84,26 +140,29 @@ function zonedWallClockToUtc(
   return new Date(utc);
 }
 
-/** Parse an iCal DATE / DATE-TIME value into a Carbon ISO string + all-day flag. */
+/** Parse an iCal DATE / DATE-TIME value into a Carbon ISO string + all-day flag. `tz` is
+ *  the item owner's IANA zone, used to anchor values that carry no zone of their own
+ *  (all-day dates and floating times); null falls back to the server's local clock. */
 function parseICalDateTime(
   value: string,
   params: Record<string, string>,
+  tz?: string | null,
 ): { iso: string; allDay: boolean } | null {
   const v = value.trim();
   const dateOnly = /^(\d{4})(\d{2})(\d{2})$/.exec(v);
   if (params.VALUE === "DATE" || dateOnly) {
     const m = dateOnly ?? /^(\d{4})(\d{2})(\d{2})/.exec(v);
     if (!m) return null;
-    // Represent an all-day date at the local 23:59 marker Carbon uses.
-    const d = new Date(
-      Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3]),
-      23,
-      59,
-      0,
-      0,
-    );
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    // All-day → Carbon's "local 23:59" marker, anchored to the owner's zone so the stored
+    // instant lands on the right calendar day for that user. Server-local only as fallback.
+    if (tz) {
+      const d = zonedWallClockToUtc(y, mo, da, 23, 59, 0, tz);
+      if (d) return { iso: d.toISOString(), allDay: true };
+    }
+    const d = new Date(y, mo - 1, da, 23, 59, 0, 0);
     return { iso: d.toISOString(), allDay: true };
   }
   const dt = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/.exec(v);
@@ -120,7 +179,12 @@ function parseICalDateTime(
     const d = zonedWallClockToUtc(+y, +mo, +da, +hh, +mm, +ss, params.TZID);
     if (d) return { iso: d.toISOString(), allDay: false };
   }
-  // Floating time (or an unrecognised TZID): interpret as local wall-clock time.
+  // Floating time (or an unrecognised TZID): interpret as wall-clock in the owner's zone,
+  // falling back to the server's local clock when no owner zone is known.
+  if (tz) {
+    const d = zonedWallClockToUtc(+y, +mo, +da, +hh, +mm, +ss, tz);
+    if (d) return { iso: d.toISOString(), allDay: false };
+  }
   return {
     iso: new Date(+y, +mo - 1, +da, +hh, +mm, +ss).toISOString(),
     allDay: false,
@@ -292,13 +356,13 @@ function wrapVCalendar(component: string[]): string {
   return lines.map(fold).join("\r\n") + "\r\n";
 }
 
-function dateProp(name: string, iso: string): string {
-  return isAllDay(iso)
-    ? `${name};VALUE=DATE:${toICalDate(iso)}`
+function dateProp(name: string, iso: string, tz?: string | null): string {
+  return isAllDay(iso, tz)
+    ? `${name};VALUE=DATE:${toICalDate(iso, tz)}`
     : `${name}:${toICalUTC(iso)}`;
 }
 
-export function itemToVtodo(item: Item, uid: string): string {
+export function itemToVtodo(item: Item, uid: string, tz?: string | null): string {
   const L: string[] = [
     "BEGIN:VTODO",
     `UID:${uid}`,
@@ -306,8 +370,8 @@ export function itemToVtodo(item: Item, uid: string): string {
   ];
   L.push(`SUMMARY:${escapeText(item.title || "")}`);
   if (item.note) L.push(`DESCRIPTION:${escapeText(item.note)}`);
-  if (item.due_date) L.push(dateProp("DUE", item.due_date));
-  if (item.defer_date) L.push(dateProp("DTSTART", item.defer_date));
+  if (item.due_date) L.push(dateProp("DUE", item.due_date, tz));
+  if (item.defer_date) L.push(dateProp("DTSTART", item.defer_date, tz));
   const prio = carbonToIcalPriority(item.priority);
   if (prio) L.push(`PRIORITY:${prio}`);
   if (item.status === "done") {
@@ -327,9 +391,10 @@ export function itemToVevent(
   item: Item,
   uid: string,
   defaultMinutes: number,
+  tz?: string | null,
 ): string {
   const due = item.due_date as string;
-  const allDay = isAllDay(due);
+  const allDay = isAllDay(due, tz);
   const L: string[] = [
     "BEGIN:VEVENT",
     `UID:${uid}`,
@@ -338,10 +403,11 @@ export function itemToVevent(
   L.push(`SUMMARY:${escapeText(item.title || "")}`);
   if (item.note) L.push(`DESCRIPTION:${escapeText(item.note)}`);
   if (allDay) {
-    L.push(`DTSTART;VALUE=DATE:${toICalDate(due)}`);
-    const next = new Date(due);
-    next.setDate(next.getDate() + 1); // DTEND is exclusive for all-day
-    L.push(`DTEND;VALUE=DATE:${toICalDate(next.toISOString())}`);
+    const startYmd = toICalDate(due, tz); // owner-zone calendar day
+    L.push(`DTSTART;VALUE=DATE:${startYmd}`);
+    // DTEND is exclusive for all-day; compute the next day from the owner-zone date, not
+    // via server-local setDate (which could roll to the wrong day near the zone boundary).
+    L.push(`DTEND;VALUE=DATE:${nextIcalDate(startYmd)}`);
   } else {
     L.push(`DTSTART:${toICalUTC(due)}`);
     const mins =
@@ -367,7 +433,7 @@ export interface ParsedTodo {
   completed: boolean;
 }
 
-function mapVtodo(props: Prop[]): ParsedTodo {
+function mapVtodo(props: Prop[], tz?: string | null): ParsedTodo {
   const uid = getProp(props, "UID")?.value ?? null;
   const title = unescapeText(getProp(props, "SUMMARY")?.value ?? "");
   const descr = getProp(props, "DESCRIPTION");
@@ -381,10 +447,10 @@ function mapVtodo(props: Prop[]): ParsedTodo {
     title,
     note: descr ? unescapeText(descr.value) : null,
     due_date: due
-      ? (parseICalDateTime(due.value, due.params)?.iso ?? null)
+      ? (parseICalDateTime(due.value, due.params, tz)?.iso ?? null)
       : null,
     defer_date: start
-      ? (parseICalDateTime(start.value, start.params)?.iso ?? null)
+      ? (parseICalDateTime(start.value, start.params, tz)?.iso ?? null)
       : null,
     priority: prio ? icalToCarbonPriority(Number(prio.value)) : 0,
   };
@@ -392,14 +458,17 @@ function mapVtodo(props: Prop[]): ParsedTodo {
   return { uid, title, patch, completed };
 }
 
-export function vtodoToItemPatch(ics: string): ParsedTodo | null {
+export function vtodoToItemPatch(
+  ics: string,
+  tz?: string | null,
+): ParsedTodo | null {
   const props = extractComponent(ics, "VTODO");
-  return props ? mapVtodo(props) : null;
+  return props ? mapVtodo(props, tz) : null;
 }
 
 /** Every VTODO in a (multi-component) calendar feed. */
-export function parseAllVtodos(ics: string): ParsedTodo[] {
-  return extractAllComponents(ics, "VTODO").map(mapVtodo);
+export function parseAllVtodos(ics: string, tz?: string | null): ParsedTodo[] {
+  return extractAllComponents(ics, "VTODO").map((p) => mapVtodo(p, tz));
 }
 
 export interface ParsedEvent {
@@ -411,14 +480,16 @@ export interface ParsedEvent {
   recurs: boolean;
 }
 
-function mapVevent(props: Prop[]): ParsedEvent {
+function mapVevent(props: Prop[], tz?: string | null): ParsedEvent {
   const uid = getProp(props, "UID")?.value ?? null;
   const title = unescapeText(getProp(props, "SUMMARY")?.value ?? "");
   const descr = getProp(props, "DESCRIPTION");
   const startP = getProp(props, "DTSTART");
   const endP = getProp(props, "DTEND");
-  const start = startP ? parseICalDateTime(startP.value, startP.params) : null;
-  const end = endP ? parseICalDateTime(endP.value, endP.params) : null;
+  const start = startP
+    ? parseICalDateTime(startP.value, startP.params, tz)
+    : null;
+  const end = endP ? parseICalDateTime(endP.value, endP.params, tz) : null;
 
   const patch: ItemPatch = {
     title,
@@ -435,14 +506,20 @@ function mapVevent(props: Prop[]): ParsedEvent {
   return { uid, title, patch, recurs: !!getProp(props, "RRULE") };
 }
 
-export function veventToItemPatch(ics: string): ParsedEvent | null {
+export function veventToItemPatch(
+  ics: string,
+  tz?: string | null,
+): ParsedEvent | null {
   const props = extractComponent(ics, "VEVENT");
-  return props ? mapVevent(props) : null;
+  return props ? mapVevent(props, tz) : null;
 }
 
 /** Every VEVENT in a (multi-component) calendar feed. */
-export function parseAllVevents(ics: string): ParsedEvent[] {
-  return extractAllComponents(ics, "VEVENT").map(mapVevent);
+export function parseAllVevents(
+  ics: string,
+  tz?: string | null,
+): ParsedEvent[] {
+  return extractAllComponents(ics, "VEVENT").map((p) => mapVevent(p, tz));
 }
 
 // ----- content hash (push diffing + echo suppression) -----------------------
@@ -457,11 +534,12 @@ export function contentHash(
   kind: "todo" | "event",
   item: Item,
   defaultMinutes: number,
+  tz?: string | null,
 ): string {
   const ics =
     kind === "todo"
-      ? itemToVtodo(item, "x")
-      : itemToVevent(item, "x", defaultMinutes);
+      ? itemToVtodo(item, "x", tz)
+      : itemToVevent(item, "x", defaultMinutes, tz);
   const stable = ics
     .split(/\r?\n/)
     .filter((l) => !/^(DTSTAMP|UID):/.test(l))

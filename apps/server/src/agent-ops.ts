@@ -241,8 +241,6 @@ export interface GeocodeSearchInput {
   radius?: number;
 }
 
-export type AgentOps = ReturnType<typeof createAgentOps>;
-
 export function createAgentOps(deps: AgentApiDeps) {
   const { db, deviceId, isBot, canSee, botAssigned, geocode } = deps;
 
@@ -465,6 +463,10 @@ export function createAgentOps(deps: AgentApiDeps) {
     if (taskInputs.some((t) => t.title.length > MAX_TITLE_LEN)) {
       return fail(`task title too long (max ${MAX_TITLE_LEN} chars)`, 400);
     }
+    if (tooMany(input.tags)) return fail(`too many tags (max ${MAX_BATCH})`, 400);
+    if (taskInputs.some((t) => tooMany(t.tags))) {
+      return fail(`too many tags on a task (max ${MAX_BATCH})`, 400);
+    }
 
     let listOut: { id: string; name: string; created: boolean } | null = null;
     let listItem: Item | null = null;
@@ -608,8 +610,25 @@ export function createAgentOps(deps: AgentApiDeps) {
       for (const k of ['due_date', 'defer_date', 'reminder_at'] as const) {
         if (k in patch) (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);
       }
-      updateItem(db, deviceId, target.id, patch);
-      matched.push({ query: label, id: target.id, title: target.title });
+      let resultTitle = target.title;
+      if (patch.status === 'done' && target.status !== 'done') {
+        // A status->'done' patch must go through setCompleted, not a raw field write,
+        // so recurring tasks still spawn their next occurrence (mirrors complete()).
+        delete (patch as Record<string, unknown>).status;
+        const updated = updateItem(db, deviceId, target.id, patch);
+        resultTitle = updated?.title ?? resultTitle;
+        const { item: completed } = setCompleted(db, deviceId, target.id, true);
+        if (completed) resultTitle = completed.title;
+      } else {
+        // A raw status patch must keep completed_at in step (mirrors setCompleted) —
+        // completed-item age logic (e.g. the purge feature) relies on the stamp.
+        if (typeof patch.status === 'string' && patch.status !== target.status) {
+          patch.completed_at = patch.status === 'done' ? new Date().toISOString() : null;
+        }
+        const updated = updateItem(db, deviceId, target.id, patch);
+        if (updated) resultTitle = updated.title;
+      }
+      matched.push({ query: label, id: target.id, title: resultTitle });
     }
     return ok({ matched, unmatched });
   }
@@ -866,7 +885,12 @@ export function createAgentOps(deps: AgentApiDeps) {
       }
       for (const u of people) {
         if (remove) unassignItem(db, deviceId, t.id, u.id);
-        else assignItem(db, deviceId, t.id, u.id);
+        else {
+          assignItem(db, deviceId, t.id, u.id);
+          // Assigning grants edit access if the user doesn't already have it, matching
+          // every other assign call site (TaskDetail.tsx, RowQuickMenu.tsx, quickadd.ts).
+          if (!hasWriteAccess(db, t.id, u.id)) shareItem(db, deviceId, t.id, u.id, 'write');
+        }
       }
       updated.push({ id: t.id, title: t.title });
     }

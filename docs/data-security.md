@@ -150,6 +150,12 @@ Honesty matters more than marketing here. Know exactly what you're getting:
   notification text.
 - **Backups are your responsibility (self-host).** If you self-host, securing and backing up
   the database and blob files — and keeping TLS in front of the server — is up to you.
+- **"Purge" is a soft delete, not an erase.** Settings → Data's "Purge completed tasks" (and
+  deletion generally) uses Carbon's normal CRDT tombstone mechanism — there is no hard-delete
+  primitive in the sync model. A purge hides data rather than erasing it: it syncs like any
+  other delete, does not shrink the on-disk database file, and tombstoned records can still
+  exist at rest on every synced device and on the server. If you intend to purge, export a
+  backup first so you keep a copy of what you're removing.
 
 End-to-end encrypted sync is tracked as a possible future direction, but it is not implemented
 today and you should not assume it.
@@ -177,5 +183,3 @@ If you run your own Carbon server:
 - [`api.md`](api.md) — REST API authentication, scopes, and token handling.
 - [`home-assistant.md`](home-assistant.md) — keeping integration tokens safe.
 - [`usage-and-shortcuts.md`](usage-and-shortcuts.md) — offline & sync behaviour, data backup.
-</content>
-</invoke>

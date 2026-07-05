@@ -12,6 +12,7 @@ import {
   resolveAgent,
   isHostAgent,
   checkHostRateLimit,
+  checkWindow,
 } from './host-lm';
 import { makeTestDb, type TestDb } from './test-app';
 
@@ -193,5 +194,37 @@ describe('checkHostRateLimit', () => {
     const t2 = `t-partial2-${Date.now()}`;
     assert.equal(checkHostRateLimit(t2, cfgOnly6h).ok, true);
     assert.equal(checkHostRateLimit(t2, cfgOnly6h).ok, false);
+  });
+});
+
+describe('checkWindow', () => {
+  test('a tenant that stops calling is pruned from the map entirely, not just filtered', () => {
+    const map = new Map<string, number[]>();
+    const t0 = 1_000_000;
+    // Tenant "idle" hits once, then never calls again.
+    assert.equal(checkWindow(map, 'idle', 60_000, 5, t0), true);
+    map.set('idle', [...(map.get('idle') ?? []), t0]);
+    assert.ok(map.has('idle'));
+    // Long after idle's window has expired, a check for a different tenant sweeps the
+    // whole map — idle's stale, now-empty entry should be deleted, not just filtered.
+    assert.equal(checkWindow(map, 'active', 60_000, 5, t0 + 120_000), true);
+    assert.equal(map.has('idle'), false);
+  });
+
+  test('fresh (non-expired) hits for other tenants survive the sweep', () => {
+    const map = new Map<string, number[]>();
+    const t0 = 1_000_000;
+    assert.equal(checkWindow(map, 'a', 60_000, 5, t0), true);
+    map.set('a', [...(map.get('a') ?? []), t0]);
+    assert.equal(checkWindow(map, 'b', 60_000, 5, t0 + 1_000), true);
+    map.set('b', [...(map.get('b') ?? []), t0 + 1_000]);
+    assert.deepEqual(map.get('a'), [t0]);
+    assert.deepEqual(map.get('b'), [t0 + 1_000]);
+  });
+
+  test('cap <= 0 (unlimited) never touches the map', () => {
+    const map = new Map<string, number[]>();
+    assert.equal(checkWindow(map, 't', 60_000, 0, Date.now()), true);
+    assert.equal(map.size, 0);
   });
 });

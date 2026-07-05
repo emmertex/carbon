@@ -215,10 +215,6 @@ export function hostAdminAuth(db: Db): MiddlewareHandler<{ Variables: HostVars }
 
 // ----- tenant records -------------------------------------------------------
 
-function rowToRecord(r: TenantRecord): TenantRecord {
-  return r;
-}
-
 export function listTenants(db: Db): TenantRecord[] {
   return db.all<TenantRecord>('SELECT * FROM tenants WHERE status != ? ORDER BY created_at', ['deleted']);
 }
@@ -673,5 +669,3 @@ export function deletePendingDelete(db: Db, id: string): void {
 export function gcPendingDeletes(db: Db): void {
   db.run('DELETE FROM pending_deletes WHERE expires_at < ?', [new Date().toISOString()]);
 }
-
-export { rowToRecord };

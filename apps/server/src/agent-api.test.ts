@@ -21,6 +21,9 @@ import {
   visibleItemIds,
   listAssigneesForItem,
   createUser,
+  hasWriteAccess,
+  updateItem,
+  queryItems,
 } from '@carbon/core';
 import { createSession, createToken } from './auth';
 import { registerAgentApi } from './agent-api';
@@ -405,6 +408,69 @@ describe('POST /agent/tags/geo & GET /agent/nearby', () => {
 
     const outside = await appFetch(app, '/agent/nearby?lat=-37.9&lng=145.2', { headers: { Authorization: basic } });
     assert.deepEqual(((await outside.json()) as { items: unknown[] }).items, []);
+  });
+});
+
+// ─── share & assign ───────────────────────────────────────────────────────────
+
+describe('POST /agent/tasks/assign', () => {
+  test('assigning grants a write share, matching the UI-level assign flow (regression)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const task = createItem(db, deviceId, { type: 'task', title: 'Book flights', ownerId: uid });
+    // Rachel has no share yet — before the fix, assignItem() alone left her unable to
+    // see the task via /api/sync even though she was now "assigned" to it.
+    assert.equal(hasWriteAccess(db, task.id, rachelId), false);
+    const app = buildAgentApp(db, deviceId);
+
+    const res = await appFetch(app, '/agent/tasks/assign', json(basic, { id: task.id, users: ['rachel'] }));
+    assert.equal(res.status, 200);
+    assert.ok(listAssigneesForItem(db, task.id).some((a) => a.user_id === rachelId));
+    assert.equal(hasWriteAccess(db, task.id, rachelId), true);
+  });
+
+  test('assigning an already-shared user does not downgrade their permission', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const task = createItem(db, deviceId, { type: 'task', title: 'Book flights', ownerId: uid });
+    shareItem(db, deviceId, task.id, rachelId, 'write'); // already has write access
+    const app = buildAgentApp(db, deviceId);
+
+    const res = await appFetch(app, '/agent/tasks/assign', json(basic, { id: task.id, users: ['rachel'] }));
+    assert.equal(res.status, 200);
+    assert.equal(hasWriteAccess(db, task.id, rachelId), true);
+  });
+});
+
+// ─── update via status:'done' ──────────────────────────────────────────────────
+
+describe('POST /agent/tasks/update — status:done routes through setCompleted', () => {
+  test('a raw status:"done" patch still spawns the next recurrence', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const due = new Date();
+    due.setDate(due.getDate() + 5);
+    due.setMilliseconds(0);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Water the plants', ownerId: uid, dueDate: due.toISOString() });
+    updateItem(db, deviceId, task.id, { recurrence: JSON.stringify({ type: 'daily', interval: 1 }) });
+    const app = buildAgentApp(db, deviceId);
+
+    const res = await appFetch(
+      app,
+      '/agent/tasks/update',
+      json(basic, { updates: [{ id: task.id, patch: { status: 'done' } }] }),
+    );
+    assert.equal(res.status, 200);
+    const original = getItem(db, task.id)!;
+    assert.equal(original.status, 'done');
+    assert.ok(original.completed_at);
+    const spawned = queryItems(db, { tasksOnly: true }).find(
+      (i) => i.title === 'Water the plants' && i.id !== task.id,
+    );
+    assert.ok(spawned, 'expected a spawned next occurrence');
+    assert.equal(spawned!.status, 'active');
   });
 });
 

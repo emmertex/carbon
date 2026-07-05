@@ -29,10 +29,15 @@ export function ensureFcmTable(db: Db): void {
 }
 
 export function saveFcmToken(db: Db, userId: string, token: string): void {
+  // Look up first: on a re-registration (same token, e.g. a re-installed app or a refreshed
+  // token that happens to collide) reuse the existing id/created_at rather than generating a
+  // fresh id that ON CONFLICT then silently discards, leaving the row's id inconsistent with
+  // what was actually inserted.
+  const existing = db.get<{ id: string }>('SELECT id FROM fcm_tokens WHERE token = ?', [token]);
   db.run(
     `INSERT INTO fcm_tokens (id, user_id, token, created_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id`,
-    [crypto.randomUUID(), userId, token, new Date().toISOString()],
+    [existing?.id ?? crypto.randomUUID(), userId, token, new Date().toISOString()],
   );
 }
 
@@ -68,10 +73,6 @@ function loadServiceAccount(): ServiceAccount | null {
     serviceAccount = null;
   }
   return serviceAccount;
-}
-
-export function fcmConfigured(): boolean {
-  return !!loadServiceAccount();
 }
 
 const b64url = (b: Buffer | string): string =>

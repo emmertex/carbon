@@ -25,6 +25,7 @@ import {
   updateItem,
   getItem,
   ingestOps,
+  setItemDepLink,
   visibleItemIds,
   getUserByUsername,
   createUser as coreCreateUser,
@@ -413,6 +414,7 @@ describe('federation retract — applyRetraction unit', () => {
   test('drops the id + descendants, leaves out-of-list items, and re-runs as a no-op', async () => {
     const { world, acme, globex, bob, roadmap, child } = await handshake('write');
     await exchangeBothWays(acme, globex, world.deliverToPeer);
+    const l = links(acme, globex);
     // A sibling of T under Roadmap that we do NOT retract — must survive.
     const keepId = 'globex-keep-under-roadmap';
     ingestOps(
@@ -430,13 +432,126 @@ describe('federation retract — applyRetraction unit', () => {
     );
     assert.ok(getItem(globex.db, keepId), 'keep item present');
 
-    applyRetraction(globex.db, [child]);
+    applyRetraction(globex.db, l.globex, [child]);
     assert.equal(getItem(globex.db, child), undefined, 'retracted T gone');
     assert.ok(getItem(globex.db, keepId), 'un-retracted sibling still present (scoped)');
 
     // Idempotent: re-running for the already-dropped id is a harmless no-op.
-    applyRetraction(globex.db, [child]);
+    applyRetraction(globex.db, l.globex, [child]);
     assert.equal(getItem(globex.db, child), undefined, 'still gone, no throw');
     void bob;
+  });
+
+  // FED-1: applyRetraction must be scoped to the calling link's granted roots. An id the
+  // peer names that is NOT within its granted subtree must be left completely untouched.
+  test('refuses to drop an id outside the granted roots', async () => {
+    const { world, acme, globex, bob, child } = await handshake('write');
+    await exchangeBothWays(acme, globex, world.deliverToPeer);
+    const l = links(acme, globex);
+
+    // A globex-LOCAL private item bob owns, with no relationship to the shared Roadmap — it
+    // is outside the inbound link's granted roots and the owner peer has no business naming it.
+    const bobPrivate = createItem(globex.db, globex.deviceId, {
+      type: 'task',
+      parentId: null,
+      ownerId: bob.id,
+      title: 'bob private',
+    });
+    assert.ok(getItem(globex.db, bobPrivate.id), 'bob private item present');
+
+    // The peer names both an in-scope id (child, legitimately retractable) and the out-of-
+    // scope private id. Only the in-scope one may drop; the private item must survive.
+    applyRetraction(globex.db, l.globex, [child, bobPrivate.id]);
+
+    assert.equal(getItem(globex.db, child), undefined, 'in-scope T dropped');
+    assert.ok(
+      getItem(globex.db, bobPrivate.id),
+      'out-of-scope private item NOT dropped (scoped to granted roots)',
+    );
+  });
+
+  // FED-1 addendum: retracting an item must also clean up its item_deps edges (previously
+  // left dangling), from BOTH the predecessor and successor sides.
+  test('cleans up item_deps edges for a retracted item (both pred and succ sides)', async () => {
+    const { world, acme, globex, roadmap, child } = await handshake('write');
+    await exchangeBothWays(acme, globex, world.deliverToPeer);
+    const l = links(acme, globex);
+
+    // Two more in-scope tasks under Roadmap so we can build dependency edges around T (child).
+    const before = createItem(acme.db, acme.deviceId, {
+      type: 'task',
+      parentId: roadmap,
+      ownerId: getItem(acme.db, roadmap)!.owner_id!,
+      title: 'Before',
+    });
+    const after = createItem(acme.db, acme.deviceId, {
+      type: 'task',
+      parentId: roadmap,
+      ownerId: getItem(acme.db, roadmap)!.owner_id!,
+      title: 'After',
+    });
+    await exchangeBothWays(acme, globex, world.deliverToPeer);
+    assert.ok(getItem(globex.db, before.id) && getItem(globex.db, after.id), 'deps endpoints synced');
+
+    // Build edges on globex: before → child (child is the successor) and child → after
+    // (child is the predecessor). Retracting child must remove BOTH edges.
+    setItemDepLink(globex.db, globex.deviceId, before.id, child, false);
+    setItemDepLink(globex.db, globex.deviceId, child, after.id, false);
+    const depCount = () =>
+      globex.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM item_deps WHERE pred_id = ? OR succ_id = ?',
+        [child, child],
+      )!.n;
+    assert.equal(depCount(), 2, 'two dependency edges reference child before retraction');
+
+    applyRetraction(globex.db, l.globex, [child]);
+
+    assert.equal(getItem(globex.db, child), undefined, 'child retracted');
+    assert.equal(depCount(), 0, 'no dangling item_deps edges left for the retracted item');
+  });
+});
+
+// ─── FED-1 end-to-end: a peer cannot retract outside its granted roots via /sync ─────
+
+describe('federation retract — out-of-scope /sync retract is refused', () => {
+  test('an inbound-link peer retracting a local item outside its grant deletes nothing', async () => {
+    const { world, acme, globex, bob, roadmap, child } = await handshake('write');
+    const deliver = world.deliverToPeer;
+    await exchangeBothWays(acme, globex, deliver);
+    const l = links(acme, globex);
+
+    // A globex-local private item, unrelated to the shared Roadmap subtree.
+    const bobPrivate = createItem(globex.db, globex.deviceId, {
+      type: 'task',
+      parentId: null,
+      ownerId: bob.id,
+      title: 'bob private',
+    });
+
+    // The owner peer (authenticating over globex's ACTIVE inbound link) POSTs a hostile
+    // retract naming bob's private id (out of scope) — the exact FED-1 attack shape.
+    const res = await deliver('globex', '/api/federation/sync', {
+      __link_secret: l.globex.secret,
+      retract: [bobPrivate.id],
+      since: 0,
+      rsince: 0,
+    });
+    assert.equal(res.status, 200);
+
+    assert.ok(
+      getItem(globex.db, bobPrivate.id),
+      'out-of-scope private item survives a hostile peer retract',
+    );
+    assert.ok(visibleItemIds(globex.db, bob.id).has(bobPrivate.id), 'bob still sees his item');
+    // Sanity: the in-scope shared item is still retractable through the same path.
+    const res2 = await deliver('globex', '/api/federation/sync', {
+      __link_secret: l.globex.secret,
+      retract: [child],
+      since: 0,
+      rsince: 0,
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(getItem(globex.db, child), undefined, 'in-scope T still retractable');
+    void roadmap;
   });
 });

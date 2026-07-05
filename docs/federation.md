@@ -130,15 +130,10 @@ Federation v1 is deliberately scoped. Known limitations:
 - **No offer expiry.** A pending offer stays in the recipient's Inbox until they act on it.
   Pending links never sync anything, so an unanswered offer is inert — decline or dismiss it
   to clear it. This is by design, not an oversight.
-- **Unsharing / moving out does not retract the peer's copy.** If you revoke a link, or move
-  an item *out* of the shared subtree, the peer simply stops receiving updates — their
-  last-synced copy remains in place. Treat unshare/move-out as "stop sharing from now on,"
-  **not** as "pull the data back."
-- **Concurrent edits across a move-out can diverge.** If the owner moves an item out of the
-  shared subtree while the grantee is still editing it, the grantee's edits are scope-rejected
-  on the owner and the two copies fork **silently** (no error). Avoid editing an item that has
-  just been unshared or moved out. A future *retraction on unshare* (owner tombstones the item
-  on the peer when it leaves scope) will remove this ambiguity.
+- **Unsharing / moving out retracts the peer's copy.** If you revoke a link, or move an item
+  *out* of the shared subtree, the owning side tells the peer, which **drops** its copy
+  (rather than leaving a stale one behind or forking on a later edit). Revoking a link you
+  own also delivers a best-effort final retraction of everything you'd shared through it.
 - **Comment attachments over federation are untested.** Fetch-from-peer for attachment bytes
   is verified for **task** attachments; attachments on *comments* are not yet covered by a
   test and should not be relied on until they are.

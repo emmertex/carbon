@@ -141,8 +141,6 @@ export interface GeoReminder {
   label?: string;
 }
 
-export type ItemField = (typeof ITEM_PATCH_FIELDS)[number];
-
 /**
  * An op is one atomic change to one item. `fields` carries only the columns that
  * changed; a key present with a `null` value means "clear this field" (the bug the
@@ -193,6 +191,7 @@ export interface TimeLog {
   end_time: string | null;
   note: string | null;
   created_at: string;
+  updated_at: string;
   /** 'session' (project block), 'task' (segment inside a session), 'pause', or
    *  'complete' (a zero-duration marker at the moment a task was completed). */
   kind: TimeLogKind;
