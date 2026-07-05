@@ -6,6 +6,10 @@ GitHub Release body and the public mirror commit message — so keep each headin
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
 
+## v0.6.3
+**Bump all libraries**
+- Bumped versions of all libraries to the latest
+
 ## v0.6.2
 **Security hardening & CalDAV fixes**
 - Fixed all-day CalDAV tasks/events landing on the wrong calendar day (and showing a

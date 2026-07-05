@@ -27,6 +27,12 @@ bot answers conversationally, so it's good for questions and summaries as well a
 Telegram ──webhook──► Carbon ──(chat → workspace+user)──► your AI agent ──► reply
 ```
 
+> **Hosted service.** On the hosted Carbon offering the model is provided for you — the bot and
+> in-app natural-language commands run on a **basic model** (currently GPT-OSS-20B, may change)
+> under **fair-use limits**, with no API key to configure. Want higher limits or a stronger
+> model? Point your workspace's AI agent at your own OpenAI / Anthropic / webhook key. The rest
+> of this page covers **self-hosted** setup, where you supply the bot token and the model.
+
 ## 1. Create a bot with BotFather
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather) and send `/newbot`.

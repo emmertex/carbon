@@ -36,7 +36,7 @@ export default defineConfig({
       filename: 'sw.ts',
       registerType: 'autoUpdate',
       injectRegister: 'auto',
-      includeAssets: ['sql-wasm.wasm', 'favicon.png', 'apple-touch-icon.png'],
+      includeAssets: ['sql-wasm.wasm', 'sql-wasm-browser.wasm', 'favicon.png', 'apple-touch-icon.png'],
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,wasm,svg,png,ico}'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,

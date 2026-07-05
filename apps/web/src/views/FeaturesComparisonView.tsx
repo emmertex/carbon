@@ -42,6 +42,19 @@ const GROUPS: Group[] = [
         server: true,
       },
       {
+        feature: "Recurring tasks",
+        detail:
+          "Repeats including complex ordinal and completion-relative patterns.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Markdown notes",
+        detail: "GitHub-flavoured notes and checklists on any task.",
+        local: true,
+        server: true,
+      },
+      {
         feature: "Local reminders & notifications",
         detail: "Due-date and scheduled reminders fire on the device that set them.",
         local: true,
@@ -89,7 +102,7 @@ const GROUPS: Group[] = [
         detail: 'Describe a filter in plain English and let the agent build the expression.',
         local: false,
         server: true,
-        why: "The language agent runs server-side so your API keys and prompts stay off the client. The advanced filter builder itself works offline — only the natural-language helper needs the server.",
+        why: "The language agent runs server-side — a basic model is included on hosted plans under fair-use limits, or you supply your own key (self-hosted, or for higher limits) — so prompts and keys never reach the client. The advanced filter builder itself works offline; only the natural-language helper needs the server.",
       },
       {
         feature: "Settings & saved views sync",
@@ -144,11 +157,19 @@ const GROUPS: Group[] = [
         why: "Sharing is a server-side authorization decision — who can see and edit what. There are no other members to share with on a single local device.",
       },
       {
-        feature: "Share across workspaces",
-        detail: "Share projects between workspaces, with federation on the roadmap.",
+        feature: "Comments & @mentions",
+        detail: "Threaded comments with @mentions and inline images on any task.",
         local: false,
         server: true,
-        why: "Cross-workspace sharing connects separate server-hosted workspaces. It has no meaning without a server hosting those workspaces.",
+        why: "Comments are a conversation between people, delivered and attributed by the server. On a single local device there is no one to mention or notify.",
+      },
+      {
+        feature: "Share across workspaces",
+        detail:
+          "Share projects between workspaces today; federation between self-hosted servers is on the roadmap.",
+        local: false,
+        server: true,
+        why: "Cross-workspace sharing connects separate server-hosted workspaces, and federation will extend that to independently self-hosted servers. Neither has any meaning without a server hosting those workspaces.",
       },
     ],
   },
@@ -160,7 +181,7 @@ const GROUPS: Group[] = [
         detail: 'Type "remind me to get milk at Coles" and let the agent file it.',
         local: false,
         server: true,
-        why: "The language agent runs server-side so your API keys and prompts stay off the client. Without a server the in-app agent has nowhere to run.",
+        why: "The language agent runs server-side — a basic model is included on hosted plans under fair-use limits, or you supply your own key (self-hosted, or for higher limits) — so prompts and keys never reach the client. Without a server the in-app agent has nowhere to run.",
       },
       {
         feature: "Agent API (Telegram, Hermes, bots)",
@@ -175,6 +196,41 @@ const GROUPS: Group[] = [
         local: false,
         server: true,
         why: "Each device shares its location as a source the server reconciles, so a reminder can target the nearest match across devices. That cross-device location matching needs the server.",
+      },
+    ],
+  },
+  {
+    title: "Integrations & API",
+    rows: [
+      {
+        feature: "CalDAV sync",
+        detail:
+          "Two-way VTODO + VEVENT sync per project with Apple Reminders, Thunderbird and other CalDAV clients.",
+        local: false,
+        server: true,
+        why: "CalDAV clients connect to a server endpoint to sync tasks and events. A local-only device exposes no CalDAV collection for them to reach.",
+      },
+      {
+        feature: "REST API & scoped tokens",
+        detail: "Full REST API for scripts and integrations, gated by scoped tokens.",
+        local: false,
+        server: true,
+        why: "The API is served, authenticated and authorized by the server. Local-only mode runs no server and issues no tokens, so there is no endpoint to call.",
+      },
+      {
+        feature: "Outbound webhooks",
+        detail: "Notify external services when tasks change.",
+        local: false,
+        server: true,
+        why: "Webhooks are dispatched from the server when changes land. With no server there is nothing to observe changes or send the callouts.",
+      },
+      {
+        feature: "Home Assistant integration",
+        detail:
+          "Capture, per-device locations, zone geofencing and two-way flows with your Home Assistant.",
+        local: false,
+        server: true,
+        why: "Home Assistant talks to Carbon over the server's API and shares location and zone data the server reconciles across devices. That exchange has no endpoint in local-only mode.",
       },
     ],
   },

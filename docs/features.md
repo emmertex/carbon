@@ -153,6 +153,10 @@ works fully offline, local-only, with no account.
   prompts.
 - **Telegram bot** — one per server, per-user linking, conversational replies via your own
   agent.
+- **LLM included on hosted plans** — natural-language capture, NL → filter and the Telegram
+  bot work out of the box on a **basic model** (currently GPT-OSS-20B, may change) under
+  **fair-use limits**, with no API key. Self-hosters (and anyone wanting higher limits or a
+  stronger model) bring their own OpenAI / Anthropic / webhook key.
 
 ## Integrations & API (sync server)
 

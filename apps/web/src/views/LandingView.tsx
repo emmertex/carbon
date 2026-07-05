@@ -3,22 +3,25 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowRight,
   ListChecks,
-  Timer,
+  ListTree,
+  Clock,
+  CalendarClock,
+  FileText,
   Code2,
   Gift,
   Server,
-  Share2,
   Check,
   WifiOff,
   MonitorSmartphone,
   Gauge,
   Sparkles,
-  Send,
   MapPin,
-  Command,
+  Plug,
   SlidersHorizontal,
   LayoutGrid,
   Undo2,
+  Database,
+  type LucideIcon,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import {
@@ -27,86 +30,197 @@ import {
   saveCurrentUser,
 } from "@/lib/config";
 
-const STRENGTHS: { icon: typeof ListChecks; title: string; body: string }[] = [
+/** The positioning pillars — why Carbon exists, not an exhaustive feature list.
+ *  The full inventory lives in the spotlight + grouped sections below. */
+const PILLARS: { icon: LucideIcon; title: string; body: string }[] = [
   {
     icon: ListChecks,
     title: "Serious GTD",
-    body: "Projects, focus areas, perspectives, forecast, review — a full Getting-Things-Done workflow, not a flat to-do list.",
-  },
-  {
-    icon: Timer,
-    title: "Built-in time tracking",
-    body: "Track time against any task and project, see where your hours actually go, and plan realistic days from real estimates.",
-  },
-  {
-    icon: Code2,
-    title: "Open source",
-    body: "The whole app is open and inspectable. No lock-in, no black box — fork it, audit it, improve it, trust it.",
-  },
-  {
-    icon: Gift,
-    title: "Free to use",
-    body: "Use Carbon locally for free, forever. It is offline-first: your data lives on your device and syncs only when you want.",
-  },
-  {
-    icon: Server,
-    title: "Sync your way",
-    body: "Subscribe to hosted sync, or self-host the sync server yourself. Even better, host a sync server for your friends.",
-  },
-  {
-    icon: Share2,
-    title: "Share across workspaces",
-    body: "Share projects between workspaces on carbon.etx.sx today, or copy any project as a Markdown checklist to paste into a chat — with federation across self-hosted servers on the roadmap.",
+    body: "Projects, containers, perspectives, forecast and review — a full Getting-Things-Done system, not a flat to-do list.",
   },
   {
     icon: WifiOff,
     title: "Offline first",
-    body: "All your data lives locally, all the time. The sync server only moves data between devices — you always have full access, online or not.",
+    body: "The whole database lives on your device and every edit applies locally first. A sync server only moves data between devices — you always have full access, online or not.",
   },
   {
     icon: MonitorSmartphone,
     title: "Every platform",
-    body: "A PWA at heart, wrapped natively for Android, iOS, Linux, Windows and Mac. Web or app, it's always the exact same Carbon.",
+    body: "A PWA at heart, wrapped natively for Linux, Windows, Mac and Android — with iOS on the way. Web or app, it's always the exact same Carbon.",
   },
   {
     icon: Gauge,
-    title: "High performance",
-    body: "Every build runs 100, 1,000 and 10,000-task performance tests to keep memory and latency low. It stays snappy at any scale.",
+    title: "Fast at any scale",
+    body: "Every build runs 100, 1,000 and 10,000-task performance tests to keep memory and latency low. It stays snappy no matter how much you throw at it.",
+  },
+  {
+    icon: Code2,
+    title: "Open source",
+    body: "The whole app is open and inspectable. No lock-in, no black box, no paywalled features — fork it, audit it, improve it, trust it.",
+  },
+  {
+    icon: Server,
+    title: "Free, sync your way",
+    body: "Use Carbon locally free, forever. When you want sync, subscribe to hosted or self-host the open-source server — even run one for your friends.",
+  },
+];
+
+/** Flagship capabilities, each rendered as an alternating image + copy block so the
+ *  page reads as a story rather than a wall of cards. */
+const SPOTLIGHTS: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  points: string[];
+  shot: string;
+}[] = [
+  {
+    icon: ListTree,
+    title: "A structure that scales from a list to a system",
+    body: "Projects, tasks and folders — and any item can become a container, nested as deep as you like. Sequential, parallel and single-action lists drive a true next-action model.",
+    points: [
+      "Sequential / parallel / single-action containers",
+      "Task dependencies gate what becomes available next",
+      "Focus mode to drill into any branch with a breadcrumb",
+      "Active / done / dropped states, plus tag-driven on-hold",
+    ],
+    shot: "/shots/outline.png",
+  },
+  {
+    icon: Clock,
+    title: "Plan real days, backed by real time",
+    body: "Estimate tasks, set a daily time budget, and let the Plan view keep you honest. Built-in time tracking records where the hours actually go — per-project sessions, task segments, pauses and CSV export.",
+    points: [
+      "Daily planner with a startup + per-task budget",
+      "Per-user time sessions, segments and pauses",
+      "Time view as list, timeline or chart",
+      "Per-project review intervals, GTD-style",
+    ],
+    shot: "/shots/time.png",
+  },
+  {
+    icon: CalendarClock,
+    title: "Scheduling with recurrence that thinks",
+    body: "Every task carries separate due, defer/start and reminder times. Recurrence handles ordinal and complex patterns — weekly by weekday, monthly by day — plus completion-relative repeats that reschedule from when you actually finish.",
+    points: [
+      "Distinct due, defer-until and reminder times",
+      "Complex and completion-relative recurrence",
+      "Forecast agenda ribbon + month-grid picker",
+      "Local reminders that work with no server at all",
+    ],
+    shot: "/shots/forecast.png",
   },
   {
     icon: Sparkles,
-    title: "Natural-language commands",
-    body: 'Type "remind me to get milk and eggs at Coles" and your LLM agent adds, tags, completes and files tasks for you — in-app, or from Telegram, Hermes or any bot via the agent API.',
-  },
-  {
-    icon: Send,
-    title: "Telegram bot",
-    body: "Run one bot for your whole server. Link your account, then manage tasks from chat — \"what's due tomorrow in work?\", \"untick my weekly shopping items\" — answered conversationally by your own AI agent.",
+    title: "Capture in plain language",
+    body: 'Type "remind me to grab milk at Coles tomorrow" and your own LLM agent adds, tags, schedules and files it for you. Works in the quick-add bar, over the agent API, or from a Telegram bot for your whole server.',
+    points: [
+      "Natural-language commands: add, tag, schedule, share, assign",
+      "Describe a filter and let the agent assemble it",
+      "Telegram bot with per-user account linking",
+      "Basic LLM included on hosted (fair-use), or bring your own key anytime",
+    ],
+    shot: "/shots/assistant.png",
   },
   {
     icon: MapPin,
-    title: "Location-aware reminders",
-    body: 'Each signed-in device shares its own location as a toggleable source, and "nearest Coles"-style reminders geofence themselves to the closest match — no coordinates to look up.',
+    title: "Reminders that know where you are",
+    body: 'Every signed-in device offers its own location as a toggleable source. "Nearest Coles"-style reminders geofence to the closest match with no coordinates to look up, and Home Assistant zones plug straight in.',
+    points: [
+      "Per-device GPS sources you switch on and off",
+      "Nearest-place geofencing without coordinates",
+      "Background geofencing on the native apps",
+      "First-class, two-way Home Assistant integration",
+    ],
+    shot: "/shots/nearby.png",
   },
   {
-    icon: Command,
-    title: "Desktop quick-add",
-    body: "A global hotkey and system-tray icon pop a spotlight capture bar from anywhere on Linux, Windows and Mac — jot a task without switching windows.",
+    icon: FileText,
+    title: "Notes, comments and files on every task",
+    body: "Full Markdown notes, threaded comments with @mentions and inline images, and attachments on both tasks and comments — unlimited locally, up to 25 MB per file across sync.",
+    points: [
+      "GitHub-flavoured Markdown task notes",
+      "Comment threads with @mentions",
+      "Inline images and file attachments",
+      "Multiple assignees, shared per task or whole project",
+    ],
+    shot: "/shots/detail.png",
+  },
+];
+
+/** Compact grouped grids for the remaining feature surface — no images, just an
+ *  honest inventory so nothing important is hidden. */
+const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
+  {
+    icon: SlidersHorizontal,
+    title: "Organize & filter",
+    items: [
+      "Colored, nestable tags synced family-wide",
+      "Basic filters: completed, flagged, deferred, blocked, on-hold, tags, priority, due",
+      "Advanced nested AND / OR / NOT filter builder",
+      "Natural-language → filter via an LLM agent",
+      "Four priority levels and flags",
+      "Sort by manual order, due, priority, title or newest",
+      "Saved perspectives in the sidebar",
+    ],
   },
   {
     icon: LayoutGrid,
-    title: "Grows with you",
-    body: "Start Simple, Standard or Advanced, then show or hide individual features — even differently on desktop and mobile. A welcoming app that unfolds into a power tool, with your choices synced across devices.",
+    title: "Views for every angle",
+    items: [
+      "Today, Inbox, Flagged, All",
+      "Forecast — agenda + month grid",
+      "Plan — daily planner with a time budget",
+      "Review — per-project intervals",
+      "Time — list, timeline or chart",
+      "Tags — browse by context",
+      "Nearby — location-based tasks",
+    ],
   },
   {
-    icon: SlidersHorizontal,
-    title: "Advanced filters",
-    body: "Build nested AND/OR/NOT filters across dates, priority, tags, projects and more — or just describe what you want and let the LLM agent assemble the filter for you.",
+    icon: Database,
+    title: "Sync, data & durability",
+    items: [
+      "Offline-first WASM SQLite in the browser",
+      "Field-level last-writer-wins CRDT over an op log",
+      "Debounced saves + immediate flush on tab close",
+      "Full export / import, including attachment blobs",
+      "Settings & view sync across your devices",
+      "Purge old completed tasks in bulk",
+      "Copy any subtree as a Markdown checklist",
+    ],
+  },
+  {
+    icon: Plug,
+    title: "Integrations & API",
+    items: [
+      "Full REST API with scoped tokens",
+      "Agent API for external bots",
+      "Outbound webhooks",
+      "CalDAV sync (VTODO + VEVENT) per project",
+      "Home Assistant capture, geofencing & two-way flows",
+    ],
   },
   {
     icon: Undo2,
-    title: "Undo & redo",
-    body: "Changed your mind? Multi-level undo and redo (Ctrl+Z / Ctrl+Shift+Z) covers completes, flags, priorities, plan changes and deletes.",
+    title: "Editing & capture",
+    items: [
+      "Multi-level undo / redo (Ctrl+Z / Ctrl+Shift+Z)",
+      "Inline rapid entry — Enter creates the next task",
+      "Quick-add tokens: #tag @user !priority",
+      "Desktop global-hotkey + tray quick-add",
+    ],
+  },
+  {
+    icon: Gift,
+    title: "Make it yours",
+    items: [
+      "Simple / Standard / Advanced presets, or fully custom",
+      "Show or hide features per device",
+      "Light & dark themes with accent colors",
+      "Swipe and pane gestures on mobile",
+      "Task-detail pane adapts to the features you use",
+    ],
   },
 ];
 
@@ -118,10 +232,23 @@ const SHOTS: { src: string; label: string }[] = [
 
 /** A screenshot that falls back to a styled placeholder frame until a real image is
  *  dropped into /public/shots. Lets the page ship before the captures exist. */
-function Shot({ src, label }: { src: string; label: string }) {
+function Shot({
+  src,
+  label,
+  className = "",
+}: {
+  src: string;
+  label: string;
+  className?: string;
+}) {
   const [ok, setOk] = useState(true);
   return (
-    <figure className="overflow-hidden rounded-xl border border-border bg-surface shadow-sm">
+    <figure
+      className={
+        "overflow-hidden rounded-xl border border-border bg-surface shadow-sm " +
+        className
+      }
+    >
       {ok ? (
         <img
           src={src}
@@ -139,6 +266,43 @@ function Shot({ src, label }: { src: string; label: string }) {
         {label}
       </figcaption>
     </figure>
+  );
+}
+
+/** One flagship capability: copy on one side, a hero screenshot on the other,
+ *  alternating sides down the page. */
+function Spotlight({
+  icon: Icon,
+  title,
+  body,
+  points,
+  shot,
+  flip,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  points: string[];
+  shot: string;
+  flip: boolean;
+}) {
+  return (
+    <div className="grid items-center gap-8 lg:grid-cols-2">
+      <div className={flip ? "lg:order-2" : ""}>
+        <Icon className="mb-3 text-accent" size={24} />
+        <h3 className="text-xl font-semibold sm:text-2xl">{title}</h3>
+        <p className="mt-3 text-text-muted">{body}</p>
+        <ul className="mt-4 space-y-2 text-sm">
+          {points.map((p) => (
+            <li key={p} className="flex items-start gap-2">
+              <Check size={16} className="mt-0.5 shrink-0 text-green-500" />
+              <span>{p}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Shot src={shot} label={title} className={flip ? "lg:order-1" : ""} />
+    </div>
   );
 }
 
@@ -228,9 +392,9 @@ export function LandingView() {
         </p>
       </header>
 
-      {/* Strengths */}
+      {/* Positioning pillars */}
       <section className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {STRENGTHS.map(({ icon: Icon, title, body }) => (
+        {PILLARS.map(({ icon: Icon, title, body }) => (
           <div
             key={title}
             className="rounded-xl border border-border bg-surface p-5"
@@ -242,9 +406,58 @@ export function LandingView() {
         ))}
       </section>
 
+      {/* Flagship capabilities — alternating image + copy */}
+      <section className="mt-20">
+        <div className="mx-auto max-w-2xl text-center">
+          <h2 className="text-2xl font-semibold sm:text-3xl">
+            Everything you need, nothing you don't
+          </h2>
+          <p className="mt-3 text-text-muted">
+            Carbon starts simple and unfolds into a genuine power tool. Here's
+            what's inside.
+          </p>
+        </div>
+        <div className="mt-12 space-y-16">
+          {SPOTLIGHTS.map((s, i) => (
+            <Spotlight key={s.title} {...s} flip={i % 2 === 1} />
+          ))}
+        </div>
+      </section>
+
+      {/* Grouped feature inventory */}
+      <section className="mt-20">
+        <h2 className="text-center text-2xl font-semibold sm:text-3xl">
+          And a lot more
+        </h2>
+        <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {GROUPS.map(({ icon: Icon, title, items }) => (
+            <div
+              key={title}
+              className="rounded-xl border border-border bg-surface p-5"
+            >
+              <div className="mb-3 flex items-center gap-2">
+                <Icon className="text-accent" size={20} />
+                <h3 className="font-semibold">{title}</h3>
+              </div>
+              <ul className="space-y-1.5 text-sm text-text-muted">
+                {items.map((it) => (
+                  <li key={it} className="flex items-start gap-2">
+                    <Check
+                      size={14}
+                      className="mt-1 shrink-0 text-green-500"
+                    />
+                    <span>{it}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* Screenshots */}
-      <section className="mt-16">
-        <h2 className="mb-6 text-center text-xl font-semibold">
+      <section className="mt-20">
+        <h2 className="mb-8 text-center text-2xl font-semibold sm:text-3xl">
           See it in action
         </h2>
         <div className="grid gap-4 sm:grid-cols-3">
@@ -255,7 +468,7 @@ export function LandingView() {
       </section>
 
       {/* Pricing / hosting */}
-      <section className="mt-16 grid gap-4 lg:grid-cols-2">
+      <section className="mt-20 grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-border bg-surface p-6">
           <h3 className="font-semibold">Self-host — free</h3>
           <p className="mt-1 text-sm text-text-muted">
@@ -267,6 +480,7 @@ export function LandingView() {
               "Open-source sync server",
               "Unlimited workspaces",
               "Full control of your data",
+              "Bring your own LLM keys for AI features",
             ].map((f) => (
               <li key={f} className="flex items-center gap-2">
                 <Check size={15} className="text-green-500" /> {f}
@@ -278,9 +492,20 @@ export function LandingView() {
           <h3 className="font-semibold">Hosted sync</h3>
           <p className="mt-1 text-sm text-text-muted">
             Don't want to run a server? Start with a 30-day trial, then pick a
-            plan. Cancel anytime — Export and use locally, you will lose
+            plan. Cancel anytime — export and use locally, you will lose
             nothing.
           </p>
+          <ul className="mt-4 space-y-2 text-sm">
+            {[
+              "Managed sync across all your devices",
+              "Included LLM for natural-language capture & Telegram — no API key needed",
+              "Push reminders on every signed-in device",
+            ].map((f) => (
+              <li key={f} className="flex items-start gap-2">
+                <Check size={15} className="mt-0.5 shrink-0 text-green-500" /> {f}
+              </li>
+            ))}
+          </ul>
           <div className="mt-4 grid grid-cols-2 gap-3">
             {PLANS.map((p) => (
               <div
@@ -294,7 +519,9 @@ export function LandingView() {
               >
                 <div className="text-2xl font-bold">
                   {p.price}
-                  <span className="ml-1 text-xs font-normal text-text-muted">AUD</span>
+                  <span className="ml-1 text-xs font-normal text-text-muted">
+                    AUD
+                  </span>
                 </div>
                 <div className="text-xs text-text-muted">{p.label}</div>
               </div>
@@ -306,11 +533,16 @@ export function LandingView() {
           >
             Start free trial
           </button>
+          <p className="mt-3 text-xs text-text-faint">
+            Included AI runs a basic model (currently GPT-OSS-20B, may change)
+            under fair-use limits. Bring your own OpenAI, Anthropic or webhook
+            key anytime for higher limits or a stronger model.
+          </p>
         </div>
       </section>
 
       {/* Go to existing workspace */}
-      <section className="mx-auto mt-16 max-w-md border-t border-border pt-8">
+      <section className="mx-auto mt-20 max-w-md border-t border-border pt-8">
         <p className="mb-2 text-center text-sm font-medium">
           Already have a workspace?
         </p>
@@ -341,7 +573,7 @@ export function LandingView() {
       </section>
 
       {/* Footer */}
-      <footer className="mt-16 border-t border-border pt-8 text-center text-sm text-text-muted">
+      <footer className="mt-20 border-t border-border pt-8 text-center text-sm text-text-muted">
         <button
           onClick={() => navigate("/privacy")}
           className="underline underline-offset-4 hover:text-text"

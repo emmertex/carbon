@@ -8,13 +8,13 @@
     "build:android": "npm run build:web && cap sync android && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
-    "@capacitor/android": "^6",
-    "@capacitor/core": "^6",
-    "@capacitor/geolocation": "^6",
-    "@capacitor/local-notifications": "^6",
-    "@capacitor/push-notifications": "^6"
+    "@capacitor/android": "^8",
+    "@capacitor/core": "^8",
+    "@capacitor/geolocation": "^8",
+    "@capacitor/local-notifications": "^8",
+    "@capacitor/push-notifications": "^8"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6"
+    "@capacitor/cli": "^8"
   }
 }
