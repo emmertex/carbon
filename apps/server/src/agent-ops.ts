@@ -126,8 +126,21 @@ export interface ItemsInput {
   tag?: string;
   q?: string;
   status?: string;
+  /** 'task' (default, back-compat) | 'note' | 'all'. */
+  type?: string;
   limit?: number;
   detail?: boolean;
+}
+export interface SearchNotesInput {
+  /** Text to find inside note bodies (case-insensitive substring). */
+  q?: string;
+  list?: ListRef;
+  tag?: string;
+  /** 'note' (default) | 'task' | 'all' — which item types to search the note field of. */
+  type?: string;
+  /** Include completed/dropped items in the search (default true — notes are usually inert). */
+  include_done?: boolean;
+  limit?: number;
 }
 export interface ResolveInput {
   kind?: string;
@@ -140,6 +153,8 @@ export interface ResolveInput {
 export interface TaskInput {
   title: string;
   note?: string;
+  /** 'task' (default) | 'note'. A note's status/dates/flags/priority are preserved but inert. */
+  type?: string;
   due_date?: string;
   defer_date?: string;
   /** ISO datetime for a push reminder. */
@@ -264,6 +279,7 @@ export function createAgentOps(deps: AgentApiDeps) {
   });
   const detailItem = (it: Item) => ({
     ...minimalItem(it),
+    type: it.type,
     note: it.note,
     status: it.status,
     due_date: it.due_date,
@@ -338,23 +354,56 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   // includeDone surfaces completed tasks too (for reopening/re-tagging/reporting). Default
   // off keeps the active-only pool the action ops have always used.
+  // itemType narrows by Item.type:
+  //   'task'     - strictly type==='task' (back-compat: every existing action op — complete,
+  //                resolve(kind:'task'), share/assign/timer queries — keeps matching only
+  //                tasks, never projects/folders, exactly like the pre-notes pool).
+  //   'note'     - strictly type==='note'.
+  //   'all'      - task OR note (never projects/folders) — used by update/items so a note can
+  //                be found for conversion or inspection.
+  //   'taggable' - task OR note OR project (never folders) — used only by tag_items, which
+  //                pre-notes let a tag match a project too (getItemsByTag had no type filter
+  //                at all); notes join that same "everything you'd reasonably tag" set.
+  type ItemTypeFilter = 'task' | 'note' | 'all' | 'taggable';
   const taskPool = (
     userId: string,
     list: Item | null,
     tag: Tag | null,
-    opts: { includeDone?: boolean } = {},
+    opts: { includeDone?: boolean; itemType?: ItemTypeFilter } = {},
   ): Item[] => {
     const scope = scopeItems(userId);
+    const itemType = opts.itemType ?? 'task';
+    const matchesType = (i: Item) =>
+      itemType === 'all'
+        ? i.type === 'task' || i.type === 'note'
+        : itemType === 'taggable'
+          ? i.type === 'task' || i.type === 'note' || i.type === 'project'
+          : i.type === itemType;
+    // A note's status is preserved-but-inert (never cleared while type==='note'), so a done/
+    // dropped-looking note is still just as findable-by-name as an active one — includeDone
+    // only gates *tasks*.
+    const statusOk = (i: Item) => opts.includeDone || i.type === 'note' || i.status !== 'done';
     let items: Item[];
-    if (list) items = getChildren(db, list.id).filter((i) => i.type === 'task');
-    else if (tag) items = getItemsByTag(db, tag.id);
-    else items = queryItems(db, { tasksOnly: true, activeOnly: !opts.includeDone });
-    return items.filter(
-      (i) =>
-        !i.deleted &&
-        (opts.includeDone || i.status !== 'done') &&
-        (!scope || scope.has(i.id)),
-    );
+    if (list) items = getChildren(db, list.id).filter(matchesType);
+    else if (tag) {
+      // Tag-scoped matching has always covered every non-folder type (getItemsByTag never
+      // filtered by type pre-notes, so a tag naming a project resolved it) — widen the default
+      // 'task' pool here specifically, rather than narrowing it to strictly type==='task' like
+      // the list/global branches below. 'note'/'all'/'taggable' still narrow as usual.
+      items = getItemsByTag(db, tag.id).filter((i) =>
+        itemType === 'task' ? i.type === 'task' || i.type === 'project' : matchesType(i),
+      );
+    } else if (itemType === 'note') {
+      items = queryItems(db, { activeOnly: false }).filter(matchesType);
+    } else if (itemType === 'all' || itemType === 'taggable') {
+      items = queryItems(db, { tasksOnly: false, activeOnly: false }).filter(matchesType);
+    } else {
+      // Strict, unscoped 'task' pool — matches the pre-notes `tasksOnly: true` behaviour so a
+      // bare fuzzy query (complete/resolve/share/timer with no list or tag) can never match a
+      // project or folder.
+      items = queryItems(db, { tasksOnly: true, activeOnly: false });
+    }
+    return items.filter((i) => !i.deleted && statusOk(i) && (!scope || scope.has(i.id)));
   };
 
   // ----- operations ----------------------------------------------------------
@@ -387,19 +436,71 @@ export function createAgentOps(deps: AgentApiDeps) {
     return ok({ tags: out });
   }
 
+  // Validate+normalize a model-supplied type filter; anything unrecognised falls back to the
+  // default ('task') rather than silently matching everything.
+  function normalizeItemType(t: string | undefined): 'task' | 'note' | 'all' {
+    return t === 'note' || t === 'all' ? t : 'task';
+  }
+
   function items(userId: string, input: ItemsInput) {
     const status = input.status ?? 'active';
     const limit = Math.min(input.limit || 50, 200);
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
-    // 'done'/'all' need the done-inclusive pool; 'active' keeps the default.
-    let pool = taskPool(userId, list, tag, { includeDone: status !== 'active' });
-    if (status === 'active') pool = pool.filter((i) => i.status === 'active');
+    const itemType = normalizeItemType(input.type);
+    // 'done'/'all' need the done-inclusive pool; 'active' keeps the default. Notes carry an
+    // inert status, so "active" should still include them.
+    let pool = taskPool(userId, list, tag, { includeDone: status !== 'active', itemType });
+    if (status === 'active') pool = pool.filter((i) => i.type === 'note' || i.status === 'active');
     else if (status === 'done') pool = pool.filter((i) => i.status === 'done');
     const q = input.q?.trim();
     if (q) pool = rankBy(q, pool, [(i) => i.title]).map((s) => s.item);
     pool = pool.slice(0, limit);
     return ok({ items: pool.map(input.detail ? detailItem : minimalItem) });
+  }
+
+  const SNIPPET_RADIUS = 80; // chars of context either side of a match
+
+  /** Plain-text context window around the first match of `q` inside `text`, with the hit
+   *  itself marked («»); case-insensitive substring search (no ranking — note bodies aren't
+   *  short titles, so fuzzy scoring isn't a good fit; an exact-ish phrase is what callers
+   *  pass here). Returns null when there's no match. */
+  function noteSnippet(text: string, q: string): string | null {
+    const hay = text.toLowerCase();
+    const idx = hay.indexOf(q.toLowerCase());
+    if (idx < 0) return null;
+    const start = Math.max(0, idx - SNIPPET_RADIUS);
+    const end = Math.min(text.length, idx + q.length + SNIPPET_RADIUS);
+    const prefix = start > 0 ? '…' : '';
+    const suffix = end < text.length ? '…' : '';
+    const before = text.slice(start, idx);
+    const hit = text.slice(idx, idx + q.length);
+    const after = text.slice(idx + q.length, end);
+    return `${prefix}${before}«${hit}»${after}${suffix}`;
+  }
+
+  /** Search item.note bodies for a text match (not just titles — see `items`/rankBy for
+   *  title search). Returns matched items with a context snippet around the hit, so the
+   *  caller (conversational prompt) can summarize/quote rather than dumping the whole body. */
+  function searchNotes(userId: string, input: SearchNotesInput) {
+    const q = input.q?.trim();
+    if (!q) return fail('q required', 400);
+    const limit = Math.min(input.limit || 20, 100);
+    const list = findList(userId, input.list);
+    const tag = findTag(input.tag);
+    // Notes default to inert status, so completed/dropped notes are still worth finding —
+    // include_done defaults true here (unlike items/update) unless the caller says otherwise.
+    const includeDone = input.include_done !== false;
+    const itemType = input.type === 'task' || input.type === 'all' ? input.type : 'note';
+    const pool = taskPool(userId, list, tag, { includeDone, itemType });
+    const hits: Array<{ id: string; title: string; type: string; snippet: string }> = [];
+    for (const it of pool) {
+      if (!it.note) continue;
+      const snippet = noteSnippet(it.note, q);
+      if (snippet) hits.push({ id: it.id, title: it.title, type: it.type, snippet });
+      if (hits.length >= limit) break;
+    }
+    return ok({ matches: hits });
   }
 
   function item(userId: string, id: string) {
@@ -493,9 +594,10 @@ export function createAgentOps(deps: AgentApiDeps) {
       if (r) perTaskTagById.set(name, r.id);
     }
 
-    const created: Array<{ id: string; title: string }> = [];
+    const created: Array<{ id: string; title: string; type: string }> = [];
     for (const t of taskInputs) {
       const it = createItem(db, deviceId, {
+        type: t.type === 'note' ? 'note' : 'task',
         title: t.title,
         note: t.note ?? null,
         parentId: listItem?.id ?? null,
@@ -517,7 +619,7 @@ export function createAgentOps(deps: AgentApiDeps) {
         if (id) tagIds.add(id);
       }
       for (const id of tagIds) setItemTagLink(db, deviceId, it.id, id, false);
-      created.push({ id: it.id, title: it.title });
+      created.push({ id: it.id, title: it.title, type: it.type });
     }
     return ok({ list: listOut, tags: sharedTagOut, created }, 201);
   }
@@ -532,7 +634,10 @@ export function createAgentOps(deps: AgentApiDeps) {
 
     for (const id of input.ids ?? []) {
       const it = getItem(db, id);
-      if (!it || it.deleted || !canSee(userId, id)) {
+      // Task-only op: a note has no "done" state (its status is inert), so an id addressing a
+      // note must be rejected rather than passed to setCompleted. The name-resolution path
+      // already excludes notes via taskPool; this closes the raw-id hole.
+      if (!it || it.deleted || it.type === 'note' || !canSee(userId, id)) {
         unmatched.push({ query: id, reason: 'no_match' });
         continue;
       }
@@ -568,6 +673,7 @@ export function createAgentOps(deps: AgentApiDeps) {
   const PATCH_FIELDS = [
     'title',
     'note',
+    'type',
     'due_date',
     'defer_date',
     'reminder_at',
@@ -590,7 +696,13 @@ export function createAgentOps(deps: AgentApiDeps) {
         const it = getItem(db, u.id);
         target = it && !it.deleted && canSee(userId, it.id) ? it : null;
       } else if (u.query) {
-        const pool = taskPool(userId, findList(userId, u.list), findTag(u.tag), { includeDone });
+        // itemType:'all' so a query can resolve either a task or a note — needed for
+        // task<->note conversion ("turn my note X into a task") where the target isn't a
+        // plain task while it's still a note.
+        const pool = taskPool(userId, findList(userId, u.list), findTag(u.tag), {
+          includeDone,
+          itemType: 'all',
+        });
         target = bestMatch(u.query, pool, [(i) => i.title]).matched?.item ?? null;
       }
       if (!target) {
@@ -604,6 +716,11 @@ export function createAgentOps(deps: AgentApiDeps) {
       const patch: ItemPatch = {};
       for (const k of PATCH_FIELDS) {
         if (u.patch && k in u.patch) (patch as Record<string, unknown>)[k] = u.patch[k];
+      }
+      // Only 'task'/'note' are valid conversion targets via the agent; anything else in the
+      // patch is dropped rather than corrupting the row with an unsupported type value.
+      if ('type' in patch && patch.type !== 'task' && patch.type !== 'note') {
+        delete (patch as Record<string, unknown>).type;
       }
       // recurrence is stored as a JSON string; accept the model's object form.
       if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
@@ -651,10 +768,16 @@ export function createAgentOps(deps: AgentApiDeps) {
       targets = [];
       for (const id of input.ids ?? []) {
         const it = getItem(db, id);
-        if (it && !it.deleted && canSee(userId, id)) targets.push(it);
+        // Tagging is meaningful on tasks, notes, and projects — only folders (a visual
+        // grouping layer, not a taggable "thing") are rejected. Matches the fuzzy/list/tag
+        // pools below ('taggable'), so an id and a query/list can target the same set.
+        if (it && !it.deleted && it.type !== 'folder' && canSee(userId, id)) targets.push(it);
         else unmatched.push({ query: id, reason: 'no_match' });
       }
-      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), { includeDone });
+      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), {
+        includeDone,
+        itemType: 'taggable',
+      });
       for (const q of input.queries ?? []) {
         const hit = bestMatch(q, pool, [(i) => i.title]).matched?.item;
         if (hit) targets.push(hit);
@@ -664,7 +787,7 @@ export function createAgentOps(deps: AgentApiDeps) {
       const list = findList(userId, input.list);
       const tag = findTag(input.tag);
       if (!list && !tag) return fail('specify list, tag, ids, or queries', 404);
-      targets = taskPool(userId, list, tag, { includeDone });
+      targets = taskPool(userId, list, tag, { includeDone, itemType: 'taggable' });
     }
 
     const updated: Array<{ id: string; title: string }> = [];
@@ -798,7 +921,9 @@ export function createAgentOps(deps: AgentApiDeps) {
     };
     if (input.id) {
       const it = getItem(db, input.id);
-      if (it && !it.deleted && canSee(userId, it.id)) push(it);
+      // Task-only: the query/list/tag paths below already exclude notes via taskPool; guard
+      // the raw-id path so a note id can't be shared/assigned as if it were a task.
+      if (it && !it.deleted && it.type !== 'note' && canSee(userId, it.id)) push(it);
       else unmatched.push({ query: input.id, reason: 'no_match' });
     }
     const queries = input.queries ?? (input.query ? [input.query] : []);
@@ -907,7 +1032,9 @@ export function createAgentOps(deps: AgentApiDeps) {
   const findOneTask = (userId: string, input: TimerInput): Item | null => {
     if (input.id) {
       const it = getItem(db, input.id);
-      return it && !it.deleted && canSee(userId, it.id) ? it : null;
+      // Task-only: time tracking has no meaning on a note. The query path uses taskPool
+      // (task-only) already; guard the raw-id path to match.
+      return it && !it.deleted && it.type !== 'note' && canSee(userId, it.id) ? it : null;
     }
     if (input.query) {
       const pool = taskPool(userId, findList(userId, input.list), null, { includeDone: true });
@@ -947,6 +1074,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     tags,
     items,
     item,
+    searchNotes,
     resolve,
     addTasks,
     complete,

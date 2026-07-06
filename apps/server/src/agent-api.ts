@@ -40,8 +40,27 @@ export function registerAgentApi(api: App, deps: AgentApiDeps): void {
         tag: c.req.query('tag') ?? undefined,
         q: c.req.query('q') ?? undefined,
         status: c.req.query('status') ?? undefined,
+        type: c.req.query('type') ?? undefined,
         limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
         detail: c.req.query('detail') === '1',
+      }),
+    ),
+  );
+
+  // Note-content search: matches against items.note (not just title), returning snippets.
+  api.get('/agent/notes/search', requireScope('tasks:read'), (c) =>
+    send(
+      c,
+      ops.searchNotes(c.get('userId'), {
+        q: c.req.query('q') ?? undefined,
+        list: c.req.query('list') ?? undefined,
+        tag: c.req.query('tag') ?? undefined,
+        type: c.req.query('type') ?? undefined,
+        include_done:
+          c.req.query('include_done') == null
+            ? undefined
+            : c.req.query('include_done') === '1',
+        limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
       }),
     ),
   );

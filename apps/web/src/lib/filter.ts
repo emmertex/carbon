@@ -76,11 +76,13 @@ export function applyFilters(db: Db, items: Item[], f: Filters): Item[] {
     let tagIds: string[] | null = null;
     const tagIdsOf = () => (tagIds ??= getItemTags(db, i.id).map((t) => t.id));
 
-    if (!f.showCompleted && i.status !== 'active') {
+    if (!f.showCompleted && i.type !== 'note' && i.status !== 'active') {
       // Keep just-completed tasks visible during the global grace window so the
       // list doesn't shift while you're ticking several in a row.
       if (!held.has(i.id)) return false;
     }
+    if (f.hideNotes && i.type === 'note') return false;
+    if (f.hideTasks && i.type === 'task') return false;
     if (f.flaggedOnly && !i.flagged) return false;
     if (f.priorities.length && !f.priorities.includes(i.priority)) return false;
 

@@ -29,6 +29,7 @@ export type Condition =
   | { kind: 'onHold' } // carries an on-hold tag
   | { kind: 'hasTag'; tagId: string } // tag or any descendant
   | { kind: 'inProject'; projectId: string } // descends from project
+  | { kind: 'isNote' } // item is a note (type === 'note')
   | { kind: 'titleContains'; text: string }
   | { kind: 'noteContains'; text: string };
 
@@ -133,6 +134,8 @@ function evalCondition(ctx: EvalCtx, item: Item, c: Condition): boolean {
     }
     case 'inProject':
       return ctx.projDesc(c.projectId).has(item.id);
+    case 'isNote':
+      return item.type === 'note';
     case 'titleContains':
       return (item.title || '').toLowerCase().includes(c.text.toLowerCase());
     case 'noteContains':
@@ -178,6 +181,7 @@ const COND_KINDS = new Set<Condition['kind']>([
   'onHold',
   'hasTag',
   'inProject',
+  'isNote',
   'titleContains',
   'noteContains',
 ]);
@@ -279,6 +283,8 @@ function describeCondition(c: Condition): string {
       return `tagged`;
     case 'inProject':
       return `in project`;
+    case 'isNote':
+      return 'is a note';
     case 'titleContains':
       return `title ~ "${c.text}"`;
     case 'noteContains':

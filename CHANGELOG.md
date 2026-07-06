@@ -5,6 +5,12 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+## v0.7.0
+**Introducing Notes**
+- Notes are a special type of Tasks
+- They do not autocomplete when parents are tasks and completed
+- They have almost no 'task' functionality, designed for notes first
+- Notes can be converted to Tasks, and Tasks to Notes, losing no data
 
 ## v0.6.3
 **Bump all libraries**

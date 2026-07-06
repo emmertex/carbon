@@ -302,9 +302,11 @@ function snippet(s: string, n = 200): string {
 }
 
 /**
- * Render "now" for the LLM prompt with an explicit UTC offset and IANA zone name, so
- * relative dates ("tomorrow night") resolve in the user's local time rather than the
- * server's (Carbon's server process runs in UTC; the client's zone is often different).
+ * Render "now" for the LLM prompt with the weekday name, an explicit UTC offset and IANA
+ * zone name, so relative dates ("tomorrow night") resolve in the user's local time rather
+ * than the server's (Carbon's server process runs in UTC; the client's zone is often
+ * different). The weekday is spelled out because models cannot reliably derive it from a
+ * date — "every Tuesday" was landing on Saturdays when the model guessed the weekday wrong.
  * Falls back to a plainly-labelled UTC instant when no (or an invalid) zone is known.
  */
 export function formatNow(now: Date, timezone?: string | null): string {
@@ -329,12 +331,14 @@ export function formatNow(now: Date, timezone?: string | null): string {
         .formatToParts(now)
         .find((p) => p.type === 'timeZoneName')?.value;
       const offset = offsetPart?.replace('GMT', '') || '+00:00';
-      return `${local}${offset === '' ? '+00:00' : offset} (${timezone})`;
+      const weekday = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'long' }).format(now);
+      return `${weekday} ${local}${offset === '' ? '+00:00' : offset} (${timezone})`;
     } catch {
       /* invalid zone name — fall through to the UTC form below */
     }
   }
-  return `${now.toISOString()} (UTC)`;
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long' }).format(now);
+  return `${weekday} ${now.toISOString()} (UTC)`;
 }
 
 /** Token counts, normalised across providers (Anthropic input/output, OpenAI prompt/completion). */

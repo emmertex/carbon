@@ -1,6 +1,7 @@
 import {
   getUnsyncedOps,
   markOpsSynced,
+  compactNoteOps,
   ingestOps,
   getUnsyncedRecordOps,
   markRecordOpsSynced,
@@ -338,6 +339,22 @@ export async function syncNow(): Promise<boolean> {
     if (freshRecords.length) applyInboundSettings(freshRecords);
     if (unsynced.length) markOpsSynced(db, unsynced.map((o) => o.id));
     if (unsyncedRecords.length) markRecordOpsSynced(db, unsyncedRecords.map((o) => o.id));
+    // Reclaim local op-log space: prune superseded note-only ops we've already pushed
+    // (synced=1). syncedOnly is mandatory here — an unsynced op hasn't reached the
+    // server, so deleting it would lose it entirely. The server holds the retained
+    // winner, so a pruned loser can never change our (or any peer's) converged state.
+    // Gated on having just pushed a note op (the only source of new supersession), so
+    // idle syncs don't scan the whole op-log.
+    const pushedNoteItemIds = [
+      ...new Set(
+        unsynced
+          .filter((o) => o.fields && 'note' in o.fields)
+          .map((o) => o.item_id),
+      ),
+    ];
+    if (pushedNoteItemIds.length) {
+      compactNoteOps(db, { syncedOnly: true, itemIds: pushedNoteItemIds });
+    }
     setMeta('last_sync_seq', String(data.cursor));
     setMeta('last_sync_rseq', String(data.rcursor));
 

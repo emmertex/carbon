@@ -74,6 +74,27 @@ share it with Rachel": add_tasks {tasks:[{title:"Take son to swimming", due_date
 reminder_at:"<that Tue 16:00>", recurrence:{type:"weekly",interval:1,daysOfWeek:[2]}}]} then \
 share {query:"Take son to swimming", users:["Rachel"]}.`;
 
+// Note-vs-task disambiguation, shared by both prompts. "Note" is overloaded — a FIELD (the
+// body text on any item) and an item TYPE (a standalone note with no due date/checkbox) — so
+// the exact phrasing below distinguishes the four cases the plan calls out.
+const NOTES_HINT = `
+
+Notes: a note is an item type (like a task, but no due date/checkbox — just a title + body). \
+The word "note" is also the name of the body-text field every task/note already has, so read the \
+phrasing carefully:
+- "Add a note TO X" / "add a note ON X" (X already exists) → update X's note field: \
+update {updates:[{query:"X", patch:{note:"…"}}]}.
+- "Add a task X with a note saying …" → add_tasks {tasks:[{title:"X", note:"…"}]} (creates a task \
+whose note field holds the extra text).
+- "Add/write a note about Y" / "write down Y" / "make a note that …" (no existing item named) → \
+create a standalone note item: add_tasks {tasks:[{title:"Y", type:"note"}]} (title:"Y" or a short \
+title summarizing what was written down; put the body in note if there's more than a short line).
+- "Turn that note into a task" / "make X a task" (X is a note) → update {updates:[{query:"X", \
+patch:{type:"task"}}]}. Converting a note back to a task restores whatever status/dates/flags it \
+had before — nothing needs to be re-specified unless the user wants to change them. The reverse — \
+"turn X into a note" — is update {updates:[{query:"X", patch:{type:"note"}}]}.
+- To find text INSIDE a note's body (not just its title), use search_notes, not items.`;
+
 const SYSTEM_PROMPT = `You manage a user's tasks in Carbon by calling tools. The server resolves names \
 to ids by fuzzy match, so pass plain names (a list name, a tag, a task title) — never ids.
 
@@ -83,6 +104,7 @@ to ids by fuzzy match, so pass plain names (a list name, a tag, a task title) �
 - "Tag everything in LIST with X" / "add the X tag to all items in LIST" → call tag_items {list:"LIST", add:["X"]}.
 - "Add the X tag to A and B" → tag_items {queries:["A","B"], add:["X"]}.
 - "What do I need at PLACE?" → call nearby {tag:"PLACE"}.
+${NOTES_HINT}
 
 You can act on a whole list at once — tag, complete, or list its tasks — WITHOUT enumerating the items \
 first; the server finds them. So to tag every item in a list, call tag_items with that list, not one call per item.
@@ -108,6 +130,12 @@ names (a list name, a tag, a task title) — never ids.
 - "Tag everything in LIST with X" → tag_items {list:"LIST", add:["X"]}.
 - Questions ("what's due tomorrow in work?", "what do I need at Coles?", "what's on my shopping list?") \
 → read with items/nearby/lists (use detail:true when you need due dates, flags or priorities) and ANSWER.
+- "Find my note about Y" / "what did I write about Y" / "search my notes for Y" → search_notes {q:"Y"}.
+${NOTES_HINT}
+
+If a search_notes/items result's note content is long, don't paste the whole body into your reply — \
+summarize the relevant part in your own words (a sentence or two) and point the user at the item by \
+title (e.g. "your note 'Trip planning' mentions …") so they can open it for the rest.
 
 You can act on a whole list at once (tag/complete/list) WITHOUT enumerating items first — the server finds them. \
 To act on items carrying a tag (e.g. "untick my weekly shopping items" where items are tagged "weekly"), \
@@ -123,10 +151,12 @@ const TOOLS: ToolDef[] = [
   {
     name: 'add_tasks',
     description:
-      'Add one or more tasks to a list (creates the list/tags if missing). For plain tasks pass ' +
-      'titles[]. For per-task scheduling pass tasks[] with {title, note?, due_date?, defer_date?, ' +
-      'reminder_at? (all ISO datetimes), recurrence? (object {type,interval,daysOfWeek?,dayOfMonth?}), ' +
-      'flagged?, priority? (0-3), tags?}.',
+      'Add one or more tasks OR notes to a list (creates the list/tags if missing). For plain tasks ' +
+      'pass titles[] (always creates type:"task"). For per-task scheduling, a note body, or to create ' +
+      'a note item, pass tasks[] with {title, type? ("task" default, or "note"), note?, due_date?, ' +
+      'defer_date?, reminder_at? (all ISO datetimes), recurrence? (object {type,interval,daysOfWeek?,' +
+      'dayOfMonth?}), flagged?, priority? (0-3), tags?}. A note is a title + body with no due ' +
+      'date/checkbox — use type:"note" when the user wants to write something down, not something to do.',
     parameters: {
       type: 'object',
       properties: {
@@ -134,11 +164,12 @@ const TOOLS: ToolDef[] = [
         titles: { type: 'array', items: { type: 'string' }, description: 'task titles to add (plain)' },
         tasks: {
           type: 'array',
-          description: 'tasks with scheduling/details; use instead of titles when dates/repeat/flag are involved',
+          description: 'tasks/notes with scheduling/details; use instead of titles when dates/repeat/flag/type/note are involved',
           items: {
             type: 'object',
             properties: {
               title: { type: 'string' },
+              type: { type: 'string', enum: ['task', 'note'], description: 'defaults to "task"; "note" creates a note item (body in note, no due date/checkbox)' },
               note: { type: 'string' },
               due_date: { type: 'string', description: 'ISO datetime' },
               defer_date: { type: 'string', description: 'ISO datetime' },
@@ -172,10 +203,15 @@ const TOOLS: ToolDef[] = [
   {
     name: 'update',
     description:
-      'Change fields on tasks by name. patch keys: note, flagged (bool), priority (0-3), ' +
+      'Change fields on tasks or notes by name. patch keys: note (the body text — use this to add/replace ' +
+      'a note ON an existing task or note, e.g. "add a note to X"), type ("task" or "note" — converts the ' +
+      'item; converting a note back to a task restores whatever status it had before it became a note, ' +
+      'since status is preserved untouched the whole time it was a note), flagged (bool), priority (0-3), ' +
       'due_date / defer_date / reminder_at (ISO datetime), estimate_minutes (number), ' +
       'recurrence (object {type:"daily"|"weekly"|"monthly"|"yearly", interval, daysOfWeek?:[0-6 Sun-Sat], dayOfMonth?}; null clears it), ' +
-      'status ("active"|"done"|"dropped"). Pass include_done:true to edit a completed task.',
+      'status ("active"|"done"|"dropped") — can be combined with type:"task" in one call to convert AND set a status. ' +
+      'Pass include_done:true to edit a completed task. Targets both tasks and notes by name (no need to ' +
+      'know which it currently is).',
     parameters: {
       type: 'object',
       properties: {
@@ -259,8 +295,9 @@ const TOOLS: ToolDef[] = [
   {
     name: 'items',
     description:
-      'Show tasks in a list or with a tag. status defaults to "active"; pass "done" for completed ' +
-      'or "all" for both. Use detail:true to get due dates, reminders, repeat, flags and priority.',
+      'Show tasks and/or notes in a list or with a tag. status defaults to "active"; pass "done" for ' +
+      'completed or "all" for both. type defaults to "task"; pass "note" for notes only or "all" for both. ' +
+      'Use detail:true to get due dates, reminders, repeat, flags and priority (and each item\'s type).',
     parameters: {
       type: 'object',
       properties: {
@@ -268,8 +305,27 @@ const TOOLS: ToolDef[] = [
         tag: { type: 'string' },
         q: { type: 'string' },
         status: { type: 'string', enum: ['active', 'done', 'all'] },
+        type: { type: 'string', enum: ['task', 'note', 'all'], description: 'defaults to "task"' },
         detail: { type: 'boolean' },
       },
+    },
+  },
+  {
+    name: 'search_notes',
+    description:
+      'Search inside note BODIES (not just titles) for matching text and return snippets with item ids. ' +
+      'Use this for "find my note about Y" / "what did I write about Y" / "search my notes for Y" — items ' +
+      'tool only matches titles, this matches the content. type defaults to "note" (pass "task" or "all" ' +
+      'to also/instead search task notes).',
+    parameters: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'text to find inside the note body' },
+        list: { type: 'string' },
+        tag: { type: 'string' },
+        type: { type: 'string', enum: ['task', 'note', 'all'], description: 'defaults to "note"' },
+      },
+      required: ['q'],
     },
   },
   {
@@ -353,11 +409,119 @@ function tidyTitle(s: unknown): unknown {
   if (typeof s !== 'string') return s;
   return s.replace(/^(\s*)(\p{Ll})/u, (_m, ws: string, ch: string) => ws + ch.toUpperCase());
 }
-function tidyAddArgs(args: Record<string, unknown>): Record<string, unknown> {
+/** The clock the command runs against: opts.now + opts.timezone, when the route supplied them. */
+interface Clock {
+  now: Date;
+  timezone?: string | null;
+}
+
+interface LocalParts {
+  y: number;
+  mo: number;
+  d: number;
+  h: number;
+  mi: number;
+  s: number;
+}
+
+function partsInZone(date: Date, tz: string): LocalParts {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? '0');
+  return { y: get('year'), mo: get('month'), d: get('day'), h: get('hour'), mi: get('minute'), s: get('second') };
+}
+
+/** Convert local wall-clock parts in `tz` back to a UTC instant. The offset depends on the
+ *  instant being converted (DST), so guess with the current offset and correct once. */
+function zonedToUtc(p: LocalParts, tz: string): Date {
+  const asUtc = Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s);
+  const offsetAt = (utcMs: number) => {
+    const q = partsInZone(new Date(utcMs), tz);
+    return Date.UTC(q.y, q.mo - 1, q.d, q.h, q.mi, q.s) - utcMs;
+  };
+  return new Date(asUtc - offsetAt(asUtc - offsetAt(asUtc)));
+}
+
+/** Weekday (0=Sun…6=Sat, matching RecurrenceRule.daysOfWeek) of a local calendar date. */
+function weekdayOf(p: LocalParts): number {
+  return new Date(Date.UTC(p.y, p.mo - 1, p.d)).getUTCDay();
+}
+
+/** Deterministic safety net for "every Tuesday"-style creations: models regularly miscompute
+ *  which calendar date a weekday falls on, so a weekly recurrence could arrive with a due_date
+ *  on the wrong day (e.g. "every Tuesday 4pm" due on a Saturday). When the due date's local
+ *  weekday isn't in daysOfWeek, move it to the earliest requested weekday at or after `now`,
+ *  keeping the model's local time-of-day, and shift reminder_at/defer_date by the same amount
+ *  so "an hour before" style offsets survive. */
+function snapDueToRecurrenceWeekday(
+  t: Record<string, unknown>,
+  clock: Clock,
+): Record<string, unknown> {
+  const rec = (typeof t.recurrence === 'object' && t.recurrence !== null ? t.recurrence : null) as {
+    type?: unknown;
+    daysOfWeek?: unknown;
+  } | null;
+  if (!rec || rec.type !== 'weekly' || !Array.isArray(rec.daysOfWeek)) return t;
+  const days = rec.daysOfWeek.filter((n): n is number => typeof n === 'number' && n >= 0 && n <= 6);
+  if (!days.length || typeof t.due_date !== 'string') return t;
+  const due = new Date(t.due_date);
+  if (Number.isNaN(due.getTime())) return t;
+  const tz = clock.timezone || 'UTC';
+  let dueParts: LocalParts;
+  let nowParts: LocalParts;
+  try {
+    dueParts = partsInZone(due, tz);
+    nowParts = partsInZone(clock.now, tz);
+  } catch {
+    return t; // invalid zone name — leave the model's dates alone
+  }
+  if (days.includes(weekdayOf(dueParts))) return t;
+  for (let k = 0; k <= 7; k++) {
+    // Walk local calendar days from today; UTC date arithmetic is safe here because only
+    // the y/m/d roll-over matters, the wall-clock time comes from the model's due date.
+    const day = new Date(Date.UTC(nowParts.y, nowParts.mo - 1, nowParts.d + k));
+    if (!days.includes(day.getUTCDay())) continue;
+    const snapped = zonedToUtc(
+      {
+        y: day.getUTCFullYear(),
+        mo: day.getUTCMonth() + 1,
+        d: day.getUTCDate(),
+        h: dueParts.h,
+        mi: dueParts.mi,
+        s: dueParts.s,
+      },
+      tz,
+    );
+    if (snapped.getTime() < clock.now.getTime()) continue; // today matches but the time already passed
+    const delta = snapped.getTime() - due.getTime();
+    const out: Record<string, unknown> = { ...t, due_date: snapped.toISOString() };
+    for (const field of ['reminder_at', 'defer_date'] as const) {
+      if (typeof t[field] !== 'string') continue;
+      const v = new Date(t[field] as string);
+      if (!Number.isNaN(v.getTime())) out[field] = new Date(v.getTime() + delta).toISOString();
+    }
+    dbg(`  snapped due_date ${t.due_date} -> ${out.due_date} (daysOfWeek ${JSON.stringify(days)}, tz ${tz})`);
+    return out;
+  }
+  return t;
+}
+
+function tidyAddArgs(args: Record<string, unknown>, clock: Clock | null): Record<string, unknown> {
   const a = { ...args };
   if (Array.isArray(a.titles)) a.titles = a.titles.map(tidyTitle);
   if (Array.isArray(a.tasks)) {
-    a.tasks = (a.tasks as Array<Record<string, unknown>>).map((t) => ({ ...t, title: tidyTitle(t.title) }));
+    a.tasks = (a.tasks as Array<Record<string, unknown>>).map((t) => {
+      const tidied = { ...t, title: tidyTitle(t.title) };
+      return clock ? snapDueToRecurrenceWeekday(tidied, clock) : tidied;
+    });
   }
   return a;
 }
@@ -368,10 +532,11 @@ async function execTool(
   name: string,
   args: Record<string, unknown>,
   anchor: GeoPoint | null,
+  clock: Clock | null,
 ): Promise<OpResult<unknown>> {
   switch (name) {
     case 'add_tasks':
-      return ops.addTasks(userId, tidyAddArgs(args));
+      return ops.addTasks(userId, tidyAddArgs(args, clock));
     case 'complete':
       return ops.complete(userId, args);
     case 'update':
@@ -394,6 +559,8 @@ async function execTool(
       return ops.tags(userId, args);
     case 'items':
       return ops.items(userId, args);
+    case 'search_notes':
+      return ops.searchNotes(userId, args);
     case 'nearby':
       return await ops.nearby(userId, args);
     case 'users':
@@ -502,6 +669,12 @@ function actionToToolCall(a: Record<string, unknown>): ToolCall | null {
     assign: 'assign',
     start_timer: 'start_timer',
     stop_timer: 'stop_timer',
+    search_notes: 'search_notes',
+    search: 'search_notes',
+    find_notes: 'search_notes',
+    tag_items: 'tag_items',
+    add_tags: 'tag_items',
+    remove_tags: 'tag_items',
   };
   const name = map[op];
   if (!name) return null;
@@ -534,13 +707,26 @@ function buildReply(executed: ExecutedTool[], modelText: string): string {
     if (!e.result.ok) continue;
     const d = e.result.data as Record<string, unknown>;
     if (e.tool === 'add_tasks') {
-      const created = (d.created as Array<{ title: string }>) ?? [];
+      const created = (d.created as Array<{ title: string; type?: string }>) ?? [];
       const list = d.list as { name: string; created: boolean } | null;
       const tags = (d.tags as Array<{ name: string }>) ?? [];
       if (created.length) {
         const where = list ? ` to ${list.created ? 'new list ' : ''}"${list.name}"` : '';
         const tagStr = tags.length ? ` (tagged ${tags.map((t) => t.name).join(', ')})` : '';
-        lines.push(`Added${where}${tagStr}: ${joinNames(created)}`);
+        // Say "note(s)" instead of the generic "Added" when everything created was a note,
+        // so the reply doesn't call a note a "task".
+        const allNotes = created.every((c) => c.type === 'note');
+        const verb = allNotes ? (created.length === 1 ? 'Added note' : 'Added notes') : 'Added';
+        lines.push(`${verb}${where}${tagStr}: ${joinNames(created)}`);
+      }
+    } else if (e.tool === 'search_notes') {
+      const matches = (d.matches as Array<{ title: string; snippet: string }>) ?? [];
+      if (matches.length) {
+        lines.push(
+          `Found in notes:\n${matches.map((m) => `- ${m.title}: ${m.snippet}`).join('\n')}`,
+        );
+      } else {
+        lines.push('No notes matched that search.');
       }
     } else if (e.tool === 'complete') {
       const matched = (d.matched as Array<{ title: string }>) ?? [];
@@ -654,6 +840,7 @@ export async function runAgentCommand(
   opts: AgentCommandOpts = {},
 ): Promise<CommandResult> {
   const ops = createAgentOps(deps);
+  const clock: Clock | null = opts.now ? { now: opts.now, timezone: opts.timezone } : null;
   // Resolve a location anchor in code; only then do we teach the model the geo step. With no
   // usable location we send the plain prompt, so it won't try (and fail) to geolocate.
   const anchor = usableAnchor(deps.db, userId);
@@ -669,10 +856,12 @@ export async function runAgentCommand(
   // Teach the model "now" (in the user's own zone, when known) so "due tomorrow" / "this
   // week" resolve against the user's local clock instead of the server's.
   if (opts.now) {
-    system += `\n\nThe current date and time is ${formatNow(opts.now, opts.timezone)}. Resolve \
-relative dates ("tonight", "tomorrow", "next Tuesday") against that local time and zone, but always \
-write due_date / defer_date / reminder_at back out in UTC (ending in Z) — convert the local time you \
-picked to UTC before returning it.`;
+    system += `\n\nThe current date and time is ${formatNow(opts.now, opts.timezone)}. The weekday \
+named there is authoritative — never re-derive the weekday from the date yourself. Resolve relative \
+dates ("tonight", "tomorrow", "next Tuesday") against that local time and zone, counting days forward \
+from that weekday, but always write due_date / defer_date / reminder_at back out in UTC (ending in Z) \
+— convert the local time you picked to UTC before returning it. For a weekly recurrence, the due_date \
+must fall on one of its daysOfWeek in the user's zone.`;
   }
   const history = opts.history ?? [];
   if (history.length) system += `\n\n${HISTORY_HINT}`;
@@ -706,7 +895,7 @@ picked to UTC before returning it.`;
 
       if (native) messages.push({ role: 'assistant', content: r.text, toolCalls: calls });
       for (const tc of calls) {
-        const result = await execTool(ops, userId, tc.name, tc.args, anchor);
+        const result = await execTool(ops, userId, tc.name, tc.args, anchor, clock);
         dbg(`  ${tc.name} ${JSON.stringify(tc.args)} -> ${result.ok ? 'ok' : 'ERR ' + result.error}`);
         executed.push({ tool: tc.name, args: tc.args, result });
         if (native) {

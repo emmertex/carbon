@@ -9,6 +9,8 @@ import {
   CalendarClock,
   Pause,
   X,
+  FileText,
+  ListTodo,
 } from "lucide-react";
 import {
   SORT_LABELS,
@@ -42,7 +44,13 @@ function toggle<T>(arr: T[], v: T): T[] {
  *  spelled out (icon + label) inside the Filters panel so the icons are
  *  learnable. One source of truth so the two presentations can't drift. */
 const QUICK_FILTERS: {
-  key: "showCompleted" | "flaggedOnly" | "hideDeferred" | "hideBlocked";
+  key:
+    | "showCompleted"
+    | "flaggedOnly"
+    | "hideDeferred"
+    | "hideBlocked"
+    | "hideNotes"
+    | "hideTasks";
   label: string;
   Icon: typeof Check;
 }[] = [
@@ -50,6 +58,8 @@ const QUICK_FILTERS: {
   { key: "flaggedOnly", label: "Flagged", Icon: Flag },
   { key: "hideDeferred", label: "Hide deferred", Icon: CalendarClock },
   { key: "hideBlocked", label: "Hide blocked", Icon: Ban },
+  { key: "hideNotes", label: "Hide notes", Icon: FileText },
+  { key: "hideTasks", label: "Hide tasks", Icon: ListTodo },
 ];
 
 export function ViewControls({

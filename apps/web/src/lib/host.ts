@@ -2,6 +2,9 @@
 // tenant-management calls require host-admin Basic credentials, which the host
 // operator enters in the Host Admin view (kept in-memory, not persisted).
 
+import { getServerConfig, defaultServerUrl } from './config';
+import { isNative } from './platform';
+
 export interface TenantRecord {
   id: string;
   subdomain: string;
@@ -51,7 +54,13 @@ export interface SignupInput {
   displayName?: string;
 }
 
+// The control plane (/host/*) lives on the real server. In a browser that's the
+// serving origin; inside a native shell (Capacitor/Tauri) the app is served from
+// localhost, so fall back to the configured sync server or the hosted default —
+// otherwise signup/delete requests hit the WebView's own localhost and silently go
+// nowhere (e.g. the verification email is never sent). Mirrors sync.ts's resolution.
 function base(): string {
+  if (isNative) return getServerConfig().url || defaultServerUrl();
   return window.location.origin;
 }
 

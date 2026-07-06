@@ -355,6 +355,20 @@ body {
   font-weight: 500;
 }
 
+/* Tiptap (rich-text Notes editor, Phase 2). The editable ProseMirror surface
+   reuses the same `.md` prose rules above so edit/read views match visually. */
+.tiptap-notes {
+  outline: none;
+  min-height: 1.5em;
+}
+.tiptap-notes p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--text-faint);
+}
+
 /* Compact screens (phones, foldables): enlarge text + tap targets ~20%.
    Scaling the root font scales every rem-based size, so padding/hit-areas grow too.
    Desktop (>=1024px) is unaffected. */

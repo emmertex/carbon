@@ -68,7 +68,7 @@ export function queryRoots(db: Db, base: Base, prefs: ViewPrefs): Item[] {
   // SQL prefilter drop them; the expression itself decides.
   const advanced = prefs.mode === 'advanced' && !!prefs.expr;
   const candidates = queryItems(db, {
-    tasksOnly: true,
+    tasksOnly: false,
     activeOnly: !advanced && !prefs.filters.showCompleted,
     flaggedOnly: base === 'flagged',
     rootOnly: base === 'inbox',

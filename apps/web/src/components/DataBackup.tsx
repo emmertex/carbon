@@ -1,7 +1,9 @@
 import { useRef, useState } from 'react';
-import { Download, Upload, Loader2, Trash2 } from 'lucide-react';
+import { Download, Upload, Loader2, Trash2, FileArchive } from 'lucide-react';
 import { completedBefore, purgeCompleted, COMPLETED_PURGE_AGE_DAYS } from '@carbon/core';
 import { exportBackup, inspectBackup, applyImport, type ParsedBackup, type UserMapping } from '@/lib/backup';
+import { exportNotesZip } from '@/lib/notesZip';
+import { getDb } from '@/lib/db';
 import { ImportModal } from './ImportModal';
 import { SettingsSection } from './settings/SettingsSection';
 import { btnSecondary } from './settings/controls';
@@ -13,7 +15,7 @@ const purgeCutoff = () =>
   new Date(Date.now() - COMPLETED_PURGE_AGE_DAYS * 86_400_000).toISOString();
 
 export function DataBackup() {
-  const [busy, setBusy] = useState<'export' | 'import' | 'purge' | null>(null);
+  const [busy, setBusy] = useState<'export' | 'notes' | 'import' | 'purge' | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [parsed, setParsed] = useState<ParsedBackup | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -55,6 +57,26 @@ export function DataBackup() {
       setMsg({ ok: true, text: 'Backup downloaded.' });
     } catch {
       setMsg({ ok: false, text: 'Export failed.' });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function doExportNotes() {
+    setBusy('notes');
+    setMsg(null);
+    try {
+      const { missingAssetCount } = await exportNotesZip(getDb());
+      setMsg(
+        missingAssetCount > 0
+          ? {
+              ok: true,
+              text: `Notes exported (${missingAssetCount} image${missingAssetCount === 1 ? '' : 's'} unavailable and skipped).`,
+            }
+          : { ok: true, text: 'Notes exported.' },
+      );
+    } catch {
+      setMsg({ ok: false, text: 'Notes export failed.' });
     } finally {
       setBusy(null);
     }
@@ -107,6 +129,14 @@ export function DataBackup() {
         <button onClick={doExport} disabled={busy !== null} className={btnSecondary}>
           {busy === 'export' ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
           Export backup
+        </button>
+        <button onClick={doExportNotes} disabled={busy !== null} className={btnSecondary}>
+          {busy === 'notes' ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <FileArchive size={15} />
+          )}
+          Export notes (zip)
         </button>
         <button
           onClick={() => fileRef.current?.click()}

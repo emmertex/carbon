@@ -12,6 +12,7 @@ import {
   Eye,
   MoreHorizontal,
   Sparkles,
+  FileText,
 } from 'lucide-react';
 import {
   subtaskProgress,
@@ -136,6 +137,7 @@ export function TaskRow({
   // Quick menu anchor: set by the "⋯" button or a desktop right-click; null = closed.
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const selected = selectedId === item.id;
+  const isNote = item.type === 'note';
   const done = item.status === 'done';
   const overdue = isOverdue(item);
   const dueToday = isDueToday(item);
@@ -227,36 +229,50 @@ export function TaskRow({
         onHold && !done && 'opacity-50',
       )}
     >
-      <button
-        onClick={toggleComplete}
-        className={cn(
-          'relative mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full transition-colors',
-          done && 'border text-white',
-        )}
-        style={done ? { background: fillColor, borderColor: fillColor } : undefined}
-        aria-label={done ? 'Mark incomplete' : 'Mark complete'}
-        title={isParent && !allDone ? `${progress.done}/${progress.total} sub-tasks done` : undefined}
-      >
-        {done ? (
-          <Check size={12} strokeWidth={3} />
-        ) : (
-          // Leaf and parent share the same SVG ring (leaf = empty track); the arc
-          // fills as sub-tasks complete. Uniform 2.5px weight across every row.
-          <ProgressRing
-            done={progress.done}
-            total={progress.total}
-            ringColor={ringColor}
-            fillColor={fillColor}
-          />
-        )}
-        {item.flagged && !done && (
-          // Flag → amber dot in the centre of the ring.
-          <span
-            className="pointer-events-none absolute inset-0 m-auto h-[6px] w-[6px] rounded-full"
-            style={{ background: 'var(--warning)' }}
-          />
-        )}
-      </button>
+      {isNote ? (
+        // A note can't be completed from the row — a static glyph replaces the
+        // completion ring. Clicking the row (handled above) opens the note.
+        <span
+          className="mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center text-text-faint"
+          aria-label="Note"
+          title="Note"
+        >
+          <FileText size={15} />
+        </span>
+      ) : (
+        <button
+          onClick={toggleComplete}
+          className={cn(
+            'relative mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full transition-colors',
+            done && 'border text-white',
+          )}
+          style={done ? { background: fillColor, borderColor: fillColor } : undefined}
+          aria-label={done ? 'Mark incomplete' : 'Mark complete'}
+          title={
+            isParent && !allDone ? `${progress.done}/${progress.total} sub-tasks done` : undefined
+          }
+        >
+          {done ? (
+            <Check size={12} strokeWidth={3} />
+          ) : (
+            // Leaf and parent share the same SVG ring (leaf = empty track); the arc
+            // fills as sub-tasks complete. Uniform 2.5px weight across every row.
+            <ProgressRing
+              done={progress.done}
+              total={progress.total}
+              ringColor={ringColor}
+              fillColor={fillColor}
+            />
+          )}
+          {item.flagged && !done && (
+            // Flag → amber dot in the centre of the ring.
+            <span
+              className="pointer-events-none absolute inset-0 m-auto h-[6px] w-[6px] rounded-full"
+              style={{ background: 'var(--warning)' }}
+            />
+          )}
+        </button>
+      )}
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">

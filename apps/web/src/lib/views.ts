@@ -31,6 +31,10 @@ export interface Filters {
   /** How tasks carrying an on-hold tag appear: 'fade' (visible but dimmed, the
    *  default) or 'hide' (dropped from the list). Today always hides them. */
   onHoldMode: 'fade' | 'hide';
+  /** Hide note items (type='note') from the list. */
+  hideNotes: boolean;
+  /** Hide task items (type='task') — leaving notes — from the list. */
+  hideTasks: boolean;
 }
 
 export interface ViewPrefs {
@@ -58,6 +62,8 @@ export const DEFAULT_FILTERS: Filters = {
   hideDeferred: false,
   hideBlocked: false,
   onHoldMode: 'fade',
+  hideNotes: false,
+  hideTasks: false,
 };
 
 export const DEFAULT_PREFS: ViewPrefs = {
@@ -109,7 +115,9 @@ export function anyFilterActive(f: Filters): boolean {
     !!f.dueAfter ||
     f.hideDeferred ||
     f.hideBlocked ||
-    f.onHoldMode === 'hide'
+    f.onHoldMode === 'hide' ||
+    f.hideNotes ||
+    f.hideTasks
   );
 }
 
@@ -124,15 +132,15 @@ export const SORT_LABELS: Record<SortKey, string> = {
 /** The candidate set for a built-in perspective (status-agnostic; the
  *  showCompleted filter decides whether done items appear). */
 export function baseFilter(base: Base, items: Item[], now: Date = new Date()): Item[] {
-  const tasks = items.filter((i) => i.type === 'task');
+  const visibleTypes = items.filter((i) => i.type === 'task' || i.type === 'note');
   switch (base) {
     case 'inbox':
-      return tasks.filter((i) => i.parent_id === null);
+      return visibleTypes.filter((i) => i.parent_id === null);
     case 'flagged':
-      return tasks.filter((i) => i.flagged);
+      return visibleTypes.filter((i) => i.flagged);
     case 'today': {
       const cut = endOfToday(now).getTime();
-      return tasks.filter((i) => {
+      return visibleTypes.filter((i) => {
         const deferredFuture =
           i.status === 'active' && i.defer_date && new Date(i.defer_date).getTime() > now.getTime();
         if (deferredFuture) return false;
@@ -141,7 +149,7 @@ export function baseFilter(base: Base, items: Item[], now: Date = new Date()): I
       });
     }
     case 'all':
-      return tasks;
+      return visibleTypes;
   }
 }
 

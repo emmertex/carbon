@@ -19,10 +19,15 @@ export interface ServerConfig {
 
 const SERVER_KEY = 'carbon.server';
 
-/** Where the hosted Carbon SaaS lives — the sensible default for native builds,
- *  which are served from localhost (Capacitor) or a tauri:// origin and so can't
- *  derive a useful server from `window.location`. */
-export const HOSTED_SERVER_URL = 'https://app.carbon.etx.sx';
+/** The public multi-tenant base domain: hosted workspaces live at
+ *  `<workspace>.<PUBLIC_BASE_DOMAIN>`. Used to let native sign-in ask for just a
+ *  workspace name (plus an editable domain for self-hosters) instead of a full URL. */
+export const PUBLIC_BASE_DOMAIN = 'carbon.etx.sx';
+
+/** Where the hosted Carbon SaaS control plane lives — the base for signup and other
+ *  `/host/*` calls on native builds, which are served from localhost (Capacitor) or a
+ *  tauri:// origin and so can't derive a useful server from `window.location`. */
+export const HOSTED_SERVER_URL = `https://app.${PUBLIC_BASE_DOMAIN}`;
 
 /**
  * The server URL to pre-fill when the user hasn't configured one. Native shells
@@ -32,6 +37,38 @@ export const HOSTED_SERVER_URL = 'https://app.carbon.etx.sx';
 export function defaultServerUrl(): string {
   if (isNative) return HOSTED_SERVER_URL;
   return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
+/** Build a server URL from a workspace name + base domain. A blank workspace yields
+ *  the bare domain (self-host / single-tenant); otherwise `<workspace>.<domain>`.
+ *  Returns '' when the domain is empty. */
+export function workspaceUrl(workspace: string, domain: string): string {
+  const w = workspace.trim().toLowerCase().replace(/^\/+|\/+$/g, '');
+  const d = domain
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/g, '');
+  if (!d) return '';
+  return `https://${w ? `${w}.` : ''}${d}`;
+}
+
+/** Split a configured server URL back into { workspace, domain } so the split
+ *  sign-in fields can be re-populated. A host under the public base domain yields
+ *  its label as the workspace; any other host is treated as a bare self-host domain. */
+export function splitServerUrl(url: string): { workspace: string; domain: string } {
+  const host = (url || '')
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/g, '')
+    .toLowerCase();
+  if (!host) return { workspace: '', domain: PUBLIC_BASE_DOMAIN };
+  const suffix = `.${PUBLIC_BASE_DOMAIN}`;
+  if (host.endsWith(suffix)) {
+    return { workspace: host.slice(0, -suffix.length), domain: PUBLIC_BASE_DOMAIN };
+  }
+  if (host === PUBLIC_BASE_DOMAIN) return { workspace: '', domain: PUBLIC_BASE_DOMAIN };
+  return { workspace: '', domain: host };
 }
 
 const DEFAULT_SERVER: ServerConfig = {

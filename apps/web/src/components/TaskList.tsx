@@ -30,7 +30,12 @@ function SubtaskRows({
 }) {
   const rows =
     useQuery(
-      (db) => enrichItems(db, getChildren(db, parentId).filter((c) => c.type === 'task')),
+      (db) =>
+        enrichItems(
+          db,
+          // Notes render inline in container/list views (icon, no checkbox).
+          getChildren(db, parentId).filter((c) => c.type === 'task' || c.type === 'note'),
+        ),
       [parentId],
     ) ?? [];
   if (rows.length === 0) return null;

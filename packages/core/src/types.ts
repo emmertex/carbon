@@ -5,8 +5,12 @@
 // distinction between a project and an action is mostly about role in the tree.
 
 // project = container, task = actionable leaf, folder = visual-only grouping of
-// projects in the sidebar (never participates in task nesting/availability).
-export type ItemType = 'project' | 'task' | 'folder';
+// projects in the sidebar (never participates in task nesting/availability),
+// note = a non-actionable item whose content is the `note` field (no checkbox,
+// never in Today/Flagged/Inbox, never exported to CalDAV). A note converts to/from
+// a task by flipping this field; all other columns are preserved but inert while
+// type === 'note'.
+export type ItemType = 'project' | 'task' | 'folder' | 'note';
 
 // active   = available or deferred, not yet done
 // done     = completed

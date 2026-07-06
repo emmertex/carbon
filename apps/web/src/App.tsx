@@ -2,8 +2,10 @@ import { useRef, useEffect } from 'react';
 import { Routes, Route, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { getItem } from '@carbon/core';
-import { useStore } from '@/lib/store';
+import { useStore, getCurrentUserId } from '@/lib/store';
 import { getDb } from '@/lib/db';
+import { mutate } from '@/lib/mutate';
+import { importNoteMd } from '@/lib/notesMd';
 import { zoneForX } from '@/lib/gestures';
 import { useGlobalHotkeys } from '@/hooks/useGlobalHotkeys';
 import { useDesktopQuickAddBridge } from '@/desktop/quickAddBridge';
@@ -112,6 +114,80 @@ export default function App() {
     const routeId = rawRouteId ? decodeURIComponent(rawRouteId) : null;
     if (s.selectedId && s.selectedId !== routeId) s.select(null);
   }, [location.pathname]);
+
+  // Window-level `.md` drag-drop → import as a note. Dropped onto a project/focus
+  // container, the note is created under it; anywhere else it lands top-level. We
+  // skip handling when another drop target already handled the event (or when the
+  // pointer is over an editable control) so in-editor drops never get hijacked.
+  useEffect(() => {
+    function onDragOver(e: DragEvent) {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+    }
+    async function onDrop(e: DragEvent) {
+      if (e.defaultPrevented) return;
+      const target = e.target as Element | null;
+      if (
+        target?.closest(
+          'input, textarea, [contenteditable], .ProseMirror',
+        )
+      ) {
+        return;
+      }
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      // Swallow any file drop so a stray non-markdown file can't fall through to the
+      // browser's default (navigating away and blowing away app state).
+      if (files.length > 0) e.preventDefault();
+      const md = files.filter((f) => /\.(md|markdown)$/i.test(f.name));
+      if (md.length === 0) {
+        if (files.length > 0) {
+          useStore.getState().showToast({
+            message:
+              files.length === 1
+                ? `"${files[0]!.name}" isn't a .md file — nothing imported`
+                : 'None of the dropped files are .md — nothing imported',
+          });
+        }
+        return;
+      }
+      const m = window.location.pathname.match(/^\/(?:project|focus)\/(.+)$/);
+      const parentId = m ? decodeURIComponent(m[1]!) : null;
+      let last: string | null = null;
+      let imported = 0;
+      const failed: string[] = [];
+      for (const file of md) {
+        try {
+          const text = await file.text();
+          const item = mutate((db, dev) =>
+            importNoteMd(db, dev, text, { ownerId: getCurrentUserId(), parentId }),
+          );
+          last = item.id;
+          imported++;
+        } catch (err) {
+          // One bad file (unreadable, or an import op that throws) shouldn't abort the
+          // rest of the drop — collect it and keep going, then report what happened.
+          console.error('[carbon] note import failed', file.name, err);
+          failed.push(file.name);
+        }
+      }
+      if (last) useStore.getState().select(last);
+      if (failed.length) {
+        useStore.getState().showToast({
+          message:
+            imported > 0
+              ? `Imported ${imported} note${imported === 1 ? '' : 's'}; failed: ${failed.join(', ')}`
+              : `Import failed: ${failed.join(', ')}`,
+        });
+      } else if (imported > 1) {
+        useStore.getState().showToast({ message: `Imported ${imported} notes` });
+      }
+    }
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, []);
 
   // Pane gestures (compact only). Zones are decided by the touch-start X: the left
   // edge opens the nav drawer, the right edge runs a configurable action, and the

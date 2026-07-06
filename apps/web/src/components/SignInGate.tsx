@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { getServerConfig, saveServerConfig, defaultServerUrl } from '@/lib/config';
+import {
+  getServerConfig,
+  saveServerConfig,
+  splitServerUrl,
+  workspaceUrl,
+} from '@/lib/config';
+import { isNative } from '@/lib/platform';
 import { useStore } from '@/lib/store';
 import { signIn, syncNow } from '@/lib/sync';
 
@@ -10,9 +16,11 @@ import { signIn, syncNow } from '@/lib/sync';
  * (store.authRequired) or when the user opens it on demand (store.loginOpen — the
  * Settings "Login" button). Two steps:
  *
- *  1. Server URL — pre-filled with a sensible default (the hosted SaaS for native
- *     builds, the serving origin for a tenant subdomain / self-host). Skipped when a
- *     server is already configured, but always reachable via "Change server".
+ *  1. Workspace + server — the user types just their workspace name and the base
+ *     domain (pre-filled with the hosted domain, editable for self-hosters), so they
+ *     never have to hand-assemble a full URL. Leaving the workspace blank targets the
+ *     bare domain (single-tenant self-host). Skipped when a server is already
+ *     configured, but always reachable via "Change server".
  *  2. Username + password — exchanged for a session token; the password is never
  *     persisted.
  *
@@ -21,11 +29,16 @@ import { signIn, syncNow } from '@/lib/sync';
  */
 export function SignInGate() {
   const closeLogin = useStore((s) => s.closeLogin);
-  const initialUrl = getServerConfig().url || defaultServerUrl();
+  // Seed the split fields from an existing config, or (browser only) the serving
+  // origin. Native builds start blank so we never default to app.<domain>.
+  const initial = splitServerUrl(
+    getServerConfig().url || (isNative ? '' : window.location.origin),
+  );
   // Start on credentials when a server is already wired up (the common tenant /
-  // self-host case); otherwise ask for the URL first.
+  // self-host case); otherwise ask for the workspace + domain first.
   const [step, setStep] = useState<'url' | 'creds'>(getServerConfig().url ? 'creds' : 'url');
-  const [url, setUrl] = useState(initialUrl);
+  const [workspace, setWorkspace] = useState(initial.workspace);
+  const [domain, setDomain] = useState(initial.domain);
   const [username, setUsername] = useState(getServerConfig().username);
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -34,11 +47,12 @@ export function SignInGate() {
   const inputCls =
     'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent';
 
+  const resolvedUrl = workspaceUrl(workspace, domain);
+
   function continueToCreds(e: React.FormEvent) {
     e.preventDefault();
-    const trimmed = url.trim().replace(/\/+$/, '');
-    if (!trimmed) return;
-    saveServerConfig({ ...getServerConfig(), url: trimmed });
+    if (!resolvedUrl) return;
+    saveServerConfig({ ...getServerConfig(), url: resolvedUrl });
     setError(null);
     setStep('creds');
   }
@@ -52,7 +66,7 @@ export function SignInGate() {
     const current = getServerConfig();
     saveServerConfig({
       ...current,
-      url: current.url || url.trim().replace(/\/+$/, ''),
+      url: current.url || resolvedUrl,
       username: username.trim(),
     });
     const result = await signIn(password);
@@ -77,27 +91,53 @@ export function SignInGate() {
           <>
             <h1 className="mb-1 text-xl font-semibold">Connect to Carbon</h1>
             <p className="mb-6 text-sm text-text-muted">
-              Enter the address of your Carbon server.
+              Enter your workspace name. Self-hosting? Change the server below.
             </p>
             <form onSubmit={continueToCreds} className="space-y-4">
               <label className="block">
-                <span className="mb-1 block text-sm font-medium">Server URL</span>
+                <span className="mb-1 block text-sm font-medium">Workspace</span>
+                <div className="flex items-stretch overflow-hidden rounded-lg border border-border bg-surface focus-within:border-accent">
+                  <input
+                    className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm outline-none"
+                    value={workspace}
+                    onChange={(e) =>
+                      setWorkspace(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                    }
+                    placeholder="smiths"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoFocus
+                  />
+                  <span className="flex select-none items-center whitespace-nowrap border-l border-border bg-bg px-3 text-sm text-text-muted">
+                    .{domain}
+                  </span>
+                </div>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">Server</span>
                 <input
                   className={inputCls}
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://carbon.example.com"
-                  type="url"
+                  value={domain}
+                  onChange={(e) => setDomain(e.target.value)}
+                  placeholder="carbon.etx.sx"
                   inputMode="url"
                   autoCapitalize="none"
                   autoCorrect="off"
-                  autoFocus
                   required
                 />
+                <span className="mt-1 block text-xs text-text-muted">
+                  {resolvedUrl ? (
+                    <>
+                      Connects to <span className="font-mono">{resolvedUrl}</span>
+                    </>
+                  ) : (
+                    'The domain your Carbon server runs on.'
+                  )}
+                </span>
               </label>
               <button
                 type="submit"
-                disabled={!url.trim()}
+                disabled={!resolvedUrl}
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
                 Continue
@@ -114,7 +154,7 @@ export function SignInGate() {
           <>
             <h1 className="mb-1 text-xl font-semibold">Sign in to Carbon</h1>
             <p className="mb-6 text-sm text-text-muted">
-              {getServerConfig().url || url || 'your Carbon server'}
+              {getServerConfig().url || resolvedUrl || 'your Carbon server'}
             </p>
             <form onSubmit={submit} className="space-y-4">
               <label className="block">

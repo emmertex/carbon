@@ -75,6 +75,9 @@ export function uncompleteTask(item: Item): void {
  * keyboard so they never diverge.
  */
 export function toggleTaskCompletion(item: Item): void {
+  // Notes can't be completed — no Done action exists for them (this also keeps the
+  // tree's Space-to-complete shortcut inert on a focused note).
+  if (item.type === 'note') return;
   if (item.status === 'done') return uncompleteTask(item);
   const { countScope } = useStore.getState().uiPrefs;
   const progress = subtaskProgress(getDb(), item.id, countScope);

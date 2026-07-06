@@ -5,7 +5,7 @@ import { useQuery } from '@/hooks/useQuery';
 import { useStore } from '@/lib/store';
 import { zoneForX } from '@/lib/gestures';
 import {
-  completeTask,
+  toggleTaskCompletion,
   flagTask,
   planTask,
   deleteTaskWithUndo,
@@ -89,7 +89,7 @@ export function SwipeableRow({ item, children }: { item: Item; children: React.R
         showToast({ message: 'Finish sub-tasks first' });
         return; // bounce — spring back, no change
       }
-      completeTask(item);
+      toggleTaskCompletion(item);
       return;
     }
     switch (swipeLeftAction) {

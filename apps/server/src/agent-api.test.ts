@@ -98,6 +98,113 @@ describe('GET /agent/lists & /agent/tags & /agent/items', () => {
     assert.equal(body.tags.find((t) => t.name === 'Work')?.hasGeo, false);
     void plain;
   });
+
+  test('items type filter: "task" (default) excludes notes, "note" returns only notes, "all" returns both', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Mixed', ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'Do the thing', parentId: proj.id, ownerId: uid });
+    createItem(db, deviceId, { type: 'note', title: 'Trip planning', parentId: proj.id, ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+
+    const def = (await appFetch(app, `/agent/items?list=${proj.id}`, { headers: { Authorization: basic } }));
+    const defBody = (await def.json()) as { items: { title: string }[] };
+    assert.deepEqual(defBody.items.map((i) => i.title), ['Do the thing']);
+
+    const notes = await appFetch(app, `/agent/items?list=${proj.id}&type=note`, { headers: { Authorization: basic } });
+    const notesBody = (await notes.json()) as { items: { title: string }[] };
+    assert.deepEqual(notesBody.items.map((i) => i.title), ['Trip planning']);
+
+    const all = await appFetch(app, `/agent/items?list=${proj.id}&type=all`, { headers: { Authorization: basic } });
+    const allBody = (await all.json()) as { items: { title: string }[] };
+    assert.deepEqual(allBody.items.map((i) => i.title).sort(), ['Do the thing', 'Trip planning']);
+  });
+
+  test('items type:"all" (no list) returns tasks and notes but NOT projects/folders', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    // A project + a folder that must never surface as "items"; plus a real task and note.
+    createItem(db, deviceId, { type: 'project', title: 'Some Project', ownerId: uid });
+    createItem(db, deviceId, { type: 'folder', title: 'Some Folder', ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'A task', ownerId: uid });
+    createItem(db, deviceId, { type: 'note', title: 'A note', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/items?type=all&status=all', { headers: { Authorization: basic } });
+    const body = (await res.json()) as { items: { title: string }[] };
+    const titles = body.items.map((i) => i.title).sort();
+    assert.deepEqual(titles, ['A note', 'A task']);
+    assert.ok(!titles.includes('Some Project'), 'project must not leak');
+    assert.ok(!titles.includes('Some Folder'), 'folder must not leak');
+  });
+});
+
+// ─── notes: creation via add_tasks, content search ─────────────────────────
+
+describe('POST /agent/tasks/batch — type:"note"', () => {
+  test('creates a note item (type:"note"), not a task', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { basic } = addUser('a', 'pw');
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(
+      app,
+      '/agent/tasks/batch',
+      json(basic, { tasks: [{ title: 'Trip planning', type: 'note', note: 'Flights, hotel, packing list.' }] }),
+    );
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { created: { id: string; title: string; type: string }[] };
+    assert.equal(body.created[0].type, 'note');
+    const it = getItem(db, body.created[0].id)!;
+    assert.equal(it.type, 'note');
+    assert.equal(it.note, 'Flights, hotel, packing list.');
+  });
+
+  test('titles[] always creates plain tasks (back-compat, no type field involved)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { basic } = addUser('a', 'pw');
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/batch', json(basic, { titles: ['Milk'] }));
+    const body = (await res.json()) as { created: { id: string }[] };
+    assert.equal(getItem(db, body.created[0].id)?.type, 'task');
+  });
+});
+
+describe('GET /agent/notes/search', () => {
+  test('finds a match inside a note body and returns a snippet + item id', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, {
+      type: 'note',
+      title: 'Trip planning',
+      ownerId: uid,
+      note: 'Remember to book the rental car before the long weekend rush.',
+    });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/notes/search?q=rental car', { headers: { Authorization: basic } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { matches: { id: string; title: string; snippet: string }[] };
+    assert.equal(body.matches.length, 1);
+    assert.equal(body.matches[0].id, note.id);
+    assert.equal(body.matches[0].title, 'Trip planning');
+    assert.match(body.matches[0].snippet, /«rental car»/);
+  });
+
+  test('no match returns an empty matches array, not an error', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    createItem(db, deviceId, { type: 'note', title: 'Groceries', ownerId: uid, note: 'milk, eggs' });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/notes/search?q=zzznotfound', { headers: { Authorization: basic } });
+    const body = (await res.json()) as { matches: unknown[] };
+    assert.deepEqual(body.matches, []);
+  });
+
+  test('q required', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { basic } = addUser('a', 'pw');
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/notes/search', { headers: { Authorization: basic } });
+    assert.equal(res.status, 400);
+  });
 });
 
 // ─── resolve ────────────────────────────────────────────────────────────────
@@ -132,6 +239,17 @@ describe('POST /agent/resolve', () => {
     const res = await appFetch(app, '/agent/resolve', json(basic, { kind: 'tag', q: 'coles' }));
     const body = (await res.json()) as { candidates: { name: string }[] };
     assert.equal(body.candidates[0].name, 'Shopping:Coles');
+  });
+
+  test('task kind never returns a project, even one with a matching name', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    createItem(db, deviceId, { type: 'project', title: 'Groceries', ownerId: uid });
+    const task = createItem(db, deviceId, { type: 'task', title: 'Groceries run', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/resolve', json(basic, { kind: 'task', q: 'groceries' }));
+    const body = (await res.json()) as { candidates: { id: string; name: string }[] };
+    assert.ok(body.candidates.every((c) => c.id === task.id));
   });
 });
 
@@ -215,6 +333,41 @@ describe('POST /agent/tasks/tag', () => {
     assert.deepEqual(getItemTags(db, milk.id).map((t) => t.name), ['woolworths']);
   });
 
+  test('a list-scoped bulk tag also tags notes and sub-projects, not just tasks', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Shopping', ownerId: uid });
+    const milk = createItem(db, deviceId, { type: 'task', title: 'Milk', parentId: proj.id, ownerId: uid });
+    const note = createItem(db, deviceId, { type: 'note', title: 'Recipe ideas', parentId: proj.id, ownerId: uid });
+    const sub = createItem(db, deviceId, { type: 'project', title: 'Costco run', parentId: proj.id, ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/tag', json(basic, { list: 'shopping', add: ['woolworths'] }));
+    const body = (await res.json()) as { updated: { id: string }[] };
+    assert.deepEqual(
+      body.updated.map((u) => u.id).sort(),
+      [milk.id, note.id, sub.id].sort(),
+    );
+    for (const id of [milk.id, note.id, sub.id]) {
+      assert.deepEqual(getItemTags(db, id).map((t) => t.name), ['woolworths']);
+    }
+  });
+
+  test('a note can be found and tagged by fuzzy query, not just by raw id', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Trip planning', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(
+      app,
+      '/agent/tasks/tag',
+      json(basic, { queries: ['trip planning'], add: ['travel'] }),
+    );
+    const body = (await res.json()) as { updated: { id: string }[]; unmatched: unknown[] };
+    assert.deepEqual(body.unmatched, []);
+    assert.deepEqual(body.updated.map((u) => u.id), [note.id]);
+    assert.deepEqual(getItemTags(db, note.id).map((t) => t.name), ['travel']);
+  });
+
   test('a read-only target comes back as unmatched/forbidden, not tagged', async () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: aliceId } = addUser('alice', 'pw');
@@ -272,6 +425,59 @@ describe('POST /agent/tasks/update', () => {
     const res = await appFetch(app, '/agent/tasks/update', json(basic, { updates }));
     assert.equal(res.status, 400);
   });
+
+  test('patch {type:"note"} converts a task to a note, preserving its status untouched', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const task = createItem(db, deviceId, { type: 'task', title: 'Buy milk', ownerId: uid, flagged: true });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(
+      app,
+      '/agent/tasks/update',
+      json(basic, { updates: [{ query: 'buy milk', patch: { type: 'note' } }] }),
+    );
+    assert.equal(res.status, 200);
+    const after = getItem(db, task.id)!;
+    assert.equal(after.type, 'note');
+    assert.equal(after.status, 'active'); // untouched — still "active" underneath
+    assert.equal(after.flagged, true); // other fields preserved too, just inert
+  });
+
+  test('patch {type:"task", status:"done"} converts a note back to a task and applies the given status', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Buy milk', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(
+      app,
+      '/agent/tasks/update',
+      json(basic, { updates: [{ query: 'buy milk', patch: { type: 'task', status: 'done' } }] }),
+    );
+    assert.equal(res.status, 200);
+    const after = getItem(db, note.id)!;
+    assert.equal(after.type, 'task');
+    assert.equal(after.status, 'done');
+    assert.ok(after.completed_at);
+  });
+
+  test('note -> task conversion with no status in the patch restores the prior status automatically', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const task = createItem(db, deviceId, { type: 'task', title: 'Renew passport', ownerId: uid });
+    setCompleted(db, deviceId, task.id, true); // status: done
+    updateItem(db, deviceId, task.id, { type: 'note' }); // convert to note; status untouched
+    assert.equal(getItem(db, task.id)?.status, 'done');
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(
+      app,
+      '/agent/tasks/update',
+      json(basic, { include_done: true, updates: [{ query: 'renew passport', patch: { type: 'task' } }] }),
+    );
+    assert.equal(res.status, 200);
+    const after = getItem(db, task.id)!;
+    assert.equal(after.type, 'task');
+    assert.equal(after.status, 'done'); // restored, not reset to active
+  });
 });
 
 // ─── fuzzy mark-off with a miss ───────────────────────────────────────────────
@@ -296,6 +502,52 @@ describe('POST /agent/tasks/complete', () => {
     assert.deepEqual(body.matched.map((m) => m.title), ['Milk']);
     assert.deepEqual(body.unmatched, [{ query: 'bread', reason: 'no_match' }]);
     assert.equal(getItem(db, milk.id)?.status, 'done');
+  });
+
+  test('a note addressed by raw id is not completed (task-only guard) — stays a note, status unchanged', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Idea', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/complete', json(basic, { ids: [note.id] }));
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      matched: unknown[];
+      unmatched: { query: string; reason: string }[];
+    };
+    assert.deepEqual(body.matched, []);
+    assert.deepEqual(body.unmatched, [{ query: note.id, reason: 'no_match' }]);
+    const after = getItem(db, note.id)!;
+    assert.equal(after.type, 'note'); // untouched
+    assert.equal(after.status, 'active'); // never ran through setCompleted
+    assert.equal(after.completed_at, null);
+  });
+
+  test('an unscoped fuzzy query never matches a project, even when it shares a task\'s name', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    // A project and a task both named "Shopping" — the fuzzy pool for an unscoped
+    // (no list/tag) complete must stay task-only, exactly like the pre-notes pool.
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Shopping', ownerId: uid });
+    const task = createItem(db, deviceId, { type: 'task', title: 'Shopping', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/complete', json(basic, { queries: ['shopping'] }));
+    const body = (await res.json()) as { matched: { id: string; title: string }[] };
+    assert.equal(body.matched.length, 1);
+    assert.equal(body.matched[0]!.id, task.id);
+    assert.equal(getItem(db, task.id)?.status, 'done');
+    assert.equal(getItem(db, proj.id)?.status, 'active'); // project never touched
+  });
+
+  test('a fuzzy query never matches a note', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    createItem(db, deviceId, { type: 'note', title: 'Trip planning', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/complete', json(basic, { queries: ['trip planning'] }));
+    const body = (await res.json()) as { matched: unknown[]; unmatched: { reason: string }[] };
+    assert.deepEqual(body.matched, []);
+    assert.equal(body.unmatched[0]!.reason, 'no_match');
   });
 
   test('a bot not assigned to a task gets it back as forbidden, not a 403', async () => {

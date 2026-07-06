@@ -52,7 +52,10 @@ function firstActiveChildId(db: Db, parentId: string, cache: Map<string, boolean
   }
   let first = memo.get(parentId);
   if (first === undefined) {
-    first = getChildren(db, parentId).find((c) => c.status === 'active')?.id ?? null;
+    // Sequential gating should treat any non-note active child as the next gate:
+    // tasks and sub-projects participate; notes stay inert.
+    first =
+      getChildren(db, parentId).find((c) => c.type !== 'note' && c.status === 'active')?.id ?? null;
     memo.set(parentId, first);
   }
   return first;
@@ -61,6 +64,9 @@ function firstActiveChildId(db: Db, parentId: string, cache: Map<string, boolean
 function compute(db: Db, itemId: string, cache: Map<string, boolean>): boolean {
   const item = getItem(db, itemId);
   if (!item || item.status !== 'active') return false;
+  // Notes are inert: they never block and are never blocked (nor do they gate a
+  // sequential parent — see firstActiveChildId).
+  if (item.type === 'note') return false;
 
   if (item.parent_id) {
     const parent = getItem(db, item.parent_id);
@@ -97,6 +103,10 @@ export function isDeferred(
   now: number = Date.now(),
   heldTags?: Set<string>,
 ): boolean {
+  // Notes are inert (see isBlocked above) — deferral has no user-visible effect on
+  // them since they're already excluded from availableLeaves/perspectives, but a
+  // note should never report as "deferred" to any future caller either.
+  if (item.type === 'note') return false;
   if (item.defer_date && new Date(item.defer_date).getTime() > now) return true;
   const held = heldTags ?? expandTagIds(db, [...onHoldTagIds(db)]);
   if (held.size === 0) return false;

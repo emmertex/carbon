@@ -13,12 +13,17 @@ type Status = { kind: 'pending' | 'reply' | 'error'; text: string } | null;
 export function QuickAdd({
   placeholder = 'Add a task…  (#tag @user !priority)',
   onCreate,
+  allowNote = false,
 }: {
   placeholder?: string;
-  onCreate: (raw: string) => void;
+  onCreate: (raw: string, type: 'task' | 'note') => void;
+  /** Show a Task/Note toggle so the box can create a note instead (default off). */
+  allowNote?: boolean;
 }) {
   const [value, setValue] = useState('');
   const [status, setStatus] = useState<Status>(null);
+  // Creation kind — defaults to task; only surfaced when `allowNote`.
+  const [kind, setKind] = useState<'task' | 'note'>('task');
   const inputRef = useRef<HTMLInputElement>(null);
   const suggest = useTokenSuggest({ value, setValue, inputRef });
 
@@ -54,7 +59,7 @@ export function QuickAdd({
       void runAsCommand(raw);
     } else {
       setStatus(null);
-      onCreate(raw);
+      onCreate(raw, allowNote ? kind : 'task');
     }
     setValue('');
     suggest.reset();
@@ -69,6 +74,27 @@ export function QuickAdd({
 
   return (
     <div className="relative">
+      {allowNote && (
+        <div className="mb-1.5 inline-flex overflow-hidden rounded-lg border border-border text-xs">
+          {(['task', 'note'] as const).map((k, i) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              aria-pressed={kind === k}
+              className={cn(
+                'px-2.5 py-0.5 font-medium capitalize transition-colors',
+                i > 0 && 'border-l border-border',
+                kind === k
+                  ? 'bg-accent text-accent-fg'
+                  : 'text-text-muted hover:bg-surface-2 hover:text-text',
+              )}
+            >
+              {k}
+            </button>
+          ))}
+        </div>
+      )}
       <form
         onSubmit={submit}
         className={cn(
@@ -96,7 +122,13 @@ export function QuickAdd({
           onKeyDown={onKeyDown}
           onKeyUp={(e) => suggest.syncCaret(e.currentTarget)}
           onClick={(e) => suggest.syncCaret(e.currentTarget)}
-          placeholder={commandMode ? 'Ask the assistant…' : placeholder}
+          placeholder={
+            commandMode
+              ? 'Ask the assistant…'
+              : allowNote && kind === 'note'
+                ? 'Add a note…'
+                : placeholder
+          }
           className="min-w-0 flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-faint"
         />
 

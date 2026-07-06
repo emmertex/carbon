@@ -324,7 +324,9 @@ export function allItems(db: Db): Item[] {
 export interface ItemQuery {
   /** type = 'task' (exclude projects/folders). */
   tasksOnly?: boolean;
-  /** status != 'done' (drop completed). */
+  /** status != 'done' (drop completed) — exempts notes, whose status is
+   *  preserved-but-inert (see createItem/updateItem), so a note converted from a
+   *  done task doesn't silently vanish from an active-only view. */
   activeOnly?: boolean;
   /** flagged = 1. */
   flaggedOnly?: boolean;
@@ -337,7 +339,7 @@ export interface ItemQuery {
 export function queryItems(db: Db, q: ItemQuery): Item[] {
   const where = ['deleted = 0'];
   if (q.tasksOnly) where.push("type = 'task'");
-  if (q.activeOnly) where.push("status != 'done'");
+  if (q.activeOnly) where.push("(status != 'done' OR type = 'note')");
   if (q.flaggedOnly) where.push('flagged = 1');
   if (q.rootOnly) where.push('parent_id IS NULL');
   if (q.dueOrFlagged) where.push('(flagged = 1 OR due_date IS NOT NULL)');
@@ -427,12 +429,14 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
   };
   recordOp(db, deviceId, id, createPatch(item));
   // A freshly-added (incomplete) sub-task re-opens a parent that was marked done.
-  reopenParentIfNeeded(db, deviceId, item.parent_id);
+  // A note child is inert (not actionable), so it never reopens a completed parent.
+  if (item.type !== 'note') reopenParentIfNeeded(db, deviceId, item.parent_id);
   return item;
 }
 
 /** Adding/moving an incomplete task under a completed parent re-opens that parent
- *  (so a "done" task can't hide unfinished children). */
+ *  (so a "done" task can't hide unfinished children). Callers must skip this for
+ *  inert (note) children, which never affect a parent's completion. */
 function reopenParentIfNeeded(db: Db, deviceId: string, parentId: string | null): void {
   if (!parentId) return;
   const parent = getItem(db, parentId);
@@ -448,8 +452,19 @@ export function updateItem(
   id: string,
   patch: ItemPatch,
 ): Item | undefined {
+  const before = getItem(db, id);
   recordOp(db, deviceId, id, patch);
-  return getItem(db, id);
+  const updated = getItem(db, id);
+  // Converting a note back into an active task must preserve the same invariant as
+  // create/move: a done parent can't hide unfinished task children.
+  if (
+    before?.type === 'note' &&
+    patch.type === 'task' &&
+    updated?.status === 'active'
+  ) {
+    reopenParentIfNeeded(db, deviceId, updated.parent_id);
+  }
+  return updated;
 }
 
 /**
@@ -465,6 +480,12 @@ export function setCompleted(
 ): { item: Item | undefined; spawned: Item | undefined } {
   const current = getItem(db, id);
   if (!current) return { item: undefined, spawned: undefined };
+  // A note has no completion state — its status is preserved-but-inert (see
+  // createItem/moveItem/setCompletedCascade). Guard here too, at the function level,
+  // so any caller (agent ops, sync replay, a future UI path) that reaches setCompleted
+  // directly on a note can't flip its status or spawn a recurring note successor; the
+  // cascade-level guard alone left this reachable outside the cascade.
+  if (current.type === 'note') return { item: current, spawned: undefined };
 
   let spawned: Item | undefined;
   if (done && current.recurrence) {
@@ -783,7 +804,9 @@ export function moveItem(
   patch.sort_order = sortOrder ?? nextSortOrder(db, parentId);
   recordOp(db, deviceId, id, patch);
   const moved = getItem(db, id);
-  if (moved && moved.status !== 'done') reopenParentIfNeeded(db, deviceId, parentId);
+  // An inert note child never reopens a completed parent; only an incomplete task does.
+  if (moved && moved.type !== 'note' && moved.status !== 'done')
+    reopenParentIfNeeded(db, deviceId, parentId);
 }
 
 const orderedSiblings = (db: Db, parentId: string | null): Item[] =>

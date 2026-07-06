@@ -11,6 +11,8 @@ import {
   Lock,
   Bell,
   Target,
+  FileText,
+  Download,
 } from "lucide-react";
 import {
   getItem,
@@ -69,7 +71,7 @@ import { Attachments } from "./Attachments";
 import { Section } from "./Section";
 import { useFeature } from "@/hooks/useFeature";
 import { TagMark } from "./TagMark";
-import { Markdown } from "./Markdown";
+import { NoteEditor } from "./NoteEditor";
 import { itemTagsResolved } from "@/lib/enrich";
 import { abbreviateTagPath } from "@/lib/tagLabel";
 import { holdCompleted, releaseCompleted } from "@/lib/completion";
@@ -77,6 +79,8 @@ import { useQuery } from "@/hooks/useQuery";
 import { useTicker } from "@/hooks/useTicker";
 import { useFocusItem } from "@/hooks/useFocusItem";
 import { mutate } from "@/lib/mutate";
+import { getDb } from "@/lib/db";
+import { exportSingleNote, collectAssetHashes } from "@/lib/notesZip";
 import { useStore } from "@/lib/store";
 import {
   toDateInput,
@@ -363,34 +367,29 @@ export function TaskDetail({ id }: { id: string }) {
   useTicker(1000, !!data?.trackingHere);
 
   const [title, setTitle] = useState("");
-  const [note, setNote] = useState("");
-  const [editingNote, setEditingNote] = useState(false);
-  const noteRef = useRef<HTMLTextAreaElement>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const seededId = useRef<string | null>(null);
   const [tagInput, setTagInput] = useState("");
+  // The Notes field's own editing/dirty/conflict state lives inside NoteEditor —
+  // it needs a snapshot-at-open-time to detect remote changes, which a simple
+  // reseed-on-prop-change effect here can't express. `data.item.note` is passed
+  // straight through as both the display value and the live "remote" value; since
+  // useQuery recomputes on every dbRevision bump (local mutation or sync pull —
+  // see hooks/useQuery.ts and lib/sync.ts), NoteEditor sees remote note changes
+  // reactively without any extra subscription.
+  const note = data?.item.note ?? "";
 
   useEffect(() => {
     if (!data?.item) return;
-    // Re-seed the editable drafts from the (possibly newly-synced) item — but never
-    // overwrite a field the user is actively editing, or an inbound remote edit would
-    // wipe their unsaved keystrokes (W7). Switching tasks (id change) always reseeds.
+    // Re-seed the title draft from the (possibly newly-synced) item — but never
+    // overwrite a field the user is actively editing, or an inbound remote edit
+    // would wipe their unsaved keystrokes (W7). Switching tasks (id change) always
+    // reseeds.
     const switching = seededId.current !== id;
     seededId.current = id;
     if (switching || document.activeElement !== titleRef.current)
       setTitle(data.item.title);
-    if (
-      switching ||
-      (!editingNote && document.activeElement !== noteRef.current)
-    )
-      setNote(data.item.note ?? "");
-  }, [id, data?.item.title, data?.item.note, editingNote]);
-
-  // Leave note-edit mode when switching tasks; focus the textarea when entering it.
-  useEffect(() => setEditingNote(false), [id]);
-  useEffect(() => {
-    if (editingNote) noteRef.current?.focus();
-  }, [editingNote]);
+  }, [id, data?.item.title]);
 
   if (!data) {
     return (
@@ -425,6 +424,9 @@ export function TaskDetail({ id }: { id: string }) {
     projectEstimate,
   } = data;
   const isProject = item.type === "project";
+  // Simplified panel for notes (plan: title + Note pill + full-height body editor +
+  // expand button; task-only sections hidden — fields stay in the DB, just unshown).
+  const isNote = item.type === "note";
   const rosterById = new Map(roster.map((u) => [u.id, u]));
   // "From @host" provenance: the owner is a federation shadow (remote) user.
   const ownerUser = item.owner_id ? rosterById.get(item.owner_id) : undefined;
@@ -484,6 +486,23 @@ export function TaskDetail({ id }: { id: string }) {
   const patch = (p: Parameters<typeof updateItem>[3]) =>
     mutate((db, dev) => updateItem(db, dev, id, p));
 
+  // Task ↔ note conversion. Flipping to a note preserves every other field (dates,
+  // flags, priority, status, deps) but they go inert; flipping back restores the
+  // prior status automatically since it was never cleared. Selecting a status pill
+  // on a note both converts it to a task and applies that status in one op.
+  function setType(next: "task" | "note") {
+    if (item.type === next) return;
+    patch({ type: next });
+  }
+  function selectStatusPill(next: Item["status"]) {
+    if (item.type === "note") {
+      // Convert back to a task and apply the chosen status in a single op.
+      patch({ type: "task", status: next });
+    } else {
+      setStatus(next);
+    }
+  }
+
   // Dependency edges. "Blocked by X" = edge X -> this; "Blocks Y" = edge this -> Y.
   // Re-check the cycle guard at write time in case the graph changed since render.
   function addBlockedBy(predId: string) {
@@ -508,8 +527,8 @@ export function TaskDetail({ id }: { id: string }) {
   function commitTitle() {
     if (title.trim() !== item.title) patch({ title: title.trim() });
   }
-  function commitNote() {
-    const v = note.trim() ? note : null;
+  function commitNote(next: string) {
+    const v = next.trim() ? next : null;
     if (v !== item.note) patch({ note: v });
   }
 
@@ -619,7 +638,7 @@ export function TaskDetail({ id }: { id: string }) {
           <X size={18} />
         </button>
         <span className="text-xs uppercase tracking-wide text-text-faint">
-          {item.type === "project" ? "Project" : "Task"}
+          {item.type === "project" ? "Project" : item.type === "note" ? "Note" : "Task"}
         </span>
         <div className="flex-1" />
         {item.type !== "project" && (
@@ -670,6 +689,20 @@ export function TaskDetail({ id }: { id: string }) {
         >
           <Flag size={17} fill={item.flagged ? "currentColor" : "none"} />
         </button>
+        {item.type === "note" && (
+          <button
+            onClick={() => void exportSingleNote(getDb(), id)}
+            className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+            aria-label="Export note"
+            title={
+              collectAssetHashes(item.note).length
+                ? "Export as .zip (Markdown + images)"
+                : "Export as Markdown (.md)"
+            }
+          >
+            <Download size={17} />
+          </button>
+        )}
         <button
           onClick={remove}
           className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-danger"
@@ -686,18 +719,28 @@ export function TaskDetail({ id }: { id: string }) {
 
         {/* Always-visible essentials */}
         <div className="flex items-start gap-2.5">
-          <button
-            onClick={() => setStatus(done ? "active" : "done")}
-            className={cn(
-              "mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
-              done
-                ? "border-accent bg-accent text-accent-fg"
-                : "border-border-strong text-transparent hover:border-accent",
-            )}
-            aria-label={done ? "Mark incomplete" : "Mark complete"}
-          >
-            <Check size={13} strokeWidth={3} />
-          </button>
+          {item.type === "note" ? (
+            // A note has no completion — a static glyph replaces the checkbox.
+            <span
+              className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center text-text-faint"
+              aria-label="Note"
+            >
+              <FileText size={15} />
+            </span>
+          ) : (
+            <button
+              onClick={() => setStatus(done ? "active" : "done")}
+              className={cn(
+                "mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                done
+                  ? "border-accent bg-accent text-accent-fg"
+                  : "border-border-strong text-transparent hover:border-accent",
+              )}
+              aria-label={done ? "Mark incomplete" : "Mark complete"}
+            >
+              <Check size={13} strokeWidth={3} />
+            </button>
+          )}
           <div className="flex-1">
             <textarea
               ref={titleRef}
@@ -718,9 +761,9 @@ export function TaskDetail({ id }: { id: string }) {
                 done && "text-text-faint line-through",
               )}
             />
-            {/* Lifecycle status — three-state segmented pill directly under the
-                title. The complete-checkbox (left) toggles active↔done; this also
-                exposes "dropped". */}
+            {/* Lifecycle status — a segmented pill directly under the title. Active/
+                Done/Dropped always render (including projects) so every lifecycle
+                state remains reachable; the "Note" conversion pill is task-only. */}
             <div className="mt-1 inline-flex overflow-hidden rounded-full border border-border text-xs">
               {(
                 [
@@ -728,24 +771,47 @@ export function TaskDetail({ id }: { id: string }) {
                   ["done", "Done", "bg-success text-white"],
                   ["dropped", "Dropped", "bg-surface-2 text-text-muted line-through"],
                 ] as [Item["status"], string, string][]
-              ).map(([s, label, selCls], i) => (
+              ).map(([s, label, selCls], i) => {
+                const active = item.type !== "note" && item.status === s;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => selectStatusPill(s)}
+                    aria-pressed={active}
+                    className={cn(
+                      "px-3 py-1 font-medium transition-colors",
+                      i > 0 && "border-l border-border",
+                      active
+                        ? selCls
+                        : "text-text-muted hover:bg-surface-2 hover:text-text",
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+              {item.type !== "project" && (
                 <button
-                  key={s}
                   type="button"
-                  onClick={() => setStatus(s)}
-                  aria-pressed={item.status === s}
+                  onClick={() => setType("note")}
+                  aria-pressed={item.type === "note"}
                   className={cn(
-                    "px-3 py-1 font-medium transition-colors",
-                    i > 0 && "border-l border-border",
-                    item.status === s
-                      ? selCls
+                    "border-l border-border px-3 py-1 font-medium transition-colors",
+                    item.type === "note"
+                      ? "bg-accent text-accent-fg"
                       : "text-text-muted hover:bg-surface-2 hover:text-text",
                   )}
                 >
-                  {label}
+                  Note
                 </button>
-              ))}
+              )}
             </div>
+            {item.type === "note" && (
+              <p className="mt-1 text-xs text-text-faint">
+                Converting back to a task restores its dates, flags and status.
+              </p>
+            )}
             {ownerRemoteServer && (
               <div className="mt-1.5">
                 <RemoteOwnerBadge homeServer={ownerRemoteServer} />
@@ -754,32 +820,24 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
         </div>
 
-        <div>
+        <div className={cn(isNote && "flex h-full flex-col")}>
           <Label>Notes</Label>
-          {editingNote || !note.trim() ? (
-            <textarea
-              ref={noteRef}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              onBlur={() => {
-                commitNote();
-                setEditingNote(false);
-              }}
-              rows={4}
-              placeholder="Add notes…  (Markdown supported)"
-              className={cn(inputCls, "resize-y")}
-            />
-          ) : (
-            <div
-              onClick={() => setEditingNote(true)}
-              title="Click to edit"
-              className="cursor-text rounded-lg border border-transparent px-3 py-2 hover:border-border"
-            >
-              <Markdown>{note}</Markdown>
-            </div>
-          )}
+          <NoteEditor
+            key={item.id}
+            value={note}
+            remoteNote={note}
+            onSave={commitNote}
+            placeholder="Add notes…  (Markdown supported)"
+            className={cn(isNote && "flex flex-1 flex-col")}
+            minHeightClassName={isNote ? "min-h-[60vh]" : undefined}
+          />
         </div>
 
+        {/* Task-scheduling sections (priority, order mode, scheduling/recurrence,
+            dependencies) are hidden for notes — the fields stay in the DB and
+            reappear on conversion back to a task. Sharing, Attachments, Comments,
+            Time-tracking, Tags, Project and Location remain visible on notes (the
+            plan keeps sharing/time-tracking "unchanged" for notes). */}
         {/* Projects: review cadence (defaults to 30 days) and folder colour, kept
             front-and-centre directly under the notes. */}
         {isProject && (
@@ -822,20 +880,23 @@ export function TaskDetail({ id }: { id: string }) {
 
         {!isProject && (
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label>Priority</Label>
-              <select
-                className={inputCls}
-                value={item.priority}
-                onChange={(e) => patch({ priority: Number(e.target.value) })}
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p.value} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Priority is task-scheduling — hidden on notes (value kept in the DB). */}
+            {!isNote && (
+              <div>
+                <Label>Priority</Label>
+                <select
+                  className={inputCls}
+                  value={item.priority}
+                  onChange={(e) => patch({ priority: Number(e.target.value) })}
+                >
+                  {PRIORITIES.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <Label>Project</Label>
               <select
@@ -902,8 +963,9 @@ export function TaskDetail({ id }: { id: string }) {
         )}
 
         {/* Order mode — how this container sequences its children. Only meaningful
-            once there are children (projects always have the role). */}
-        {(isProject || hasChildren) && (
+            once there are children (projects always have the role). Task-scheduling
+            behaviour, so hidden on notes. */}
+        {!isNote && (isProject || hasChildren) && (
           <div>
             <Label>Order</Label>
             <div className="flex overflow-hidden rounded-lg border border-border text-xs">
@@ -938,7 +1000,9 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
         )}
 
-        {/* Scheduling */}
+        {/* Scheduling (dates, defer, reminder, recurrence) — task-only; hidden on
+            notes. The values stay in the DB and reappear on conversion to a task. */}
+        {!isNote && (
         <Section title="Scheduling" summary={scheduleSummary} defaultOpen>
           <div className="space-y-3">
             <div>
@@ -1214,20 +1278,24 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
           )}
         </Section>
+        )}
 
         {/* Location — its own section; expanded by default only when the Location
-            alerts (Nearby) feature is on. */}
-        <Section title="Location" summary={locationSummary} defaultOpen={locationOn}>
-          <GeoEditor
-            value={item.geo}
-            resetKey={id}
-            onChange={(geo) => patch({ geo })}
-          />
-        </Section>
+            alerts (Nearby) feature is on. Geolocation reminders don't apply to notes. */}
+        {!isNote && (
+          <Section title="Location" summary={locationSummary} defaultOpen={locationOn}>
+            <GeoEditor
+              value={item.geo}
+              resetKey={id}
+              onChange={(geo) => patch({ geo })}
+            />
+          </Section>
+        )}
 
         {/* Dependencies — explicit predecessor/successor links (Gantt-style).
-            Expanded by default only when GTD Tools are enabled. */}
-        {!isProject && (
+            Expanded by default only when GTD Tools are enabled. Task-scheduling,
+            so hidden on notes. */}
+        {!isProject && !isNote && (
           <Section
             title="Dependencies"
             defaultOpen={gtdTools}

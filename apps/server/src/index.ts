@@ -10,6 +10,7 @@ import {
   ensureDeviceId,
   ingestOps,
   ingestRecordOps,
+  compactNoteOps,
   visibleItemIds,
   subtreeIds,
   hasWriteAccess,
@@ -542,13 +543,32 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     // Deliberately skipped in open mode: no-auth single-user has exactly one trusted
     // caller, so author_id/user_id/ownership spoofing isn't a threat to guard against.
     if (!open && Array.isArray(body.ops)) body.ops = sanitizeOps(db, userId, body.ops);
-    if (Array.isArray(body.ops) && body.ops.length) ingestOps(db, body.ops, true);
+    const pushedOps = Array.isArray(body.ops) ? body.ops : [];
+    if (pushedOps.length) ingestOps(db, pushedOps, true);
     if (!open && Array.isArray(body.recordOps))
       body.recordOps = sanitizeRecordOps(db, userId, body.recordOps);
     if (Array.isArray(body.recordOps) && body.recordOps.length) {
       const fresh = ingestRecordOps(db, body.recordOps, true);
       triggerAgents(ctx.id, db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
     }
+
+    // Prune superseded note-only ops (see compactNoteOps' safety argument). Runs
+    // BEFORE building the outgoing scan so a just-pruned loser is never sent, and
+    // AFTER ingest so a client's freshly-pushed note edit is considered. Server ops
+    // are all durable at the hub, so no syncedOnly guard — every eligible loser goes.
+    // Deletions don't renumber surviving rowids, so this client's (and every peer's,
+    // federation included) `since`/push cursor stays monotonic and still returns the
+    // retained winner. Gated on the push actually carrying a `note` field: new
+    // supersession can only arise from a freshly-ingested note op, so idle sync polls
+    // (the common case) skip the full op-log scan entirely.
+    const pushedNoteItemIds = [
+      ...new Set(
+        pushedOps
+          .filter((o) => o.fields && 'note' in o.fields)
+          .map((o) => o.item_id),
+      ),
+    ];
+    if (pushedNoteItemIds.length) compactNoteOps(db, { itemIds: pushedNoteItemIds });
 
     const visible = open ? null : visibleItemIds(db, userId);
 
@@ -679,7 +699,6 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       'SELECT item_id, parent_type, parent_id FROM attachments WHERE hash = ? AND deleted = 0',
       [hash],
     );
-    if (rows.length === 0) return false;
     const visible = visibleItemIds(db, userId);
     for (const r of rows) {
       // item_id is denormalized (migration 4); resolve it for older rows.
@@ -691,7 +710,16 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
               ?.item_id);
       if (itemId && visible.has(itemId)) return true;
     }
-    return false;
+    // Images embedded in a note body reference their blob only via Markdown
+    // (`![alt](/api/blobs/{hash})`) — the Notes flow creates no attachments row.
+    // The body itself syncs under item visibility, so gate the blob the same way:
+    // readable when any live, visible item's note references it. LIKE is
+    // case-insensitive for ASCII, matching notesZip's case-insensitive BLOB_REF.
+    const noteRefs = db.all<{ id: string }>(
+      "SELECT id FROM items WHERE deleted = 0 AND note LIKE '%/api/blobs/' || ? || '%'",
+      [hash],
+    );
+    return noteRefs.some((r) => visible.has(r.id));
   }
 
   api.get('/blobs/:hash', async (c) => {

@@ -16,6 +16,7 @@ const COND_OPTIONS: { kind: Condition['kind']; label: string }[] = [
   { kind: 'onHold', label: 'On hold' },
   { kind: 'hasTag', label: 'Has tag' },
   { kind: 'inProject', label: 'In project' },
+  { kind: 'isNote', label: 'Is a note' },
   { kind: 'titleContains', label: 'Title contains' },
   { kind: 'noteContains', label: 'Note contains' },
 ];

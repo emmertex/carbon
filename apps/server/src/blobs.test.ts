@@ -32,13 +32,18 @@ function buildBlobsApp(db: TestDb, deviceId: string, blobsDir: string) {
       'SELECT item_id, parent_type, parent_id FROM attachments WHERE hash = ? AND deleted = 0',
       [hash],
     );
-    if (rows.length === 0) return false;
     const visible = visibleItemIds(db, userId);
     for (const r of rows) {
       const itemId = r.item_id ?? (r.parent_type === 'item' ? r.parent_id : null);
       if (itemId && visible.has(itemId)) return true;
     }
-    return false;
+    // Mirrors production: note-embedded images have no attachments row — grant
+    // read when a live, visible item's note body references the hash.
+    const noteRefs = db.all<{ id: string }>(
+      "SELECT id FROM items WHERE deleted = 0 AND note LIKE '%/api/blobs/' || ? || '%'",
+      [hash],
+    );
+    return noteRefs.some((r) => visible.has(r.id));
   }
 
   app.get('/blobs/:hash', (c) => {
@@ -212,6 +217,56 @@ describe('GET /blobs/:hash — download', () => {
     });
 
     // Bob tries to download without any attachment record
+    const res = await appFetch(app, `/blobs/${hash}`, { headers: { Authorization: bobBasic } });
+    assert.equal(res.status, 404);
+  });
+
+  test('owner can download a blob referenced only by their note body (no attachment row)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId, basic } = addUser('alice', 'pw');
+    const app = buildBlobsApp(db, deviceId, blobsDir);
+    const { hash, data } = makeBlob(`note-embedded image ${Date.now()}`);
+
+    await appFetch(app, `/blobs/${hash}`, {
+      method: 'POST',
+      headers: { Authorization: basic },
+      body: data,
+    });
+
+    // The Notes flow inserts `![alt](/api/blobs/{hash})` into the body and never
+    // creates an attachments row — the note reference alone must grant the read.
+    createItem(db, deviceId, {
+      type: 'note',
+      title: 'With inline image',
+      ownerId: userId,
+      note: `some text\n\n![screenshot](/api/blobs/${hash})\n`,
+    });
+
+    const res = await appFetch(app, `/blobs/${hash}`, { headers: { Authorization: basic } });
+    assert.equal(res.status, 200);
+    const downloaded = Buffer.from(await res.arrayBuffer());
+    assert.deepEqual(downloaded, data, 'downloaded content matches uploaded');
+  });
+
+  test("returns 404 when only another user's note references the blob", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: aliceId, basic: aliceBasic } = addUser('alice', 'pw');
+    const { basic: bobBasic } = addUser('bob', 'pw');
+    const app = buildBlobsApp(db, deviceId, blobsDir);
+    const { hash, data } = makeBlob(`private note image ${Date.now()}`);
+
+    await appFetch(app, `/blobs/${hash}`, {
+      method: 'POST',
+      headers: { Authorization: aliceBasic },
+      body: data,
+    });
+    createItem(db, deviceId, {
+      type: 'note',
+      title: 'Alice private note',
+      ownerId: aliceId,
+      note: `![secret](/api/blobs/${hash})`,
+    });
+
     const res = await appFetch(app, `/blobs/${hash}`, { headers: { Authorization: bobBasic } });
     assert.equal(res.status, 404);
   });

@@ -111,6 +111,30 @@ describe('runAgentCommand tool loop', () => {
     assert.ok(getProjects(db).some((p) => p.title === 'groceries'));
   });
 
+  test('tolerant fallback: a JSON search_notes action in plain text still executes', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    createItem(db, deviceId, { type: 'note', title: 'Trip', note: 'pack sunscreen', ownerId: uid });
+    const agent = makeAgent(db);
+    stubLLM([doneResp('{"op":"search_notes","q":"sunscreen"}')]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'do I have a note about sunscreen?', true);
+    assert.match(r.reply, /sunscreen/);
+  });
+
+  test('tolerant fallback: a JSON tag_items action in plain text still executes', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const task = createItem(db, deviceId, { type: 'task', title: 'Milk', ownerId: uid });
+    const agent = makeAgent(db);
+    stubLLM([doneResp('{"op":"tag_items","queries":["milk"],"add":["urgent"]}')]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'tag milk urgent', true);
+    assert.match(r.reply, /urgent/i);
+    const { getItemTags } = await import('@carbon/core');
+    assert.deepEqual(getItemTags(db, task.id).map((t) => t.name), ['urgent']);
+  });
+
   test('remind-at-PLACE: geocodes the nearest place to the user and pins the tag', async () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
@@ -226,6 +250,67 @@ describe('runAgentCommand — scheduling, sharing, assigning, timers, completed 
     assert.equal(task.reminder_at, '2026-07-07T16:00:00.000Z');
     const rule = parseRecurrence(task.recurrence);
     assert.deepEqual(rule, { type: 'weekly', interval: 1, daysOfWeek: [2] });
+  });
+
+  test('scheduling: due_date on the wrong weekday is snapped to the recurrence day', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { parseRecurrence, queryItems } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    // Real bug: asked on Monday 2026-07-06 (Melbourne) for "every Tuesday 4pm", the model
+    // miscounted the weekday and returned Saturday 2026-07-11 16:00 local (06:00Z), while
+    // still emitting the correct daysOfWeek [2].
+    stubLLM([
+      toolResp('add_tasks', {
+        tasks: [
+          {
+            title: 'Call Ben',
+            due_date: '2026-07-11T06:00:00.000Z',
+            reminder_at: '2026-07-11T05:00:00.000Z',
+            recurrence: { type: 'weekly', interval: 1, daysOfWeek: [2] },
+          },
+        ],
+      }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'call ben every tuesday at 4pm', true, {
+      now: new Date('2026-07-06T06:05:00.000Z'), // Monday 16:05 in Melbourne
+      timezone: 'Australia/Melbourne',
+    });
+    assert.match(r.reply, /Added.*Call Ben/);
+    const task = queryItems(db, { tasksOnly: true }).find((t) => t.title === 'Call Ben')!;
+    // Tuesday 2026-07-07 16:00 Melbourne = 06:00Z; the reminder keeps its 1h-before offset.
+    assert.equal(task.due_date, '2026-07-07T06:00:00.000Z');
+    assert.equal(task.reminder_at, '2026-07-07T05:00:00.000Z');
+    assert.deepEqual(parseRecurrence(task.recurrence), { type: 'weekly', interval: 1, daysOfWeek: [2] });
+  });
+
+  test('scheduling: due_date already on a recurrence day is left alone', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { queryItems } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    stubLLM([
+      toolResp('add_tasks', {
+        tasks: [
+          {
+            title: 'Call Ben',
+            due_date: '2026-07-14T06:00:00.000Z', // Tuesday 16:00 Melbourne, a week out
+            recurrence: { type: 'weekly', interval: 1, daysOfWeek: [2] },
+          },
+        ],
+      }),
+      doneResp(),
+    ]);
+
+    await runAgentCommand(deps(db, deviceId), agent, uid, 'call ben every tuesday at 4pm starting next week', true, {
+      now: new Date('2026-07-06T06:05:00.000Z'),
+      timezone: 'Australia/Melbourne',
+    });
+    const task = queryItems(db, { tasksOnly: true }).find((t) => t.title === 'Call Ben')!;
+    // A matching weekday must not be "corrected" — the model may deliberately start later.
+    assert.equal(task.due_date, '2026-07-14T06:00:00.000Z');
   });
 
   test('update: a status->done patch still spawns the next recurrence (routed through setCompleted)', async () => {
@@ -359,6 +444,143 @@ describe('runAgentCommand — scheduling, sharing, assigning, timers, completed 
   });
 });
 
+describe('runAgentCommand — notes (type support, disambiguation, content search)', () => {
+  test('add_tasks with type:"note" creates a note item, not a task', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    stubLLM([
+      toolResp('add_tasks', { tasks: [{ title: 'Trip planning', type: 'note', note: 'Flights, hotel.' }] }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'write a note about trip planning: flights, hotel', true);
+    assert.match(r.reply, /Added note.*Trip planning/);
+    const { queryItems } = await import('@carbon/core');
+    const note = queryItems(db, {}).find((i) => i.title === 'Trip planning')!;
+    assert.equal(note.type, 'note');
+    assert.equal(note.note, 'Flights, hotel.');
+  });
+
+  test('update: adding a note field to an existing task ("add a note to X") does not change its type', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Fix the fence', ownerId: uid });
+    stubLLM([
+      toolResp('update', { updates: [{ query: 'fix the fence', patch: { note: 'Need 4 posts and concrete.' } }] }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add a note to fix the fence: need 4 posts and concrete', true);
+    assert.match(r.reply, /Updated: Fix the fence/);
+    const after = getItem(db, task.id)!;
+    assert.equal(after.type, 'task');
+    assert.equal(after.note, 'Need 4 posts and concrete.');
+  });
+
+  test('update: converting a task to a note preserves status untouched; converting back restores it', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { setCompleted } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Old reminder', ownerId: uid });
+    setCompleted(db, deviceId, task.id, true); // status: done, before it ever becomes a note
+
+    stubLLM([toolResp('update', { include_done: true, updates: [{ query: 'old reminder', patch: { type: 'note' } }] }), doneResp()]);
+    await runAgentCommand(deps(db, deviceId), agent, uid, 'turn old reminder into a note', true);
+    let after = getItem(db, task.id)!;
+    assert.equal(after.type, 'note');
+    assert.equal(after.status, 'done'); // preserved, just inert
+
+    stubLLM([toolResp('update', { include_done: true, updates: [{ query: 'old reminder', patch: { type: 'task' } }] }), doneResp()]);
+    const r2 = await runAgentCommand(deps(db, deviceId), agent, uid, 'turn old reminder back into a task', true);
+    assert.match(r2.reply, /Updated: Old reminder/);
+    after = getItem(db, task.id)!;
+    assert.equal(after.type, 'task');
+    assert.equal(after.status, 'done'); // restored automatically, not reset to active
+  });
+
+  test('items tool with type:"note" only returns notes', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Home', ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'Mow lawn', parentId: proj.id, ownerId: uid });
+    createItem(db, deviceId, { type: 'note', title: 'Paint colors', parentId: proj.id, ownerId: uid });
+    stubLLM([toolResp('items', { list: 'home', type: 'note' }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'show my notes in home', true);
+    assert.match(r.reply, /Paint colors/);
+    assert.doesNotMatch(r.reply, /Mow lawn/);
+  });
+
+  test('search_notes: finds text in a note body and returns a snippet (Telegram/chat surface, conversational mode)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    createItem(db, deviceId, {
+      type: 'note',
+      title: 'Trip planning',
+      ownerId: uid,
+      note: 'Remember to book the rental car before the long weekend.',
+    });
+    // Conversational mode (as Telegram uses): the model's own final-turn text is the reply.
+    stubLLM([
+      toolResp('search_notes', { q: 'rental car' }),
+      doneResp("Yep — your note 'Trip planning' says to book the rental car before the long weekend."),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'search my notes for rental car', true, {
+      conversational: true,
+    });
+    assert.match(r.reply, /Trip planning/);
+    assert.match(r.reply, /rental car/);
+    assert.equal(r.executed[0].tool, 'search_notes');
+    assert.ok((r.executed[0].result.ok && r.executed[0].result.data) as unknown);
+    const data = r.executed[0].result as { ok: true; data: { matches: { title: string; snippet: string; id: string }[] } };
+    assert.equal(data.data.matches[0].title, 'Trip planning');
+    assert.match(data.data.matches[0].snippet, /«rental car»/);
+  });
+
+  test('Telegram-equivalent end-to-end (shared runAgentCommand loop, conversational mode): create note, search its content, convert to a task', async () => {
+    // Telegram (telegram.ts) drives the exact same runAgentCommand loop with
+    // conversational:true — this exercises that loop directly, which is the documented
+    // approach when a real Telegram transport isn't available in the test harness.
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+
+    // 1) create a note
+    stubLLM([
+      toolResp('add_tasks', { tasks: [{ title: 'Camping list', type: 'note', note: 'Tent, stove, torch.' }] }),
+      doneResp('Noted!'),
+    ]);
+    const r1 = await runAgentCommand(deps(db, deviceId), agent, uid, 'make a note: camping list — tent, stove, torch', true, {
+      conversational: true,
+    });
+    assert.match(r1.reply, /Noted/);
+    const note = (await import('@carbon/core')).queryItems(db, {}).find((i) => i.title === 'Camping list')!;
+    assert.equal(note.type, 'note');
+
+    // 2) search its content
+    stubLLM([toolResp('search_notes', { q: 'torch' }), doneResp("Your camping list note mentions a torch.")]);
+    const r2 = await runAgentCommand(deps(db, deviceId), agent, uid, 'do my notes mention a torch anywhere', true, {
+      conversational: true,
+    });
+    assert.match(r2.reply, /torch/);
+
+    // 3) convert note -> task
+    stubLLM([toolResp('update', { updates: [{ query: 'camping list', patch: { type: 'task' } }] }), doneResp('Done, added as a task.')]);
+    const r3 = await runAgentCommand(deps(db, deviceId), agent, uid, 'turn my camping list note into a task', true, {
+      conversational: true,
+    });
+    assert.match(r3.reply, /Done/);
+    assert.equal(getItem(db, note.id)?.type, 'task');
+    assert.equal(getItem(db, note.id)?.status, 'active'); // was never completed, so restores to active
+  });
+});
+
 describe('NL settings + usage helpers', () => {
   test('defaults, round-trip, and enabled requires an agent', () => {
     const { db } = makeTestDb();
@@ -435,5 +657,16 @@ describe('command/config routes', () => {
     });
     assert.equal(res.status, 200);
     assert.match(((await res.json()) as { reply: string }).reply, /Added.*Milk/);
+  });
+});
+
+describe('formatNow', () => {
+  test('spells out the weekday so the model never derives it from the date', async () => {
+    const { formatNow } = await import('./agents');
+    const now = new Date('2026-07-06T06:05:00.000Z'); // Monday 16:05 in Melbourne
+    assert.equal(formatNow(now, 'Australia/Melbourne'), 'Monday 2026-07-06T16:05:00+10:00 (Australia/Melbourne)');
+    assert.equal(formatNow(now, null), 'Monday 2026-07-06T06:05:00.000Z (UTC)');
+    // Zone west of UTC where the local weekday differs from the UTC one.
+    assert.equal(formatNow(new Date('2026-07-06T02:05:00.000Z'), 'America/Los_Angeles'), 'Sunday 2026-07-05T19:05:00-07:00 (America/Los_Angeles)');
   });
 });

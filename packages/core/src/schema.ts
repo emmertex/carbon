@@ -419,4 +419,71 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 20,
+  // Notes: a note is an ordinary item with type='note' (not a status value). It
+  // lives anywhere a task can, converts to/from a task by flipping `type`, and its
+  // content is the existing `items.note` field. Only the items CHECK needs relaxing
+  // to admit 'note'.
+  //
+  // SQLite can't relax a CHECK in place, so the items table is rebuilt with
+  // CHECK(type IN ('project','task','folder','note')) — the exact v15 folder
+  // pattern. All columns (through v19) are copied verbatim; there are no SQL
+  // foreign keys, triggers, or views referencing items, and the whole migration
+  // runs inside migrate()'s single transaction, so a failure rolls back cleanly.
+  up: `
+    CREATE TABLE items_v20 (
+      id            TEXT PRIMARY KEY,
+      parent_id     TEXT,
+      type          TEXT NOT NULL CHECK(type IN ('project','task','folder','note')),
+      title         TEXT NOT NULL DEFAULT '',
+      note          TEXT,
+      status        TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','done','dropped')),
+      flagged       INTEGER NOT NULL DEFAULT 0,
+      priority      INTEGER NOT NULL DEFAULT 0,
+      defer_date    TEXT,
+      due_date      TEXT,
+      completed_at  TEXT,
+      review_interval INTEGER,
+      reviewed_at   TEXT,
+      recurrence    TEXT,
+      color         TEXT,
+      sort_order    REAL NOT NULL DEFAULT 0,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      deleted       INTEGER NOT NULL DEFAULT 0,
+      clocks        TEXT NOT NULL DEFAULT '{}',
+      owner_id      TEXT,
+      geo           TEXT,
+      alerts        TEXT,
+      reminder_at   TEXT,
+      estimate_minutes INTEGER,
+      order_mode    TEXT NOT NULL DEFAULT 'parallel',
+      folder_id     TEXT,
+      sys_kind      TEXT
+    );
+
+    INSERT INTO items_v20 (
+      id, parent_id, type, title, note, status, flagged, priority, defer_date,
+      due_date, completed_at, review_interval, reviewed_at, recurrence, color,
+      sort_order, created_at, updated_at, deleted, clocks, owner_id, geo, alerts,
+      reminder_at, estimate_minutes, order_mode, folder_id, sys_kind
+    )
+    SELECT
+      id, parent_id, type, title, note, status, flagged, priority, defer_date,
+      due_date, completed_at, review_interval, reviewed_at, recurrence, color,
+      sort_order, created_at, updated_at, deleted, clocks, owner_id, geo, alerts,
+      reminder_at, estimate_minutes, order_mode, folder_id, sys_kind
+    FROM items;
+
+    DROP TABLE items;
+    ALTER TABLE items_v20 RENAME TO items;
+
+    CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_id);
+    CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
+    CREATE INDEX IF NOT EXISTS idx_items_order ON items(sort_order);
+    CREATE INDEX IF NOT EXISTS idx_items_folder ON items(folder_id);
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

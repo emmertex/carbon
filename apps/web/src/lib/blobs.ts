@@ -66,6 +66,37 @@ export async function getBlob(hash: string, mime: string | null): Promise<Blob |
   }
 }
 
+/** The hash in a `/api/blobs/{hash}` image src, lowercased, or null if the src
+ *  isn't a blob reference. */
+export function blobSrcHash(src: string | undefined | null): string | null {
+  const m = /^\/api\/blobs\/([0-9a-fA-F]{64})$/.exec(src ?? '');
+  return m ? m[1]!.toLowerCase() : null;
+}
+
+// Session-lived object URLs by content hash. Blobs are content-addressed and
+// therefore immutable, so a resolved URL never goes stale — cache it instead of
+// creating/revoking one per <img> mount.
+const objectUrls = new Map<string, Promise<string | null>>();
+
+/** Resolve a blob hash to an object URL for use as an <img> src. An <img> must
+ *  never point at `/api/blobs/...` directly: image requests carry no
+ *  Authorization header (Carbon auths with a Bearer token, not cookies), so the
+ *  server answers 401; on native hosts the relative URL doesn't even reach the
+ *  server. This goes through getBlob — local cache first, authed fetch second. */
+export function getBlobObjectUrl(hash: string): Promise<string | null> {
+  let p = objectUrls.get(hash);
+  if (!p) {
+    p = getBlob(hash, null).then((blob) => (blob ? URL.createObjectURL(blob) : null));
+    objectUrls.set(hash, p);
+    // A miss (offline, or the blob hasn't synced from another device yet) must
+    // not be cached forever — drop it so a later render retries the fetch.
+    void p.then((url) => {
+      if (!url) objectUrls.delete(hash);
+    });
+  }
+  return p;
+}
+
 /** All locally-cached blobs by content hash (for backup/export). */
 export async function exportBlobs(): Promise<Record<string, ArrayBuffer>> {
   const out: Record<string, ArrayBuffer> = {};

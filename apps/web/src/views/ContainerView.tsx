@@ -65,7 +65,9 @@ export function ContainerView() {
           queue.push(c.id);
         }
       }
-      const tasks = desc.filter((c) => c.type === 'task');
+      // Container/list views include notes inline alongside tasks (they render
+      // with a distinct icon and no checkbox). Projects/folders stay excluded.
+      const tasks = desc.filter((c) => c.type === 'task' || c.type === 'note');
       // Only the flat view renders `rows`; in tree mode (default) TaskTree renders
       // and enriches its own rows, so skip a full-subtree enrich that's discarded.
       const rows = flatMode
@@ -100,9 +102,9 @@ export function ContainerView() {
     else mutate((db, dev) => startSession(db, dev, id, uid));
   }
 
-  function create(text: string) {
+  function create(text: string, type: 'task' | 'note' = 'task') {
     mutate((db, dev) =>
-      createFromQuickAdd(db, dev, text, { parentId: id, ownerId: getCurrentUserId() }),
+      createFromQuickAdd(db, dev, text, { parentId: id, ownerId: getCurrentUserId(), type }),
     );
   }
 
@@ -161,6 +163,7 @@ export function ContainerView() {
         <QuickAdd
           placeholder={isProject ? 'Add a task to this project…' : 'Add a sub-task…'}
           onCreate={create}
+          allowNote
         />
       </div>
 
