@@ -10,13 +10,14 @@
  * Tolerant of weak/local models: if a turn returns no native tool calls but its text contains a
  * JSON action block (`{op…}` / `{actions:[…]}` / `[…]`), we execute that instead.
  */
-import type { Db } from '@carbon/core';
+import { getItem, type Db } from '@carbon/core';
 import {
   chatLLM,
   recordAgentUsage,
   formatNow,
   type FullAgentRow,
   type ChatMsg,
+  type ChatTuning,
   type ToolDef,
   type ToolCall,
   type Usage,
@@ -26,6 +27,37 @@ import { createAgentOps, type AgentApiDeps, type OpResult } from './agent-ops';
 import { freshestDeviceLocation } from './auth';
 
 const MAX_ITERS = 6;
+
+/** Command routing wants determinism and speed, not creativity: low temperature keeps tool
+ *  args stable across runs, and low reasoning effort (GPT-OSS/o-series) cuts latency — the
+ *  loop's few-shot prompt does the "thinking". Env-overridable per deployment; "off" omits
+ *  the param. Providers that reject either param are auto-detected in chatLLM and skipped. */
+function nlTuningFromEnv(env: NodeJS.ProcessEnv): ChatTuning {
+  const t: ChatTuning = {};
+  const rawTemp = env.CARBON_NL_TEMPERATURE ?? '0.2';
+  if (rawTemp.toLowerCase() !== 'off') {
+    const n = Number(rawTemp);
+    if (Number.isFinite(n) && n >= 0) t.temperature = n;
+  }
+  const rawEffort = (env.CARBON_NL_REASONING_EFFORT ?? 'low').toLowerCase();
+  if (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high') t.reasoningEffort = rawEffort;
+  return t;
+}
+const NL_TUNING = nlTuningFromEnv(process.env);
+
+// Tools that change data; an exact repeat of a call from this set that already succeeded is
+// skipped by the loop (read tools may be re-called freely).
+const MUTATING_TOOLS = new Set([
+  'add_tasks',
+  'complete',
+  'update',
+  'tag_items',
+  'set_tag_geo',
+  'share',
+  'assign',
+  'start_timer',
+  'stop_timer',
+]);
 
 // "Nearest PLACE" needs a location to anchor to. We use the user's last-known HA/GPS fix,
 // but only if it's recent and reasonably precise — a stale or fuzzy fix would pin the
@@ -50,9 +82,10 @@ function usableAnchor(db: AgentApiDeps['db'], userId: string): GeoPoint | null {
   return { lat: fix.lat, lng: fix.lng };
 }
 
-const GEO_HINT = `\n\nThe user's current location is known. When they ask to be reminded "at PLACE" (a \
-shop or place), after add_tasks also call set_tag_geo {tag:"PLACE", near_name:"PLACE"} so the reminder \
-fires at the nearest PLACE to them — you don't need coordinates, the app fills them in.`;
+const GEO_HINT = `\n\nThe user's current location is known. When they ask to be reminded "at PLACE" \
+(a shop or place), tag the new task with the place in the add_tasks call (tags:["PLACE"], short and \
+lowercase), then call set_tag_geo {tag:"PLACE", near_name:"PLACE"} so the reminder fires at the \
+nearest PLACE to them. Never supply coordinates — the app fills them in.`;
 
 // Scheduling / sharing / assigning / timers, appended to whichever base prompt is in use so
 // both the in-app box and chat surfaces share the same capability rules. Relies on the "current
@@ -67,6 +100,12 @@ or change them later via update.
 - Sharing & assigning. "Share X with NAME" → share {query:"X", users:["NAME"]}. "Assign X to NAME" → \
 assign {query:"X", users:["NAME"]}. Call users first if unsure who exists. remove:true unshares/unassigns.
 - Time tracking. "Start a timer on X" → start_timer {query:"X"}. "Stop the timer" → stop_timer {}.
+- Editing. "Rename X to Y" → update {updates:[{query:"X", patch:{title:"Y"}}]}. "Make X high priority" → \
+patch {priority:3} (0 none, 1 low, 2 medium, 3 high); "flag X" → patch {flagged:true}. "Remove the due \
+date" → patch {due_date:null}.
+- Removing. "Remove/delete X" → update {updates:[{query:"X", patch:{status:"dropped"}}]} — never mark a \
+task done just to make it disappear. There is no tool to delete a list or move an item to another list; \
+if asked, do nothing and say so.
 - Completed/hidden tasks. To reopen, re-tag, edit or report on a finished task, reach it with done:false \
 (complete), include_done:true (update/tag_items), or status:"done"|"all" (items).
 Example — "Remind me to take my son to swimming every Tuesday at 5pm, remind me about an hour before, \
@@ -95,27 +134,63 @@ had before — nothing needs to be re-specified unless the user wants to change 
 "turn X into a note" — is update {updates:[{query:"X", patch:{type:"note"}}]}.
 - To find text INSIDE a note's body (not just its title), use search_notes, not items.`;
 
-const SYSTEM_PROMPT = `You manage a user's tasks in Carbon by calling tools. The server resolves names \
-to ids by fuzzy match, so pass plain names (a list name, a tag, a task title) — never ids.
+const PLACEMENT_RULES = `Project/list placement:
+- If the user explicitly asks to create/make a new list or project, use add_tasks with \
+create_list_if_missing:true for that list.
+- Otherwise, never create a new list/project. For any add_tasks call that includes list, pass \
+create_list_if_missing:false.
+- If the user explicitly names a list/project but did not ask to create it, use that list with \
+create_list_if_missing:false; if it is missing, the tool will say so.
+- If the user does NOT specify a list/project but you infer one (for example groceries → Shopping), \
+first call resolve {kind:"list", q:"INFERRED"}. If resolve returns a confident existing list, add \
+there with create_list_if_missing:false. If it does not, add to the current project context when one \
+is provided; otherwise omit list so the task lands in Inbox.`;
 
-- "Add X and Y to my LIST" → call add_tasks {list:"LIST", titles:["X","Y"]}.
-- "Remind me to get X at PLACE" → add_tasks {list:"shopping", titles:["X"], tags:["PLACE"]}.
-- "Mark/tick/check off X and Y" → call complete {queries:["X","Y"]}.
+// Shared by both prompts: title/tag hygiene and the do-no-more guardrails. People are often
+// vague or dictating (voice keyboards, Telegram voice notes), so the model must extract the
+// item from around fillers and self-corrections without inventing anything extra.
+const TITLE_HINT = `Write task titles cleanly: correct obvious misspellings ("cardamon" → "cardamom") \
+and capitalize the first word and proper nouns (brand/place names like "Coles"). Keep the title to the \
+item itself, not the surrounding sentence ("could you add milk please" → "Milk"). Tag names stay short \
+and lowercase.`;
+
+const GUARDRAILS = `Do exactly what was asked, nothing more:
+- Never add, complete, or change anything the user didn't mention, and never repeat a tool call that \
+already succeeded.
+- Never invent dates or times. "Remind me to call Jim" with no time given → a plain task with no \
+due_date or reminder_at.
+- The message may be dictated speech: ignore filler words, and apply self-corrections ("add milk — \
+actually make that almond milk" → one task, "Almond milk").
+- Batch: one tool call carrying all the items, not one call per item.`;
+
+const SYSTEM_PROMPT = `You manage a user's tasks in Carbon by calling tools. The server resolves names \
+to ids by fuzzy match, so pass plain names (a list name, a tag, a task title) — never ids, except when \
+using the system-provided current project context exactly as instructed below.
+
+- "Add X and Y to my LIST" → call add_tasks {list:"LIST", create_list_if_missing:false, titles:["X","Y"]}.
+- "Remind me to get X at PLACE" (no list named, but shopping is a guess) → resolve {kind:"list", q:"shopping"}; \
+if it exists, add_tasks {list:"shopping", create_list_if_missing:false, titles:["X"], tags:["PLACE"]}; \
+otherwise use the current project context if provided, or omit list for Inbox.
+- "Mark/tick/check off X and Y", or a past-tense statement meaning it's done ("I got the milk", \
+"bought the eggs", "picked up the prescription") → call complete {queries:["X","Y"]}.
 - "Tag everything in LIST with X" / "add the X tag to all items in LIST" → call tag_items {list:"LIST", add:["X"]}.
 - "Add the X tag to A and B" → tag_items {queries:["A","B"], add:["X"]}.
 - "What do I need at PLACE?" → call nearby {tag:"PLACE"}.
 ${NOTES_HINT}
 
-You can act on a whole list at once — tag, complete, or list its tasks — WITHOUT enumerating the items \
-first; the server finds them. So to tag every item in a list, call tag_items with that list, not one call per item.
+${PLACEMENT_RULES}
 
-Write task titles cleanly: correct obvious spelling (e.g. "cardamon" → "cardamom") and use normal \
-capitalization — capitalize the first word and proper nouns (brand/place names like "Coles"). Keep the \
-title to just the item itself, not the surrounding sentence. Tag names stay short and lowercase.
+You can act on a whole list or tag in ONE call — the server finds the items, never enumerate them \
+yourself: tag_items {list:"LIST", add:[…]} tags everything in it; complete {list:"LIST"} (or \
+{tag:"TAG"}) with no queries ticks off everything in it; items {list:"LIST"} reads it.
 
-Use one tool call with all the items rather than many calls. Do exactly what was asked — don't add or \
-complete anything that wasn't mentioned. When you have done the work, stop (no more tool calls). You do \
-not need to write a summary; the app reports the result.`;
+${TITLE_HINT}
+
+${GUARDRAILS}
+
+If the request is ambiguous or needs something no tool can do, make no tool calls and reply with one \
+short sentence saying so — that text is shown to the user. Otherwise, when the work is done, stop \
+calling tools; the app reports the result itself, so don't write a summary.`;
 
 // Conversational variant for chat surfaces (e.g. the Telegram bot). Unlike SYSTEM_PROMPT —
 // which tells the model NOT to summarise because the in-app box builds the reply
@@ -123,35 +198,46 @@ not need to write a summary; the app reports the result.`;
 // so it can both *do* things and *report/answer* them ("what's due tomorrow in work?").
 const CONVERSATIONAL_SYSTEM_PROMPT = `You are a helpful assistant managing a user's tasks in Carbon \
 over a chat. You act by calling tools; the server resolves names to ids by fuzzy match, so pass plain \
-names (a list name, a tag, a task title) — never ids.
+names (a list name, a tag, a task title) — never ids, except when using a system-provided current \
+project context exactly as instructed below.
 
-- "Add X and Y to my LIST" → add_tasks {list:"LIST", titles:["X","Y"]}.
-- "Mark/tick/check off X" → complete {queries:["X"]}. "Untick/uncheck X" → complete {queries:["X"], done:false}.
+- "Add X and Y to my LIST" → add_tasks {list:"LIST", create_list_if_missing:false, titles:["X","Y"]}.
+- "Mark/tick/check off X", or a past-tense statement meaning it's done ("I got the milk", "bought the \
+eggs") → complete {queries:["X"]}. "Untick/uncheck X" → complete {queries:["X"], done:false}.
 - "Tag everything in LIST with X" → tag_items {list:"LIST", add:["X"]}.
-- Questions ("what's due tomorrow in work?", "what do I need at Coles?", "what's on my shopping list?") \
-→ read with items/nearby/lists (use detail:true when you need due dates, flags or priorities) and ANSWER.
+- Questions ("what do I need at Coles?", "what's on my shopping list?") → read with items/nearby/lists \
+(use detail:true when you need due dates, flags or priorities) and ANSWER.
+- Date questions: "what's due tomorrow in work?" → items {list:"work", due_before:"<end of tomorrow, \
+local time with offset>"}; "what's overdue?" → items {due_before:"<now>"}. Omit list to search everywhere.
 - "Find my note about Y" / "what did I write about Y" / "search my notes for Y" → search_notes {q:"Y"}.
 ${NOTES_HINT}
+
+${PLACEMENT_RULES}
 
 If a search_notes/items result's note content is long, don't paste the whole body into your reply — \
 summarize the relevant part in your own words (a sentence or two) and point the user at the item by \
 title (e.g. "your note 'Trip planning' mentions …") so they can open it for the rest.
 
-You can act on a whole list at once (tag/complete/list) WITHOUT enumerating items first — the server finds them. \
-To act on items carrying a tag (e.g. "untick my weekly shopping items" where items are tagged "weekly"), \
-pass that tag: complete {tag:"weekly", done:false} or tag_items {tag:"weekly", …}.
+You can act on a whole list or tag in ONE call — the server finds the items, never enumerate them \
+yourself: "untick my weekly shopping items" (items tagged "weekly") → complete {tag:"weekly", done:false}; \
+"tick everything off LIST" → complete {list:"LIST"}; bulk tagging → tag_items {list:…} or {tag:…}.
 
-Write task titles cleanly (fix obvious spelling, capitalize the first word and proper nouns like "Coles"); \
-tags stay short and lowercase. Do exactly what was asked — don't add or complete anything that wasn't mentioned. \
-When you have the information or have finished the actions, reply to the user directly: a short, friendly, \
-plain-text message (no markdown headings or tables) that says what you did or answers their question. \
-If something couldn't be found, say so plainly.`;
+${TITLE_HINT}
+
+${GUARDRAILS}
+
+When you have the information or have finished the actions, reply to the user directly: a short, \
+friendly, plain-text message (no markdown headings or tables) that says what you did or answers their \
+question. If something couldn't be found or isn't something your tools can do, say so plainly. If a \
+request is ambiguous or would touch more than the user probably means (e.g. "clear my list" — complete \
+everything? drop everything?), ask one short clarifying question instead of guessing.`;
 
 const TOOLS: ToolDef[] = [
   {
     name: 'add_tasks',
     description:
-      'Add one or more tasks OR notes to a list (creates the list/tags if missing). For plain tasks ' +
+      'Add one or more tasks OR notes to a list (tags may be created if missing). The command loop ' +
+      'does not create lists/projects unless create_list_if_missing is true. For plain tasks ' +
       'pass titles[] (always creates type:"task"). For per-task scheduling, a note body, or to create ' +
       'a note item, pass tasks[] with {title, type? ("task" default, or "note"), note?, due_date?, ' +
       'defer_date?, reminder_at? (all ISO datetimes), recurrence? (object {type,interval,daysOfWeek?,' +
@@ -160,7 +246,14 @@ const TOOLS: ToolDef[] = [
     parameters: {
       type: 'object',
       properties: {
-        list: { type: 'string', description: 'the list/project name' },
+        list: {
+          anyOf: [{ type: 'string' }, { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] }],
+          description: 'the existing list/project name, or {id} only for system-provided current project context',
+        },
+        create_list_if_missing: {
+          type: 'boolean',
+          description: 'true only when the user explicitly asked to create/make a new list or project; otherwise false',
+        },
         titles: { type: 'array', items: { type: 'string' }, description: 'task titles to add (plain)' },
         tasks: {
           type: 'array',
@@ -171,9 +264,9 @@ const TOOLS: ToolDef[] = [
               title: { type: 'string' },
               type: { type: 'string', enum: ['task', 'note'], description: 'defaults to "task"; "note" creates a note item (body in note, no due date/checkbox)' },
               note: { type: 'string' },
-              due_date: { type: 'string', description: 'ISO datetime' },
-              defer_date: { type: 'string', description: 'ISO datetime' },
-              reminder_at: { type: 'string', description: 'ISO datetime to fire a push reminder' },
+              due_date: { type: 'string', description: 'ISO datetime with UTC offset; omit unless the user gave a date/time' },
+              defer_date: { type: 'string', description: 'ISO datetime with UTC offset; omit unless asked' },
+              reminder_at: { type: 'string', description: 'ISO datetime with UTC offset to fire a push reminder; omit unless asked' },
               recurrence: { type: 'object', description: '{type:"daily"|"weekly"|"monthly"|"yearly", interval, daysOfWeek?:[0-6 Sun-Sat], dayOfMonth?}' },
               flagged: { type: 'boolean' },
               priority: { type: 'number', description: '0 none,1 low,2 med,3 high' },
@@ -189,21 +282,26 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'complete',
-    description: 'Mark tasks done (or re-open with done=false). Returns matched + unmatched.',
+    description:
+      'Mark tasks done (or re-open with done:false). Pass queries[] of task names; or pass ONLY ' +
+      'list or tag (no queries) to complete/re-open every task in that list or carrying that tag. ' +
+      'Returns matched + unmatched.',
     parameters: {
       type: 'object',
       properties: {
         queries: { type: 'array', items: { type: 'string' }, description: 'task names to mark off' },
-        list: { type: 'string', description: 'limit the search to this list' },
+        list: { type: 'string', description: 'limit queries to this list, or (with no queries) act on the whole list' },
+        tag: { type: 'string', description: 'limit queries to this tag, or (with no queries) act on every task carrying it' },
         done: { type: 'boolean', description: 'false to re-open' },
       },
-      required: ['queries'],
+      required: [],
     },
   },
   {
     name: 'update',
     description:
-      'Change fields on tasks or notes by name. patch keys: note (the body text — use this to add/replace ' +
+      'Change fields on tasks or notes by name. patch keys: title (rename), ' +
+      'note (the body text — use this to add/replace ' +
       'a note ON an existing task or note, e.g. "add a note to X"), type ("task" or "note" — converts the ' +
       'item; converting a note back to a task restores whatever status it had before it became a note, ' +
       'since status is preserved untouched the whole time it was a note), flagged (bool), priority (0-3), ' +
@@ -297,6 +395,8 @@ const TOOLS: ToolDef[] = [
     description:
       'Show tasks and/or notes in a list or with a tag. status defaults to "active"; pass "done" for ' +
       'completed or "all" for both. type defaults to "task"; pass "note" for notes only or "all" for both. ' +
+      'For date questions ("what\'s due today / this week / overdue?") pass due_before and/or due_after — ' +
+      'only items WITH a due date match, soonest first. ' +
       'Use detail:true to get due dates, reminders, repeat, flags and priority (and each item\'s type).',
     parameters: {
       type: 'object',
@@ -306,6 +406,8 @@ const TOOLS: ToolDef[] = [
         q: { type: 'string' },
         status: { type: 'string', enum: ['active', 'done', 'all'] },
         type: { type: 'string', enum: ['task', 'note', 'all'], description: 'defaults to "task"' },
+        due_before: { type: 'string', description: 'ISO datetime with offset; only items due at/before it, e.g. end of "today"/"this week". Overdue = due_before now.' },
+        due_after: { type: 'string', description: 'ISO datetime with offset; only items due at/after it. Combine with due_before for a window.' },
         detail: { type: 'boolean' },
       },
     },
@@ -516,6 +618,7 @@ function snapDueToRecurrenceWeekday(
 
 function tidyAddArgs(args: Record<string, unknown>, clock: Clock | null): Record<string, unknown> {
   const a = { ...args };
+  if (a.list !== undefined && a.create_list_if_missing === undefined) a.create_list_if_missing = false;
   if (Array.isArray(a.titles)) a.titles = a.titles.map(tidyTitle);
   if (Array.isArray(a.tasks)) {
     a.tasks = (a.tasks as Array<Record<string, unknown>>).map((t) => {
@@ -606,6 +709,8 @@ export interface AgentCommandOpts {
    *  can resolve follow-ups like "add eggs to it" / "mark that off". The model is told to focus
    *  on the latest message and only lean on the thread when the message is unclear or refers back. */
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Project page the command was entered from. Non-project surfaces omit this and fall back to Inbox. */
+  currentProjectId?: string | null;
 }
 
 // Appended to the system prompt when prior turns are supplied (chat surfaces). Keeps the model
@@ -614,6 +719,17 @@ const HISTORY_HINT = `The messages above the latest one are earlier turns in thi
 Focus on the user's LATEST message. Only use the earlier conversation when the latest message is \
 unclear on its own or refers back to it — e.g. "add eggs to it", "mark that off", "what about the work project?". \
 Don't redo earlier requests.`;
+
+function currentProjectHint(deps: AgentApiDeps, userId: string, projectId: string | null | undefined): string | null {
+  if (!projectId) return null;
+  const item = getItem(deps.db, projectId);
+  if (!item || item.deleted || item.type !== 'project' || !deps.canSee(userId, item.id)) return null;
+  const name = JSON.stringify(item.title || 'Untitled project');
+  const id = JSON.stringify(item.id);
+  return `Current project context: the in-app command was entered from project ${name} (id ${id}). \
+When the placement rules say to use the current project, call add_tasks with list:{id:${id}} \
+and create_list_if_missing:false.`;
+}
 
 /** Find and parse the first balanced JSON object/array in a string (tolerant fallback). */
 function extractJson(text: string): unknown {
@@ -762,8 +878,15 @@ function buildReply(executed: ExecutedTool[], modelText: string): string {
       );
     } else if (e.tool === 'nearby' || e.tool === 'items') {
       const items = (d.items as Array<{ title: string }>) ?? [];
-      const where = e.tool === 'nearby' ? (e.args.tag ?? e.args.zone ?? 'there') : (e.args.list ?? 'that list');
-      lines.push(items.length ? `At ${where}: ${joinNames(items)}` : `Nothing for ${where}.`);
+      if (e.tool === 'items' && (e.args.due_before || e.args.due_after)) {
+        lines.push(items.length ? `Due: ${joinNames(items)}` : 'Nothing due in that window.');
+      } else {
+        const where =
+          e.tool === 'nearby'
+            ? (e.args.tag ?? e.args.zone ?? 'there')
+            : (e.args.list ?? e.args.tag ?? 'your tasks');
+        lines.push(items.length ? `At ${where}: ${joinNames(items)}` : `Nothing for ${where}.`);
+      }
     } else if (e.tool === 'share' || e.tool === 'assign') {
       const updated = (d.updated as Array<{ title: string }>) ?? [];
       const people = (d.users as Array<{ name: string }>) ?? [];
@@ -853,15 +976,22 @@ export async function runAgentCommand(
   let system = opts.conversational ? CONVERSATIONAL_SYSTEM_PROMPT : SYSTEM_PROMPT;
   system += CAPABILITIES_HINT;
   if (anchor) system += GEO_HINT;
+  const projectHint = currentProjectHint(deps, userId, opts.currentProjectId);
+  if (projectHint) system += `\n\n${projectHint}`;
   // Teach the model "now" (in the user's own zone, when known) so "due tomorrow" / "this
-  // week" resolve against the user's local clock instead of the server's.
+  // week" resolve against the user's local clock instead of the server's. Datetimes are asked
+  // for as LOCAL time + the offset shown in the now-line (agent-ops normalizeDateTime converts
+  // to UTC): small models reliably copy an offset but routinely botch the subtract-N-hours,
+  // roll-the-date arithmetic that "convert to UTC yourself" requires.
   if (opts.now) {
     system += `\n\nThe current date and time is ${formatNow(opts.now, opts.timezone)}. The weekday \
 named there is authoritative — never re-derive the weekday from the date yourself. Resolve relative \
-dates ("tonight", "tomorrow", "next Tuesday") against that local time and zone, counting days forward \
-from that weekday, but always write due_date / defer_date / reminder_at back out in UTC (ending in Z) \
-— convert the local time you picked to UTC before returning it. For a weekly recurrence, the due_date \
-must fall on one of its daysOfWeek in the user's zone.`;
+dates ("tonight", "tomorrow", "next Tuesday") against that local time, counting days forward from \
+that weekday. Write due_date / defer_date / reminder_at in the user's LOCAL time with the same UTC \
+offset shown above (e.g. 2026-07-14T17:00:00+10:00) — do not convert to UTC yourself, and never \
+write a datetime without an offset. If a time is ambiguous ("at 5"), pick the next upcoming \
+occurrence, preferring daytime/evening over early morning. For a weekly recurrence, the due_date \
+must fall on one of its daysOfWeek.`;
   }
   const history = opts.history ?? [];
   if (history.length) system += `\n\n${HISTORY_HINT}`;
@@ -873,10 +1003,28 @@ must fall on one of its daysOfWeek in the user's zone.`;
   const executed: ExecutedTool[] = [];
   const usage: Usage = { input: 0, output: 0 };
   let lastText = '';
+  // Small local models sometimes re-emit a mutation they already made (the tool result
+  // didn't "read" as done to them). Re-running it would duplicate tasks/tags, so exact
+  // repeats of a successful mutating call are skipped and told so.
+  const succeededMutations = new Set<string>();
+  // When the reply must be built deterministically even in conversational mode: the model's
+  // final text was a JSON action blob (fallback path), or the provider died mid-loop.
+  let usedFallback = false;
+  let degraded = false;
 
   try {
     for (let iter = 0; iter < MAX_ITERS; iter++) {
-      const r = await chatLLM(agent, messages, TOOLS, allowPrivate);
+      let r: Awaited<ReturnType<typeof chatLLM>>;
+      try {
+        r = await chatLLM(agent, messages, TOOLS, allowPrivate, NL_TUNING);
+      } catch (e) {
+        // Provider transport error after tools already ran: the work happened, so report
+        // it (deterministically) instead of throwing an error that implies nothing did.
+        if (!executed.length) throw e;
+        console.error('[carbon] nl provider error mid-loop; reporting executed work:', e);
+        degraded = true;
+        break;
+      }
       usage.input += r.usage.input;
       usage.output += r.usage.output;
       lastText = r.text;
@@ -891,12 +1039,27 @@ must fall on one of its daysOfWeek in the user's zone.`;
         dbg(`iter ${iter}: no tool calls; text=${JSON.stringify(r.text.slice(0, 200))}`);
         break; // model is done / just chatting
       }
+      if (!native) usedFallback = true;
       dbg(`iter ${iter}: ${native ? 'native' : 'json-fallback'} calls=${calls.map((c) => c.name).join(',')}`);
 
       if (native) messages.push({ role: 'assistant', content: r.text, toolCalls: calls });
       for (const tc of calls) {
+        const key = `${tc.name} ${JSON.stringify(tc.args)}`;
+        if (MUTATING_TOOLS.has(tc.name) && succeededMutations.has(key)) {
+          dbg(`  ${tc.name} skipped — duplicate of an earlier successful call`);
+          if (native) {
+            messages.push({
+              role: 'tool',
+              toolCallId: tc.id,
+              name: tc.name,
+              content: JSON.stringify({ error: 'duplicate_call', detail: 'this exact call already succeeded — do not repeat it' }),
+            });
+          }
+          continue;
+        }
         const result = await execTool(ops, userId, tc.name, tc.args, anchor, clock);
         dbg(`  ${tc.name} ${JSON.stringify(tc.args)} -> ${result.ok ? 'ok' : 'ERR ' + result.error}`);
+        if (result.ok && MUTATING_TOOLS.has(tc.name)) succeededMutations.add(key);
         executed.push({ tool: tc.name, args: tc.args, result });
         if (native) {
           messages.push({
@@ -920,8 +1083,13 @@ must fall on one of its daysOfWeek in the user's zone.`;
   }
   // Conversational surfaces use the model's own final message (the no-tool turn that closes the
   // loop after it has seen the tool results — its narration/answer). The deterministic builder
-  // is the fallback if the model ended without saying anything (empty text / hit MAX_ITERS).
-  const reply = opts.conversational ? lastText.trim() || buildReply(executed, lastText) : buildReply(executed, lastText);
+  // is the fallback if the model ended without saying anything (empty text / hit MAX_ITERS), if
+  // its "final message" was really a JSON action blob (fallback path — raw JSON must not reach
+  // the chat), or if the provider died mid-loop after work was done.
+  const reply =
+    opts.conversational && !usedFallback && !degraded
+      ? lastText.trim() || buildReply(executed, lastText)
+      : buildReply(executed, degraded ? '' : lastText);
   dbg(`reply=${JSON.stringify(reply)} usage in=${usage.input} out=${usage.output}`);
   return { reply, executed, usage };
 }

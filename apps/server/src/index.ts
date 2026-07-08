@@ -192,6 +192,7 @@ import {
   upsertSubscription,
   setSubscriptionStatus,
   markBillingEvent,
+  billingEventSeen,
 } from './billing';
 import {
   isSquareConfigured,
@@ -627,11 +628,28 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       const roots = body.need.filter((id) => typeof id === 'string' && visible!.has(id));
       const subtree = subtreeIds(db, roots);
       if (subtree.size) {
+        // Filter by item_id in SQL (chunked IN batches under the ~999-param limit) rather
+        // than scanning the whole table and filtering in JS (DB-3). Each chunk is ordered
+        // by rowid; we re-sort the merged rows by rowid to preserve the exact global order
+        // the single ORDER BY rowid scan produced, then dedup in JS as before.
+        const BACKFILL_CHUNK = 500;
+        const subtreeArr = [...subtree];
+        // `ops.item_id` is a real column → filter directly.
+        const opRows: OpRow[] = [];
+        for (let i = 0; i < subtreeArr.length; i += BACKFILL_CHUNK) {
+          const batch = subtreeArr.slice(i, i + BACKFILL_CHUNK);
+          const ph = batch.map(() => '?').join(',');
+          opRows.push(
+            ...db.all<OpRow>(
+              `SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE item_id IN (${ph}) ORDER BY rowid`,
+              batch,
+            ),
+          );
+        }
+        opRows.sort((a, b) => a.seq - b.seq);
         const seenOps = new Set(ops.map((o) => o.id));
-        for (const r of db.all<OpRow>(
-          'SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops ORDER BY rowid',
-        )) {
-          if (!subtree.has(r.item_id) || seenOps.has(r.id)) continue;
+        for (const r of opRows) {
+          if (seenOps.has(r.id)) continue;
           ops.push({
             id: r.id,
             item_id: r.item_id,
@@ -640,12 +658,26 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
             fields: JSON.parse(r.fields),
           });
         }
+        // `record_ops` carry the owning item only in JSON `data.item_id`; match it via the
+        // indexed json_extract expression (idx_record_ops_item_id) instead of scanning.
+        const recRowsBackfill: RecRow[] = [];
+        for (let i = 0; i < subtreeArr.length; i += BACKFILL_CHUNK) {
+          const batch = subtreeArr.slice(i, i + BACKFILL_CHUNK);
+          const ph = batch.map(() => '?').join(',');
+          recRowsBackfill.push(
+            ...db.all<RecRow>(
+              `SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE json_extract(data, '$.item_id') IN (${ph}) ORDER BY rowid`,
+              batch,
+            ),
+          );
+        }
+        recRowsBackfill.sort((a, b) => a.seq - b.seq);
         const seenRecs = new Set(recordOps.map((o) => o.id));
-        for (const r of db.all<RecRow>(
-          'SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops ORDER BY rowid',
-        )) {
+        for (const r of recRowsBackfill) {
           if (seenRecs.has(r.id)) continue;
           const data = JSON.parse(r.data) as { item_id?: string };
+          // json_extract already matched item_id; re-check keeps the shape identical to the
+          // prior JS filter (and guards the theoretical NULL-item_id row the index skips).
           if (data.item_id && subtree.has(data.item_id)) {
             recordOps.push({
               id: r.id,
@@ -968,7 +1000,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
       return c.json({ error: 'too many commands, try later' }, 429);
     }
-    const b = (await c.req.json().catch(() => ({}))) as { text?: string; timezone?: string };
+    const b = (await c.req.json().catch(() => ({}))) as {
+      text?: string;
+      timezone?: string;
+      currentProjectId?: string | null;
+    };
     const text = (b.text ?? '').trim();
     if (!text) return c.json({ error: 'text required' }, 400);
     if (b.timezone) setUserTimezone(db, userId, b.timezone);
@@ -988,6 +1024,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       const r = await runAgentCommand(agentApiDeps, agent, userId, text, allowPrivateForCall, {
         now: new Date(),
         timezone: b.timezone ?? getUserTimezone(db, userId),
+        currentProjectId: b.currentProjectId ?? null,
       });
       return c.json(r);
     } catch (e) {
@@ -1502,6 +1539,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
         return c.json({ error: 'a billing email address is required' }, 400);
       }
+      // Track which Square objects we created so the catch can compensate: Square
+      // create* can succeed while a later step throws, orphaning live objects. (BILL-2)
+      let newCustomerId: string | null = null;
+      let cardCreated = false;
+      let createdSubId: string | null = null;
       try {
         const existing = getSubscription(controlDb, ctx.id);
         let customerId = existing?.square_customer_id ?? null;
@@ -1510,11 +1552,14 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
           await updateCustomer(customerId, { email, name: rec.display_name });
         } else {
           customerId = await createCustomer({ tenantId: ctx.id, email, name: rec.display_name });
+          newCustomerId = customerId;
         }
         // Remember the email on the workspace for future receipts/renewals.
         if (!rec.admin_email) setTenantAdminEmail(controlDb, ctx.id, email);
         const cardId = await createCard(customerId, b.cardToken);
+        cardCreated = true;
         const sub = await createSubscription({ customerId, cardId, planId: plan.id });
+        createdSubId = sub.id;
         upsertSubscription(controlDb, ctx.id, {
           provider: 'square',
           status: sub.status === 'ACTIVE' ? 'active' : 'pending',
@@ -1537,7 +1582,30 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
         }
         return c.json({ ok: true, provider: 'square', status: sub.status, subscriptionId: sub.id }, 201);
       } catch (e) {
-        return c.json({ error: (e as Error).message }, 400);
+        console.error('[carbon] billing subscribe failed:', e);
+        // Compensate for orphaned Square objects (BILL-2). If the subscription was
+        // created but local persistence failed, cancel it — otherwise Square keeps
+        // auto-renewing a subscription we have no record of. Customer/card can't be
+        // rolled back as cleanly; log loudly so they can be reconciled by hand.
+        if (createdSubId) {
+          try {
+            await cancelSubscription(createdSubId);
+            console.error(
+              `[carbon] billing subscribe: canceled orphaned Square subscription ${createdSubId} after local failure`,
+            );
+          } catch (ce) {
+            console.error(
+              `[carbon] billing subscribe: FAILED to cancel orphaned Square subscription ${createdSubId} — reconcile manually:`,
+              ce,
+            );
+          }
+        } else if (cardCreated || newCustomerId) {
+          console.error(
+            `[carbon] billing subscribe: left orphaned Square objects (customer=${newCustomerId ?? '(reused)'}, cardCreated=${cardCreated}) with no subscription — reconcile/clean up manually`,
+          );
+        }
+        // Don't return the raw thrown message — it can carry Square error bodies. (API-3)
+        return c.json({ error: 'subscribe_failed' }, 400);
       }
     }
 
@@ -1589,7 +1657,10 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       setSubscriptionStatus(controlDb, ctx.id, 'canceled', { canceledAt: new Date().toISOString() });
       return c.json({ ok: true });
     } catch (e) {
-      return c.json({ error: (e as Error).message }, 400);
+      // Log the detail server-side; don't return it — a Square exception can carry
+      // upstream error bodies the admin shouldn't see. (API-3)
+      console.error('[carbon] billing cancel failed:', e);
+      return c.json({ error: 'cancel_failed' }, 400);
     }
   });
 
@@ -1614,6 +1685,14 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   const tenantApp = new Hono<Env>();
   tenantApp.route('/api', api);
   tenantApp.route('/api/federation', fedApi);
+  // Catch-all for anything a tenant handler throws without its own try/catch: log the
+  // full error server-side, return a generic 500 so no internal detail leaks. tenantApp
+  // is a standalone fetch entry point (invoked via tApp.fetch in the /api dispatcher),
+  // so it needs its own handler — the host app's onError never sees these. (API-4)
+  tenantApp.onError((err, c) => {
+    console.error('[carbon] unhandled tenant error:', err);
+    return c.json({ error: 'internal_error' }, 500);
+  });
   return tenantApp;
 }
 
@@ -1774,9 +1853,33 @@ console.log(
     `tenants=${listTenants(controlDb).length} base=${BASE_DOMAIN ?? '(single-tenant)'}`,
 );
 
+// BILL-4: with no Square config, billingProvider() falls back to 'simulate', where a
+// workspace admin can self-grant paid periods via /billing/simulate. That's intended for
+// self-hosters, but on a production multi-tenant host it means billing isn't actually
+// charging anyone. Warn loudly (don't hard-fail — self-host is a legitimate config).
+if (
+  (process.env.NODE_ENV === 'production' || process.env.ENV === 'production') &&
+  !isSquareConfigured()
+) {
+  console.warn(
+    '[carbon] WARNING: running in production but SQUARE_* is unconfigured — billing is in ' +
+      "'simulate' mode, so workspace admins can self-grant paid periods via /billing/simulate. " +
+      'Configure the Square provider (SQUARE_ACCESS_TOKEN, SQUARE_LOCATION_ID, SQUARE_APP_ID, ' +
+      'SQUARE_PLAN_Q3M, SQUARE_PLAN_Y1) to take real payments.',
+  );
+}
+
 // ----- host app: CORS, health, control plane, tenant dispatch ----------------
 
 const app = new Hono();
+
+// Catch-all for anything a host-level handler (or the mounted `host` sub-app) throws
+// without its own try/catch: log the full error server-side, return a generic 500 so no
+// internal detail leaks to the client. `app` is the top-level fetch entry point. (API-4)
+app.onError((err, c) => {
+  console.error('[carbon] unhandled server error:', err);
+  return c.json({ error: 'internal_error' }, 500);
+});
 
 // CORS: defaults to wildcard (auth is via the Authorization header, not cookies,
 // so there is no CSRF surface). Set CORS_ORIGINS to a comma-separated allowlist to
@@ -1836,10 +1939,10 @@ app.get('/api/health', (c) => {
 const tenantUrl = (subdomain: string) =>
   BASE_DOMAIN ? `https://${subdomain}.${BASE_DOMAIN}` : `(set BASE_DOMAIN) /${subdomain}`;
 
-// In-memory signup rate limit. Per-IP relies on the reverse proxy overwriting
-// X-Forwarded-For (Nginx Proxy Manager does); the global cap is the backstop if the
-// header is spoofed. Stale buckets are pruned each call so the map can't grow without
-// bound (A6).
+// In-memory signup rate limit. Per-IP keys on clientIp() (the last, proxy-appended
+// X-Forwarded-For hop — the only non-spoofable one); the global cap is the backstop if
+// a caller still manages to vary their apparent IP. Stale buckets are pruned each call
+// so the map can't grow without bound (A6).
 const signupHits = new Map<string, number[]>();
 let globalSignups: number[] = [];
 const SIGNUP_PER_IP_HOUR = 5;
@@ -1895,6 +1998,17 @@ function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boole
   return true;
 }
 
+// Client IP for per-IP rate limits. X-Forwarded-For is a client-controllable list —
+// a caller can prepend arbitrary hops — so the FIRST hop is spoofable. Only the LAST
+// hop is trustworthy: it's the peer address our own nginx reverse proxy appends. Use
+// that (fallback 'unknown' when the header is absent). (A?/API-2)
+function clientIp(c: Context): string {
+  const xff = c.req.header('x-forwarded-for');
+  if (!xff) return 'unknown';
+  const hops = xff.split(',');
+  return hops[hops.length - 1].trim() || 'unknown';
+}
+
 const host = new Hono<{ Variables: HostVars }>();
 
 // ----- Square webhooks (public, HMAC-verified) ------------------------------
@@ -1911,9 +2025,13 @@ function tenantBySquareSub(subscriptionId: string): string | null {
   );
 }
 
-async function applySquareInvoicePaid(subscriptionId: string): Promise<void> {
+// Returns false when the subscription id maps to no known tenant — the caller must NOT
+// mark the event processed in that case, so Square keeps retrying (the mapping may just
+// not have been persisted yet by a racing /billing/subscribe). Returns true once the
+// paid period has been applied (or the event is safely ignorable for a known tenant).
+async function applySquareInvoicePaid(subscriptionId: string): Promise<boolean> {
   const tenantId = tenantBySquareSub(subscriptionId);
-  if (!tenantId) return; // unknown subscription — ignore
+  if (!tenantId) return false; // unknown subscription — signal retry, don't lose it
   const sub = await retrieveSubscription(subscriptionId);
   const planId = (sub.planVariationId && planForVariation(sub.planVariationId)) ||
     getSubscription(controlDb, tenantId)?.plan_id ||
@@ -1921,7 +2039,7 @@ async function applySquareInvoicePaid(subscriptionId: string): Promise<void> {
   const plan = getPlan(planId);
   if (!plan) {
     console.error(`[carbon] webhook: no plan for subscription ${subscriptionId} (variation ${sub.planVariationId})`);
-    return;
+    return true; // known tenant, unmappable plan — retrying won't help; treat as handled
   }
   // chargedThrough makes this idempotent: re-processing sets expiry to the same date.
   const newExpiry = recordPaidPeriod(controlDb, tenantId, plan, {
@@ -1936,6 +2054,7 @@ async function applySquareInvoicePaid(subscriptionId: string): Promise<void> {
       console.error('[carbon] billing receipt failed:', e),
     );
   }
+  return true;
 }
 
 host.post('/billing/webhook', async (c) => {
@@ -1955,11 +2074,20 @@ host.post('/billing/webhook', async (c) => {
   const eventId = event.event_id;
   const type = event.type ?? '';
   if (!eventId) return c.json({ error: 'no event id' }, 400);
+  // Dedup BEFORE running any side effect: if we've already recorded this event_id, it's
+  // a Square retry of something we finished — ack 200 and do nothing. (BILL-3)
+  if (billingEventSeen(controlDb, eventId)) return c.json({ ok: true });
   const obj = event.data?.object ?? {};
   try {
     if (type === 'invoice.payment_made') {
       const subId = obj.invoice?.subscription_id;
-      if (subId) await applySquareInvoicePaid(subId);
+      // applySquareInvoicePaid returns false when the subscription maps to no known
+      // tenant — do NOT mark the event; return 5xx so Square retries rather than
+      // permanently dropping a paid invoice for a not-yet-persisted subscription. (BILL-1)
+      if (subId && !(await applySquareInvoicePaid(subId))) {
+        console.error(`[carbon] webhook: paid invoice for unknown subscription ${subId} — asking Square to retry`);
+        return c.json({ error: 'unknown subscription' }, 503); // 5xx → Square retries
+      }
     } else if (type === 'invoice.payment_failed') {
       const tId = obj.invoice?.subscription_id ? tenantBySquareSub(obj.invoice.subscription_id) : null;
       if (tId) setSubscriptionStatus(controlDb, tId, 'past_due');
@@ -1970,9 +2098,10 @@ host.post('/billing/webhook', async (c) => {
         if (tId) setSubscriptionStatus(controlDb, tId, 'canceled', { canceledAt: new Date().toISOString() });
       }
     }
-    // Mark only after successful handling so a transient failure lets Square retry the
-    // same event_id. recordPaidPeriod is idempotent (absolute expiry), so a rare
-    // double-process is harmless.
+    // Mark only after successful handling so a transient failure (thrown above, or the
+    // unknown-subscription early return) lets Square retry the same event_id. The pre-
+    // check above makes a genuine retry a no-op; recordPaidPeriod stays idempotent
+    // (absolute expiry) as a second line of defence against a rare race.
     markBillingEvent(controlDb, eventId, type);
   } catch (e) {
     console.error('[carbon] webhook handling failed:', e);
@@ -1984,7 +2113,7 @@ host.post('/billing/webhook', async (c) => {
 // Self-service signup, step 1: stage the workspace + email a one-time code. The tenant
 // is NOT created yet — only on /signup/verify once the email is proven.
 host.post('/signup/start', async (c) => {
-  const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const ip = clientIp(c);
   if (!signupAllowed(ip)) return c.json({ error: 'too many signups, try later' }, 429);
   const b = (await c.req.json().catch(() => ({}))) as {
     email?: string;
@@ -2012,14 +2141,17 @@ host.post('/signup/start', async (c) => {
     await sendOtcCode(email, code);
     return c.json({ pending: true, email }, 201);
   } catch (e) {
-    return c.json({ error: (e as Error).message }, 400);
+    // Log the detail server-side; return a stable code — the thrown message can carry
+    // internal (e.g. email-provider) error bodies. (API-3)
+    console.error('[carbon] signup/start failed:', e);
+    return c.json({ error: 'signup_failed' }, 400);
   }
 });
 
 // Self-service signup, step 2: verify the code, then provision the workspace with a
 // trial expiry. The pending row is kept if provisioning fails so the user can retry.
 host.post('/signup/verify', async (c) => {
-  const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const ip = clientIp(c);
   if (!hitAllowed(verifyHits, ip, VERIFY_PER_IP_HOUR)) {
     return c.json({ error: 'too many attempts, try later' }, 429);
   }
@@ -2043,8 +2175,10 @@ host.post('/signup/verify', async (c) => {
     deletePendingSignup(controlDb, p.id);
     return c.json({ subdomain: rec.subdomain, url: tenantUrl(rec.subdomain), status: rec.status }, 201);
   } catch (e) {
-    // Keep the pending row so the user can retry (e.g. pick a free subdomain).
-    return c.json({ error: (e as Error).message }, 400);
+    // Keep the pending row so the user can retry (e.g. pick a free subdomain). Log the
+    // detail server-side; return a stable code rather than the raw thrown message. (API-3)
+    console.error('[carbon] signup/verify provisioning failed:', e);
+    return c.json({ error: 'provision_failed' }, 400);
   }
 });
 
@@ -2123,7 +2257,7 @@ host.post('/delete/start', async (c) => {
 // and the final delete. The workspace+email must still match (the code alone is scoped
 // to the tenant, but re-checking keeps the contract obvious and tolerates email reuse).
 host.post('/delete/verify', async (c) => {
-  const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const ip = clientIp(c);
   if (!hitAllowed(deleteVerifyHits, ip, DELETE_VERIFY_PER_IP_HOUR)) {
     return c.json({ error: 'too many attempts, try later' }, 429);
   }
@@ -2202,7 +2336,10 @@ host.post('/tenants', async (c) => {
     });
     return c.json({ ...rec, url: tenantUrl(rec.subdomain) }, 201);
   } catch (e) {
-    return c.json({ error: (e as Error).message }, 400);
+    // Log the detail server-side; return a stable code rather than the raw thrown
+    // message (avoids leaking internal provisioning errors). (API-3)
+    console.error('[carbon] tenant provisioning failed:', e);
+    return c.json({ error: 'provision_failed' }, 400);
   }
 });
 

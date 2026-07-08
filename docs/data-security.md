@@ -162,7 +162,112 @@ today and you should not assume it.
 
 ---
 
-## 7. Self-host security checklist
+## 7. Database integrity & schema design
+
+**No SQL foreign keys.** Carbon's database schema intentionally disables SQLite's `PRAGMA foreign_keys`
+constraint enforcement. This is not a gap—it's a deliberate design choice.
+
+- **Soft-delete tombstones with app-level integrity.** Carbon uses CRDT tombstones to track
+  deletions (see Section 6 on "Purge"). Cascading deletes are enforced in application code
+  rather than via SQL triggers or foreign key constraints. This gives finer control over sync
+  behavior and avoids the need for table rebuilds during schema migrations.
+- **No schema-level constraints.** Without SQL foreign keys, the database schema is simpler and
+  more resilient to changes. Referential integrity is guarded by the application's sync and
+  persistence layers, not by the database.
+
+This design centralizes data safety in the application rather than the database. The tradeoff is
+that malformed queries or corrupted data at rest could violate logical consistency — a reason to
+keep database access tightly controlled and backups current (see Section 8).
+
+---
+
+## 8. Backups (self-host)
+
+Section 6 is blunt that backing up the database is your responsibility when you self-host.
+`apps/server/scripts/backup-dbs.ts` gives you a ready-made way to do that on a schedule,
+rather than relying solely on the on-demand full export (Section 5) or remembering to copy
+files by hand.
+
+- **What it backs up.** The default (single-tenant) DB, the control-plane DB (multi-tenant
+  hosts only), and every tenant DB under `TENANTS_DIR`. It reads the same `DATABASE_PATH`,
+  `CONTROL_DB_PATH`, and `TENANTS_DIR` environment variables the server itself uses, so it
+  finds the same files without extra configuration.
+- **Consistent snapshots, no downtime.** Each database is WAL-mode, so a plain file copy could
+  catch a database mid-write. The script instead opens each DB read-only and runs
+  `VACUUM INTO`, which SQLite guarantees produces a single, self-consistent snapshot file —
+  safe to run against a live server, no need to stop it first.
+- **Where backups land.** Snapshots are written under `BACKUP_DIR` (default: a `backups/`
+  folder next to your data directory), one timestamped `.db` file per source database, grouped
+  into `default/`, `control/`, and `tenants/<id>/` subfolders.
+- **Retention.** Old snapshots are pruned automatically after `BACKUP_RETENTION_DAYS` days
+  (default **14**). Each run backs up first, then prunes, so you always have at least one
+  fresh snapshot even if retention is set aggressively low.
+- **Running it.** `npm run backup -w @carbon/server`, or on a schedule via the systemd timer
+  example below. Exits non-zero if any individual database failed to back up, so a cron/timer
+  failure is easy to alert on; a missing file (e.g. a tenant that doesn't exist yet) is logged
+  and skipped, not treated as an error.
+
+### Restore procedure
+
+1. **Stop the server** (`systemctl stop carbon` or equivalent) — restoring into a running
+   server risks the live process immediately overwriting what you restore.
+2. **Copy the backup file back** over the live database path, e.g.:
+   ```
+   cp /path/to/backups/default/2026-07-08T12-00-00-000Z.db /path/to/data/carbon.db
+   ```
+   For a tenant DB, copy into `TENANTS_DIR/<id>/carbon.db`; for the control DB, into
+   `CONTROL_DB_PATH`.
+3. **Remove any stale WAL/SHM side-files** next to the path you restored (`carbon.db-wal`,
+   `carbon.db-shm`) if present, so the server doesn't try to replay a WAL from before the
+   restore.
+4. **Restart the server.**
+
+Restoring only rewinds the database you copied — if you're restoring a tenant DB, its blob
+storage directory is untouched, so attachments referenced by data older than your backup may
+be missing (blobs are additive and rarely deleted, so this is usually only relevant if you're
+rolling back a long way).
+
+### Example systemd timer
+
+Run the backup daily via a systemd service + timer pair. Adjust `WorkingDirectory`, `User`,
+and the env vars to match your deployment:
+
+```ini
+# /etc/systemd/system/carbon-backup.service
+[Unit]
+Description=Carbon database backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=carbon
+WorkingDirectory=/opt/carbon/apps/server
+Environment=DATABASE_PATH=/opt/carbon/data/carbon.db
+Environment=BACKUP_DIR=/opt/carbon/backups
+Environment=BACKUP_RETENTION_DAYS=14
+ExecStart=/usr/bin/npm run backup
+```
+
+```ini
+# /etc/systemd/system/carbon-backup.timer
+[Unit]
+Description=Run carbon-backup.service daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable with `systemctl enable --now carbon-backup.timer`. Check `systemctl status
+carbon-backup.timer` and `journalctl -u carbon-backup.service` to confirm it's running and
+succeeding.
+
+---
+
+## 9. Self-host security checklist
 
 If you run your own Carbon server:
 
@@ -172,7 +277,8 @@ If you run your own Carbon server:
       internet-facing.
 - [ ] Give integrations the **narrowest token scope** they need (`inbox:write` for capture).
 - [ ] Keep `tasks:write` and admin tokens off automations you don't fully control.
-- [ ] Back up the database and attachment storage; protect those backups.
+- [ ] Back up the database and attachment storage; protect those backups — see Section 8 for
+      an automated, scheduled way to do this.
 - [ ] Keep the Firebase service-account key (if using Android push) **server-side only** —
       never in a shipped app.
 

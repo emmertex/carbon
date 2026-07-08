@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { getItem } from '@carbon/core';
@@ -7,12 +7,14 @@ import { getDb } from '@/lib/db';
 import { mutate } from '@/lib/mutate';
 import { importNoteMd } from '@/lib/notesMd';
 import { zoneForX } from '@/lib/gestures';
+import { isCompactViewport } from '@/hooks/useCompact';
 import { useGlobalHotkeys } from '@/hooks/useGlobalHotkeys';
 import { useDesktopQuickAddBridge } from '@/desktop/quickAddBridge';
 import { Sidebar } from '@/components/Sidebar';
 import { DetailPane } from '@/components/DetailPane';
 import { Snackbar } from '@/components/Snackbar';
 import { TimerBar } from '@/components/TimerBar';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ListView } from '@/views/ListView';
 import { ContainerView } from '@/views/ContainerView';
 import { ForecastView } from '@/views/ForecastView';
@@ -21,17 +23,30 @@ import { PlanView } from '@/views/PlanView';
 import { ReviewView } from '@/views/ReviewView';
 import { TimeTrackedView } from '@/views/TimeTrackedView';
 import { TagsView } from '@/views/TagsView';
-import { SettingsView } from '@/views/SettingsView';
 import { SignupView } from '@/views/SignupView';
 import { DeleteAccountView } from '@/views/DeleteAccountView';
-import { HostAdminView } from '@/views/HostAdminView';
-import { LandingView } from '@/views/LandingView';
-import { FeaturesComparisonView } from '@/views/FeaturesComparisonView';
-import { PrivacyView } from '@/views/PrivacyView';
 import { SignInGate } from '@/components/SignInGate';
 import { RenewGate } from '@/components/RenewGate';
 import { ComplexityPicker } from '@/components/onboarding/ComplexityPicker';
 import { SyncIntro } from '@/components/onboarding/SyncIntro';
+
+// Rarely visited (settings/admin) or marketing-only (apex host) screens — split out of
+// the main bundle so the everyday task-list path doesn't pay for their code.
+const SettingsView = lazy(() =>
+  import('@/views/SettingsView').then((m) => ({ default: m.SettingsView })),
+);
+const HostAdminView = lazy(() =>
+  import('@/views/HostAdminView').then((m) => ({ default: m.HostAdminView })),
+);
+const LandingView = lazy(() =>
+  import('@/views/LandingView').then((m) => ({ default: m.LandingView })),
+);
+const FeaturesComparisonView = lazy(() =>
+  import('@/views/FeaturesComparisonView').then((m) => ({ default: m.FeaturesComparisonView })),
+);
+const PrivacyView = lazy(() =>
+  import('@/views/PrivacyView').then((m) => ({ default: m.PrivacyView })),
+);
 
 function PerspectiveRoute() {
   const { id = '' } = useParams();
@@ -73,7 +88,7 @@ function WorkspaceNotFound({ baseDomain }: { baseDomain: string | null }) {
   );
 }
 
-export default function App() {
+function AppInner() {
   const ready = useStore((s) => s.ready);
   const authRequired = useStore((s) => s.authRequired);
   const loginOpen = useStore((s) => s.loginOpen);
@@ -224,7 +239,7 @@ export default function App() {
   function onTouchEnd(e: React.TouchEvent) {
     const start = touch.current;
     touch.current = null;
-    if (!start || window.innerWidth >= 1024) return; // gestures are compact-only
+    if (!start || !isCompactViewport()) return; // gestures are compact-only
     const t = e.changedTouches[0]!;
     const dx = t.clientX - start.x;
     const dy = t.clientY - start.y;
@@ -244,13 +259,33 @@ export default function App() {
   // Standalone full-page routes that bypass the app chrome.
   if (location.pathname === '/signup') return <SignupView />;
   if (location.pathname === '/delete-account') return <DeleteAccountView />;
-  if (location.pathname === '/host-admin') return <HostAdminView />;
-  if (location.pathname === '/features') return <FeaturesComparisonView />;
-  if (location.pathname === '/privacy') return <PrivacyView />;
+  if (location.pathname === '/host-admin')
+    return (
+      <Suspense fallback={<Splash />}>
+        <HostAdminView />
+      </Suspense>
+    );
+  if (location.pathname === '/features')
+    return (
+      <Suspense fallback={<Splash />}>
+        <FeaturesComparisonView />
+      </Suspense>
+    );
+  if (location.pathname === '/privacy')
+    return (
+      <Suspense fallback={<Splash />}>
+        <PrivacyView />
+      </Suspense>
+    );
 
   // Apex (marketing/landing host): offer signup / local-only / go-to-workspace,
   // unless the visitor already chose to use Carbon without an account.
-  if (hostRole === 'apex' && !localOnly) return <LandingView />;
+  if (hostRole === 'apex' && !localOnly)
+    return (
+      <Suspense fallback={<Splash />}>
+        <LandingView />
+      </Suspense>
+    );
   // A subdomain that resolves to no active workspace.
   if (hostRole === 'unknown') return <WorkspaceNotFound baseDomain={baseDomain} />;
 
@@ -296,65 +331,67 @@ export default function App() {
 
         <div className="flex min-h-0 flex-1">
           <main className="min-w-0 flex-1 overflow-y-auto">
-            <Routes>
-              <Route path="/" element={<Navigate to="/today" replace />} />
-              <Route
-                path="/today"
-                element={
-                  <ListView
-                    base="today"
-                    title="Today"
-                    quickAdd={{ dueToday: true }}
-                    emptyText="Nothing due today. Enjoy the breathing room."
-                  />
-                }
-              />
-              <Route
-                path="/inbox"
-                element={
-                  <ListView
-                    base="inbox"
-                    title="Inbox"
-                    quickAdd={{}}
-                    emptyText="Inbox zero. Capture anything that's on your mind."
-                  />
-                }
-              />
-              <Route
-                path="/flagged"
-                element={
-                  <ListView
-                    base="flagged"
-                    title="Flagged"
-                    quickAdd={{ flagged: true }}
-                    emptyText="No flagged tasks."
-                  />
-                }
-              />
-              <Route
-                path="/all"
-                element={
-                  <ListView
-                    base="all"
-                    title="All Tasks"
-                    quickAdd={{}}
-                    emptyText="No tasks yet."
-                  />
-                }
-              />
-              <Route path="/view/:id" element={<PerspectiveRoute />} />
-              <Route path="/forecast" element={<ForecastView />} />
-              <Route path="/nearby" element={<NearbyView />} />
-              <Route path="/plan" element={<PlanView />} />
-              <Route path="/review" element={<ReviewView />} />
-              <Route path="/time" element={<TimeTrackedView />} />
-              <Route path="/project/:id" element={<ContainerView />} />
-              <Route path="/focus/:id" element={<ContainerView />} />
-              <Route path="/tags" element={<TagsView />} />
-              <Route path="/tag/:id" element={<TagsView />} />
-              <Route path="/settings" element={<SettingsView />} />
-              <Route path="*" element={<Navigate to="/today" replace />} />
-            </Routes>
+            <Suspense fallback={<Splash />}>
+              <Routes>
+                <Route path="/" element={<Navigate to="/today" replace />} />
+                <Route
+                  path="/today"
+                  element={
+                    <ListView
+                      base="today"
+                      title="Today"
+                      quickAdd={{ dueToday: true }}
+                      emptyText="Nothing due today. Enjoy the breathing room."
+                    />
+                  }
+                />
+                <Route
+                  path="/inbox"
+                  element={
+                    <ListView
+                      base="inbox"
+                      title="Inbox"
+                      quickAdd={{}}
+                      emptyText="Inbox zero. Capture anything that's on your mind."
+                    />
+                  }
+                />
+                <Route
+                  path="/flagged"
+                  element={
+                    <ListView
+                      base="flagged"
+                      title="Flagged"
+                      quickAdd={{ flagged: true }}
+                      emptyText="No flagged tasks."
+                    />
+                  }
+                />
+                <Route
+                  path="/all"
+                  element={
+                    <ListView
+                      base="all"
+                      title="All Tasks"
+                      quickAdd={{}}
+                      emptyText="No tasks yet."
+                    />
+                  }
+                />
+                <Route path="/view/:id" element={<PerspectiveRoute />} />
+                <Route path="/forecast" element={<ForecastView />} />
+                <Route path="/nearby" element={<NearbyView />} />
+                <Route path="/plan" element={<PlanView />} />
+                <Route path="/review" element={<ReviewView />} />
+                <Route path="/time" element={<TimeTrackedView />} />
+                <Route path="/project/:id" element={<ContainerView />} />
+                <Route path="/focus/:id" element={<ContainerView />} />
+                <Route path="/tags" element={<TagsView />} />
+                <Route path="/tag/:id" element={<TagsView />} />
+                <Route path="/settings" element={<SettingsView />} />
+                <Route path="*" element={<Navigate to="/today" replace />} />
+              </Routes>
+            </Suspense>
           </main>
 
           <DetailPane />
@@ -365,5 +402,13 @@ export default function App() {
       <ComplexityPicker />
       <SyncIntro />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
   );
 }

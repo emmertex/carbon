@@ -5,6 +5,49 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+## v0.7.2
+**Natural-language assistant overhaul**
+- Everyday phrasings now work in the quick-add bar and Telegram: past-tense completion
+  ("I got the milk"), remove/delete (drops the task rather than faking completion),
+  rename, priority/flag changes, and clearing dates. Dictated speech is handled too —
+  filler words are ignored and self-corrections applied.
+- Whole-list and whole-tag completion ("tick everything off my shopping list", "untick
+  my weekly items") now actually works server-side — previously the prompt promised it
+  but the call silently matched nothing.
+- Date questions answered: "what's due tomorrow in work?" / "what's overdue?" — the
+  items tool gained due_before/due_after filters, returning dated items soonest-first.
+- More reliable scheduling with small local models: due/reminder times are now written
+  as local time with a UTC offset instead of asking the model to do UTC conversion
+  arithmetic itself (a common source of off-by-a-day dates).
+- Tool-loop hardening: exact duplicate mutation calls are skipped (no more double-added
+  tasks from looping models), a provider error mid-command now reports what actually
+  happened instead of a generic failure, and raw JSON fallback actions no longer leak
+  into Telegram replies.
+- NL commands now request low temperature and low reasoning effort for faster, more
+  deterministic runs (tunable via CARBON_NL_TEMPERATURE / CARBON_NL_REASONING_EFFORT;
+  providers that reject these parameters are detected automatically and skipped).
+- "remind" added to the default Add-box trigger keywords, so "remind me to…" entries
+  route to the assistant on fresh installs.
+
+## v0.7.1
+**Security, billing, and reliability hardening**
+- Added Basic-auth brute-force throttling, scoped per workspace so one tenant cannot
+  lock out another tenant's users with the same username.
+- Hardened billing flows: Square webhook retries no longer lose paid invoices for
+  not-yet-persisted subscriptions, duplicate webhook deliveries short-circuit before
+  side effects, and failed subscribe/cancel paths return stable errors while logging
+  upstream detail server-side.
+- Added a self-host database backup script using SQLite `VACUUM INTO`, documented
+  scheduled backups and restore steps, and set a SQLite busy timeout for better
+  concurrent reliability.
+- Improved server error handling so unexpected host or tenant exceptions return
+  generic JSON errors instead of leaking internal details.
+- Split rarely used web screens out of the main bundle and added a top-level React
+  error boundary plus an accessible shared modal primitive for onboarding/import
+  dialogs.
+- Tightened compact-layout gesture checks and reduced avoidable sidebar/plan-list
+  re-renders.
+
 ## v0.7.0
 **Introducing Notes**
 - Notes are a special type of Tasks

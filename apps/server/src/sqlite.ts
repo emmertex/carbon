@@ -6,6 +6,11 @@ import type { Db, SqlParams } from '@carbon/core';
 export function openDb(path: string): Db & { raw: DatabaseSync } {
   const sqlite = new DatabaseSync(path);
   sqlite.exec('PRAGMA journal_mode = WAL');
+  sqlite.exec('PRAGMA busy_timeout = 5000');
+  // Foreign keys are off by design: all soft-delete tombstones and cascades are
+  // enforced by app-level code (see schema.ts:317 & :432), not SQL constraints.
+  // This allows flexible tombstone handling and sync-guard integrity without
+  // table rebuilds when cascading deletes occur.
   sqlite.exec('PRAGMA foreign_keys = OFF');
 
   return {

@@ -164,6 +164,16 @@ export function recordPaidPeriod(
   return newExpiry;
 }
 
+/** Has this provider event already been recorded (processed)? Lets a webhook handler
+ *  short-circuit a duplicate BEFORE re-running side effects, rather than relying only on
+ *  markBillingEvent's after-the-fact conflict signal. */
+export function billingEventSeen(controlDb: Db, eventId: string): boolean {
+  return !!controlDb.get<{ event_id: string }>(
+    'SELECT event_id FROM billing_events WHERE event_id = ?',
+    [eventId],
+  );
+}
+
 /** Apply a provider event at most once. Returns true if this is the first time we've
  *  seen eventId (caller should process), false if it's a duplicate (skip). */
 export function markBillingEvent(controlDb: Db, eventId: string, type: string): boolean {

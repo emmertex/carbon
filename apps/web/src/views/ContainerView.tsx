@@ -164,6 +164,7 @@ export function ContainerView() {
           placeholder={isProject ? 'Add a task to this project…' : 'Add a sub-task…'}
           onCreate={create}
           allowNote
+          currentProjectId={isProject ? id : null}
         />
       </div>
 

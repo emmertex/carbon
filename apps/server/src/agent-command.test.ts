@@ -71,6 +71,7 @@ describe('runAgentCommand tool loop', () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
     const agent = makeAgent(db);
+    createItem(db, deviceId, { type: 'project', title: 'shopping list', ownerId: uid });
     stubLLM([toolResp('add_tasks', { list: 'shopping list', titles: ['milk', 'eggs'] }), doneResp('done')]);
 
     const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk and eggs to my shopping list', true);
@@ -104,11 +105,65 @@ describe('runAgentCommand tool loop', () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
     const agent = makeAgent(db);
+    createItem(db, deviceId, { type: 'project', title: 'groceries', ownerId: uid });
     stubLLM([doneResp('Sure! {"op":"add","list":"groceries","titles":["bananas"]}')]);
 
     const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add bananas to groceries', true);
     assert.match(r.reply, /Added.*Bananas/);
     assert.ok(getProjects(db).some((p) => p.title === 'groceries'));
+  });
+
+  test('add: command loop only creates a project when the model explicitly asks to', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    stubLLM([toolResp('add_tasks', { list: 'new errands', titles: ['milk'] }), doneResp()]);
+
+    const r1 = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk to new errands', true);
+
+    assert.match(r1.reply, /list not found/);
+    assert.ok(!getProjects(db).some((p) => p.title === 'new errands'));
+
+    stubLLM([
+      toolResp('add_tasks', { list: 'new errands', create_list_if_missing: true, titles: ['milk'] }),
+      doneResp(),
+    ]);
+    const r2 = await runAgentCommand(deps(db, deviceId), agent, uid, 'create a new errands project with milk', true);
+
+    assert.match(r2.reply, /new list "new errands"/);
+    assert.ok(getProjects(db).some((p) => p.title === 'new errands'));
+  });
+
+  test('add: project-page context is available as the fallback target', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const project = createItem(db, deviceId, { type: 'project', title: 'Home', ownerId: uid });
+    const agent = makeAgent(db);
+    let firstSystemPrompt = '';
+    let calls = 0;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      calls++;
+      if (!firstSystemPrompt) {
+        const body = JSON.parse(String(init?.body)) as { messages?: Array<{ role: string; content: string }> };
+        firstSystemPrompt = body.messages?.[0]?.content ?? '';
+      }
+      return new Response(
+        JSON.stringify(
+          calls === 1
+            ? toolResp('add_tasks', { list: { id: project.id }, create_list_if_missing: false, titles: ['milk'] })
+            : doneResp(),
+        ),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk', true, {
+      currentProjectId: project.id,
+    });
+
+    assert.match(firstSystemPrompt, /Current project context/);
+    assert.match(r.reply, /Added.*"Home".*Milk/);
+    assert.equal(getChildren(db, project.id).filter((t) => t.title === 'Milk').length, 1);
   });
 
   test('tolerant fallback: a JSON search_notes action in plain text still executes', async () => {
@@ -145,6 +200,7 @@ describe('runAgentCommand tool loop', () => {
     // fresh, precise fix → usable anchor (freshest across the user's devices)
     saveDeviceLocation(db, { userId: uid, deviceId: 'phone', lat: -37.8, lng: 145.0, accuracy: 30, source: 'device' });
     const agent = makeAgent(db);
+    createItem(db, deviceId, { type: 'project', title: 'shopping list', ownerId: uid });
     const geocode = {
       async search(q: string) {
         return [{ point: { lat: -37.81, lng: 145.01 }, label: `${q} Camberwell` }];
@@ -170,6 +226,7 @@ describe('runAgentCommand tool loop', () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
     const agent = makeAgent(db); // no GPS recorded → anchor null
+    createItem(db, deviceId, { type: 'project', title: 'shopping list', ownerId: uid });
     const geocode = { async search() { return []; }, async nearestBrand() { return null; } };
     const d = { ...deps(db, deviceId), geocode };
     stubLLM([
@@ -581,6 +638,157 @@ describe('runAgentCommand — notes (type support, disambiguation, content searc
   });
 });
 
+describe('runAgentCommand — loop hardening + whole-list/tag complete', () => {
+  test('complete: list-only (no queries) ticks off every active task in the list', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Shopping', ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'Milk', parentId: proj.id, ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'Eggs', parentId: proj.id, ownerId: uid });
+    stubLLM([toolResp('complete', { list: 'shopping' }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'tick everything off my shopping list', true);
+    assert.match(r.reply, /Marked off: Milk, Eggs/);
+    for (const t of getChildren(db, proj.id)) assert.equal(getItem(db, t.id)?.status, 'done');
+  });
+
+  test('complete: tag-only with done:false re-opens every done task carrying the tag', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { createTag, setItemTagLink, setCompleted } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    const t1 = createItem(db, deviceId, { type: 'task', title: 'Milk', ownerId: uid });
+    const t2 = createItem(db, deviceId, { type: 'task', title: 'Bread', ownerId: uid });
+    const untagged = createItem(db, deviceId, { type: 'task', title: 'Call Ben', ownerId: uid });
+    const tag = createTag(db, deviceId, 'weekly');
+    setItemTagLink(db, deviceId, t1.id, tag.id, false);
+    setItemTagLink(db, deviceId, t2.id, tag.id, false);
+    for (const t of [t1, t2, untagged]) setCompleted(db, deviceId, t.id, true);
+    stubLLM([toolResp('complete', { tag: 'weekly', done: false }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'untick my weekly shopping items', true);
+    assert.match(r.reply, /Re-opened: Milk, Bread/);
+    assert.equal(getItem(db, t1.id)?.status, 'active');
+    assert.equal(getItem(db, t2.id)?.status, 'active');
+    assert.equal(getItem(db, untagged.id)?.status, 'done'); // not tagged → untouched
+  });
+
+  test('duplicate mutation: an exact repeat of a successful call is skipped, not re-run', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { queryItems } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    // Model re-emits the same add_tasks on its second turn (small-model loop failure).
+    stubLLM([
+      toolResp('add_tasks', { titles: ['Milk'] }),
+      toolResp('add_tasks', { titles: ['Milk'] }),
+      doneResp(),
+    ]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk', true);
+    assert.match(r.reply, /Added: Milk/);
+    assert.equal(queryItems(db, { tasksOnly: true }).filter((t) => t.title === 'Milk').length, 1);
+    assert.equal(r.executed.length, 1); // the repeat never executed
+  });
+
+  test('provider error mid-loop: work already done is reported instead of throwing', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const { queryItems } = await import('@carbon/core');
+    const agent = makeAgent(db);
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls > 1) throw new TypeError('fetch failed'); // provider dies on the follow-up turn
+      return new Response(JSON.stringify(toolResp('add_tasks', { titles: ['Milk'] })), { status: 200 });
+    }) as typeof fetch;
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk', true, { conversational: true });
+    assert.match(r.reply, /Added: Milk/); // deterministic reply, no raw error
+    assert.equal(queryItems(db, { tasksOnly: true }).filter((t) => t.title === 'Milk').length, 1);
+    // Usage from the successful first turn is still recorded.
+    assert.equal(getAgentUsage(db).byKind.nl_command.input_tokens, 10);
+  });
+
+  test('provider error on the FIRST turn (nothing executed) still throws for the caller to classify', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+
+    await assert.rejects(() => runAgentCommand(deps(db, deviceId), agent, uid, 'add milk', true));
+  });
+
+  test('items: due_before returns only dated items, soonest first, with due_date included', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    createItem(db, deviceId, { type: 'task', title: 'Later', ownerId: uid, dueDate: '2026-07-20T07:00:00.000Z' });
+    createItem(db, deviceId, { type: 'task', title: 'Soon2', ownerId: uid, dueDate: '2026-07-10T07:00:00.000Z' });
+    createItem(db, deviceId, { type: 'task', title: 'Soon', ownerId: uid, dueDate: '2026-07-09T07:00:00.000Z' });
+    createItem(db, deviceId, { type: 'task', title: 'Undated', ownerId: uid });
+    // The bound arrives as local time + offset (the form the prompt asks for) and is
+    // normalized server-side to the stored UTC form before comparing.
+    stubLLM([toolResp('items', { due_before: '2026-07-10T23:59:00+10:00' }), doneResp()]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'what is due before the weekend', true);
+    assert.match(r.reply, /Due: Soon, Soon2/); // soonest first, undated + later excluded
+    assert.doesNotMatch(r.reply, /Later|Undated/);
+    const data = r.executed[0].result as {
+      ok: true;
+      data: { items: Array<{ title: string; due_date?: string }> };
+    };
+    assert.equal(data.data.items[0].due_date, '2026-07-09T07:00:00.000Z');
+  });
+
+  test('LLM tuning: temperature/reasoning_effort sent; a provider 400 retries stripped and is remembered', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      calls++;
+      if (calls === 1) {
+        // Provider that pins its sampling params (e.g. some hosted models).
+        return new Response(
+          JSON.stringify({ error: { message: "Unsupported parameter: 'temperature'" } }),
+          { status: 400 },
+        );
+      }
+      return new Response(JSON.stringify(doneResp('ok')), { status: 200 });
+    }) as typeof fetch;
+
+    const r1 = await runAgentCommand(deps(db, deviceId), agent, uid, 'add milk', true);
+    assert.equal(r1.reply, 'ok');
+    // First attempt carried the tuning; the stripped retry did not.
+    assert.equal(bodies[0].temperature, 0.2);
+    assert.equal(bodies[0].reasoning_effort, 'low');
+    assert.equal(bodies[1].temperature, undefined);
+    assert.equal(bodies[1].reasoning_effort, undefined);
+
+    // Same agent again: the rejection is remembered, tuning skipped with no retry round-trip.
+    await runAgentCommand(deps(db, deviceId), agent, uid, 'add eggs', true);
+    assert.equal(bodies[2].temperature, undefined);
+    assert.equal(bodies[2].reasoning_effort, undefined);
+  });
+
+  test('conversational + JSON fallback: reply is deterministic, never the raw JSON blob', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('a', 'pw');
+    const agent = makeAgent(db);
+    stubLLM([doneResp('Sure! {"op":"add","titles":["bananas"]}')]);
+
+    const r = await runAgentCommand(deps(db, deviceId), agent, uid, 'add bananas', true, { conversational: true });
+    assert.match(r.reply, /Added: Bananas/);
+    assert.doesNotMatch(r.reply, /"op"/); // the JSON action text must not reach the chat
+  });
+});
+
 describe('NL settings + usage helpers', () => {
   test('defaults, round-trip, and enabled requires an agent', () => {
     const { db } = makeTestDb();
@@ -646,8 +854,9 @@ describe('command/config routes', () => {
 
   test('command runs end-to-end once configured', async () => {
     const { db, deviceId, addUser } = makeTestDb();
-    const { basic } = addUser('a', 'pw');
+    const { basic, id: uid } = addUser('a', 'pw');
     const agent = makeAgent(db);
+    createItem(db, deviceId, { type: 'project', title: 'shopping', ownerId: uid });
     setNlSettings(db, { agentId: agent.id, enabled: true });
     stubLLM([toolResp('add_tasks', { list: 'shopping', titles: ['milk'] }), doneResp()]);
     const res = await appFetch(buildCmdApp(db, deviceId), '/agent/command', {

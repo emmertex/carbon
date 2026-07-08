@@ -12,6 +12,8 @@ import {
   publicUser,
   requireAdmin,
   setPassword,
+  LOGIN_FAIL_MAX,
+  LOGIN_FAIL_WINDOW_MS,
 } from './auth';
 import {
   createUser,
@@ -147,7 +149,7 @@ function buildApp(allowOpen = false) {
     return c.json({ ok: true });
   });
 
-  return { app, db, admin, member };
+  return { app, db, admin, member, addUser };
 }
 
 describe('GET /me', () => {
@@ -191,6 +193,106 @@ describe('POST /login', () => {
     const bad = 'Basic ' + Buffer.from('admin:wrong').toString('base64');
     const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
     assert.equal(res.status, 401);
+  });
+});
+
+describe('basic-auth brute-force throttle', () => {
+  // The throttle is module-level but partitioned per tenant DB, so each test still
+  // uses its own never-reused username to avoid sharing buckets inside one DB.
+
+  test('locks out after LOGIN_FAIL_MAX failures against the same username', async () => {
+    const { app, addUser } = buildApp();
+    addUser('throttle-lockout', 'correct-pw');
+    const bad = 'Basic ' + Buffer.from('throttle-lockout:wrong').toString('base64');
+
+    for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(res.status, 401, `attempt ${i + 1} should be a plain 401`);
+    }
+    // The next attempt is throttled, even with the *correct* password now.
+    const good = 'Basic ' + Buffer.from('throttle-lockout:correct-pw').toString('base64');
+    const res = await appFetch(app, '/me', { headers: { Authorization: good } });
+    assert.equal(res.status, 429);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /too many attempts/);
+  });
+
+  test('unknown usernames are throttled the same as wrong passwords (no oracle)', async () => {
+    const { app } = buildApp();
+    const bad = 'Basic ' + Buffer.from('throttle-unknown-user:whatever').toString('base64');
+
+    for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(res.status, 401);
+    }
+    const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+    assert.equal(res.status, 429);
+  });
+
+  test('same username in a different tenant DB has its own throttle bucket', async () => {
+    const tenantA = buildApp();
+    const tenantB = buildApp();
+    tenantA.addUser('shared-throttle-name', 'a-correct-pw');
+    const bUser = tenantB.addUser('shared-throttle-name', 'b-correct-pw');
+    const badA = 'Basic ' + Buffer.from('shared-throttle-name:wrong').toString('base64');
+
+    for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+      const res = await appFetch(tenantA.app, '/me', { headers: { Authorization: badA } });
+      assert.equal(res.status, 401);
+    }
+    assert.equal(
+      (await appFetch(tenantA.app, '/me', { headers: { Authorization: badA } })).status,
+      429,
+      'tenant A should now be locked out',
+    );
+
+    const res = await appFetch(tenantB.app, '/me', { headers: { Authorization: bUser.basic } });
+    assert.equal(res.status, 200, 'tenant B should not inherit tenant A failures');
+  });
+
+  test('a successful auth resets the failure counter', async () => {
+    const { app, addUser } = buildApp();
+    const user = addUser('throttle-reset', 'correct-pw');
+    const bad = 'Basic ' + Buffer.from('throttle-reset:wrong').toString('base64');
+
+    for (let i = 0; i < LOGIN_FAIL_MAX - 1; i++) {
+      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(res.status, 401);
+    }
+    // One failure short of the cap — a correct login should still succeed and clear it.
+    const okRes = await appFetch(app, '/me', { headers: { Authorization: user.basic } });
+    assert.equal(okRes.status, 200);
+
+    // Counter reset: another full run of failures is needed before lockout kicks in.
+    for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(res.status, 401, `post-reset attempt ${i + 1} should not be throttled yet`);
+    }
+    const lockedRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+    assert.equal(lockedRes.status, 429);
+  });
+
+  test('lockout expires after the sliding window elapses', async (t) => {
+    const { app } = buildApp();
+    const bad = 'Basic ' + Buffer.from('throttle-expiry:wrong').toString('base64');
+
+    t.mock.timers.enable({ apis: ['Date'] });
+    try {
+      for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+        const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+        assert.equal(res.status, 401);
+      }
+      const lockedRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(lockedRes.status, 429);
+
+      // Jump past the window — the oldest failures should have aged out.
+      t.mock.timers.tick(LOGIN_FAIL_WINDOW_MS + 1_000);
+
+      const afterWindowRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      assert.equal(afterWindowRes.status, 401, 'throttle should have reset after the window');
+    } finally {
+      t.mock.timers.reset();
+    }
   });
 });
 

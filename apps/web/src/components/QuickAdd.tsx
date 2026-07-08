@@ -14,11 +14,14 @@ export function QuickAdd({
   placeholder = 'Add a task…  (#tag @user !priority)',
   onCreate,
   allowNote = false,
+  currentProjectId,
 }: {
   placeholder?: string;
   onCreate: (raw: string, type: 'task' | 'note') => void;
   /** Show a Task/Note toggle so the box can create a note instead (default off). */
   allowNote?: boolean;
+  /** Project page context for NL commands; omitted for global/tag/desktop surfaces. */
+  currentProjectId?: string | null;
 }) {
   const [value, setValue] = useState('');
   const [status, setStatus] = useState<Status>(null);
@@ -43,7 +46,7 @@ export function QuickAdd({
   async function runAsCommand(raw: string) {
     setStatus({ kind: 'pending', text: 'Thinking…' });
     try {
-      const { reply } = await runCommand(raw);
+      const { reply } = await runCommand(raw, currentProjectId);
       setStatus({ kind: 'reply', text: reply });
       scheduleSync(); // pull the new/changed items into the local DB
     } catch (e) {

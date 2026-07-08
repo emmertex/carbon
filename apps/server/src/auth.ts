@@ -45,6 +45,59 @@ const SCRYPT_KEYLEN = 32;
 // A real-shaped hash to compare against when the username is unknown (timing parity).
 const DUMMY_HASH = `scrypt$${'0'.repeat(32)}$${'0'.repeat(64)}`;
 
+// ----- basic-auth brute-force throttle (API-1) ------------------------------
+// Sliding-window cap on failed Basic-auth attempts, isolated per tenant DB and
+// keyed within that tenant by lowercased username — IP isn't a reliable key here
+// (XFF handling lives elsewhere).
+// Unknown usernames are keyed and counted the same as wrong-password failures
+// (see basicAuth below) so this map can't be used to enumerate valid accounts.
+export const LOGIN_FAIL_WINDOW_MS = 15 * 60_000; // 15 minutes
+export const LOGIN_FAIL_MAX = 10; // max failed attempts per username per window
+type LoginFailBuckets = Map<string, number[]>;
+const loginFailHitsByDb = new WeakMap<Db, LoginFailBuckets>();
+
+function loginFailBuckets(db: Db): LoginFailBuckets {
+  let buckets = loginFailHitsByDb.get(db);
+  if (!buckets) {
+    buckets = new Map();
+    loginFailHitsByDb.set(db, buckets);
+  }
+  return buckets;
+}
+
+function pruneLoginFailHits(buckets: LoginFailBuckets, now: number): void {
+  const win = now - LOGIN_FAIL_WINDOW_MS;
+  for (const [k, v] of buckets) {
+    const fresh = v.filter((t) => t > win);
+    if (fresh.length) buckets.set(k, fresh);
+    else buckets.delete(k);
+  }
+}
+
+/** True if `key` (lowercased username) is still under the tenant's failed-attempt cap. */
+function loginAllowed(db: Db, key: string): boolean {
+  const now = Date.now();
+  const buckets = loginFailBuckets(db);
+  pruneLoginFailHits(buckets, now);
+  const hits = buckets.get(key) ?? [];
+  return hits.length < LOGIN_FAIL_MAX;
+}
+
+/** Record a failed basic-auth attempt against `key` (lowercased username) in one tenant. */
+function recordLoginFailure(db: Db, key: string): void {
+  const now = Date.now();
+  const buckets = loginFailBuckets(db);
+  pruneLoginFailHits(buckets, now);
+  const hits = buckets.get(key) ?? [];
+  hits.push(now);
+  buckets.set(key, hits);
+}
+
+/** Clear failure history for `key` on successful auth in one tenant. */
+function clearLoginFailures(db: Db, key: string): void {
+  loginFailHitsByDb.get(db)?.delete(key);
+}
+
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString('hex');
   const key = scryptSync(password, salt, SCRYPT_KEYLEN).toString('hex');
@@ -591,9 +644,14 @@ export function basicAuth(
     // Basic auth (human users). Full scopes.
     const creds = decodeBasic(header);
     if (creds) {
+      const loginKey = creds.username.toLowerCase();
+      if (!loginAllowed(db, loginKey)) {
+        return c.json({ error: 'too many attempts, try later' }, 429);
+      }
       const user = getUserByUsername(db, creds.username);
       const hash = user ? getPasswordHash(db, user.id) : undefined;
       if (user && hash && verifyPassword(hash, creds.password)) {
+        clearLoginFailures(db, loginKey);
         c.set('userId', user.id);
         c.set('username', user.username);
         c.set('role', user.role);
@@ -602,8 +660,11 @@ export function basicAuth(
         return next();
       }
       // Spend comparable work on a missing user so response timing doesn't reveal
-      // which usernames exist (A9).
+      // which usernames exist (A9). Count this failure the same as a wrong
+      // password against the same username-derived key (A9 continued) so the
+      // throttle map itself can't be used to probe which usernames exist.
       if (!user) verifyPassword(DUMMY_HASH, creds.password);
+      recordLoginFailure(db, loginKey);
     }
     // Note: deliberately NO WWW-Authenticate header — that would make the browser
     // pop its native Basic-auth login dialog. Carbon handles sign-in in-app.

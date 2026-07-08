@@ -137,7 +137,7 @@ function setMeta(db: Db, key: string, value: string): void {
 }
 
 /** First-word keywords (case-insensitive) that route an Add-box entry to the LLM. */
-export const DEFAULT_NL_KEYWORDS = ['can', 'add', 'check off', 'mark off', 'mark as'];
+export const DEFAULT_NL_KEYWORDS = ['can', 'add', 'remind', 'check off', 'mark off', 'mark as'];
 
 export interface NlSettings {
   agentId: string | null;
@@ -347,6 +347,21 @@ export interface Usage {
   output: number;
 }
 
+/** Optional sampling/effort tuning for a chat call; omitted fields are not sent. Tool loops
+ *  want near-deterministic routing (low temperature) and, on local reasoning models like
+ *  GPT-OSS, minimal thinking (low effort = latency). Some hosted models reject these params
+ *  (e.g. pinned temperature): a 400/422 is retried once without them, and the agent is
+ *  remembered so subsequent calls skip tuning instead of paying the retry every time. */
+export interface ChatTuning {
+  temperature?: number;
+  /** OpenAI-compatible reasoning models only (GPT-OSS, o-series). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+}
+
+// Agents whose provider demonstrably rejects tuning params (the stripped retry succeeded).
+// In-memory: resets on restart, which is fine — it exists to avoid a retry per call.
+const tuningRejectedAgents = new Set<string>();
+
 /** A tool the model may call; `parameters` is a JSON Schema object. */
 export interface ToolDef {
   name: string;
@@ -396,6 +411,7 @@ export async function chatLLM(
   messages: ChatMsg[],
   tools: ToolDef[],
   allowPrivate: boolean,
+  tuning?: ChatTuning,
 ): Promise<ChatResult> {
   if (agent.kind === 'anthropic') {
     const url = `${(agent.endpoint || 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`;
@@ -424,6 +440,7 @@ export async function chatLLM(
       max_tokens: 1024,
       messages: amsgs,
     };
+    if (tuning?.temperature != null) body.temperature = tuning.temperature;
     if (system) body.system = system;
     if (tools.length)
       body.tools = tools.map((t) => ({
@@ -487,11 +504,35 @@ export async function chatLLM(
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
-  const res = await safeFetch(url, allowPrivate, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${agent.api_key ?? ''}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  const tuned = !!tuning && !tuningRejectedAgents.has(agent.id);
+  if (tuned) {
+    if (tuning.temperature != null) body.temperature = tuning.temperature;
+    if (tuning.reasoningEffort) body.reasoning_effort = tuning.reasoningEffort;
+  }
+  const post = (b: Record<string, unknown>) =>
+    safeFetch(url, allowPrivate, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${agent.api_key ?? ''}`, 'content-type': 'application/json' },
+      body: JSON.stringify(b),
+    });
+  let res = await post(body);
+  if (!res.ok && tuned && (res.status === 400 || res.status === 422) && ('temperature' in body || 'reasoning_effort' in body)) {
+    // The 400 might be the provider rejecting the tuning params (pinned temperature, no
+    // reasoning_effort support) — retry once without them. Only if the stripped retry
+    // succeeds do we blame (and stop sending) tuning; otherwise report the original error.
+    const detail = snippet(await res.text());
+    const stripped = { ...body };
+    delete stripped.temperature;
+    delete stripped.reasoning_effort;
+    const retry = await post(stripped);
+    if (!retry.ok) throw new LLMHttpError(res.status, `POST ${url}: ${detail}`);
+    console.log(
+      `[carbon] agent "${agent.name}": provider rejected temperature/reasoning_effort (${detail}); ` +
+        'succeeded without them — disabling tuning for this agent',
+    );
+    tuningRejectedAgents.add(agent.id);
+    res = retry;
+  }
   if (!res.ok) throw new LLMHttpError(res.status, `POST ${url}: ${snippet(await res.text())}`);
   const d = (await res.json()) as {
     choices?: Array<{

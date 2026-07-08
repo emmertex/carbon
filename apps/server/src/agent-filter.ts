@@ -156,7 +156,8 @@ export async function runFilterCommand(
     { role: 'system', content: buildSystem(tags, projects, now, timezone) },
     { role: 'user', content: text },
   ];
-  const r = await chatLLM(agent, messages, [BUILD_TOOL], allowPrivate);
+  // Deterministic structured output — same low-temperature/low-effort tuning as the command loop.
+  const r = await chatLLM(agent, messages, [BUILD_TOOL], allowPrivate, { temperature: 0.2, reasoningEffort: 'low' });
   recordAgentUsage(deps.db, agent.id, r.usage, agent.model || '(default)', 'filter_build');
 
   const call = r.toolCalls.find((c) => c.name === 'build_filter');

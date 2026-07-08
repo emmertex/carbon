@@ -200,11 +200,11 @@ export interface CommandReply {
 }
 
 /** Run a natural-language command server-side (acts as the signed-in user). */
-export async function runCommand(text: string): Promise<CommandReply> {
+export async function runCommand(text: string, currentProjectId?: string | null): Promise<CommandReply> {
   const res = await fetch(url('/api/agent/command'), {
     method: 'POST',
     headers: authHeaders(getServerConfig()),
-    body: JSON.stringify({ text, timezone: localTimezone() }),
+    body: JSON.stringify({ text, timezone: localTimezone(), currentProjectId: currentProjectId ?? undefined }),
   });
   if (res.status === 503) throw new Error('AI commands are not set up. Configure one in Settings → AI agents.');
   if (!res.ok) throw new Error(await errMsg(res, 'command failed'));

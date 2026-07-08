@@ -14,7 +14,7 @@ import { SettingsSection } from './settings/SettingsSection';
 import { ErrorText, SettingsToggle, btnPrimary, inputCls } from './settings/controls';
 import { useSavedFlash } from './settings/useSavedFlash';
 
-const DEFAULT_KEYWORDS = ['can', 'add', 'check off', 'mark off', 'mark as'];
+const DEFAULT_KEYWORDS = ['can', 'add', 'remind', 'check off', 'mark off', 'mark as'];
 
 export function NlCommands() {
   const [agents, setAgents] = useState<Agent[]>([]);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import {
   Sun,
@@ -178,7 +178,7 @@ function FolderEditor({ folder, onClose }: { folder: Item; onClose: () => void }
   );
 }
 
-function SidebarRow({
+const SidebarRow = memo(function SidebarRow({
   row,
   editing,
   onToggleCollapse,
@@ -245,6 +245,7 @@ function SidebarRow({
                 type="button"
                 onClick={() => onEditFolder(row.id)}
                 className="rounded p-0.5 text-text-faint opacity-0 hover:text-text group-hover/folder:opacity-100"
+                title="Edit folder"
                 aria-label="Edit folder"
               >
                 <Pencil size={13} />
@@ -283,7 +284,7 @@ function SidebarRow({
       </div>
     </div>
   );
-}
+});
 
 function ProjectsSection() {
   const navigate = useNavigate();
@@ -292,7 +293,7 @@ function ProjectsSection() {
   const collapsed = useStore((s) => s.collapsed);
   const toggleCollapsed = useStore((s) => s.toggleCollapsed);
   const countScope = useStore((s) => s.uiPrefs.countScope);
-  const close = () => setSidebarOpen(false);
+  const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -311,7 +312,20 @@ function ProjectsSection() {
     [countScope],
   );
 
-  const rows = data ? buildFolderRows(data.folders, data.projects, data.openById, collapsed) : [];
+  // Memoized so SidebarRow (React.memo) only re-renders rows whose own data
+  // actually changed, instead of every row whenever this section re-renders
+  // (e.g. the "new folder/project" menu opening) for an unrelated reason.
+  const rows = useMemo(
+    () => (data ? buildFolderRows(data.folders, data.projects, data.openById, collapsed) : []),
+    [data, collapsed],
+  );
+
+  // Stable identities so SidebarRow's memo isn't defeated by fresh closures.
+  const onEditFolder = useCallback(
+    (id: string) => setEditingId((cur) => (cur === id ? null : id)),
+    [],
+  );
+  const onCloseEditor = useCallback(() => setEditingId(null), []);
 
   // Press-and-hold to drag (~200ms), matching every other list in the app. A
   // quick tap/scroll (moving >5px before the delay) is never treated as a drag.
@@ -402,6 +416,7 @@ function ProjectsSection() {
           <button
             className="rounded p-1 text-text-faint hover:bg-surface-2 hover:text-text"
             onClick={() => setMenuOpen((o) => !o)}
+            title="New folder or project"
             aria-label="New folder or project"
           >
             <Plus size={15} />
@@ -463,8 +478,8 @@ function ProjectsSection() {
                   editing={editingId === row.id}
                   onToggleCollapse={toggleCollapsed}
                   onOpenProject={close}
-                  onEditFolder={(id) => setEditingId((cur) => (cur === id ? null : id))}
-                  onCloseEditor={() => setEditingId(null)}
+                  onEditFolder={onEditFolder}
+                  onCloseEditor={onCloseEditor}
                 />
               ))}
             </div>
@@ -476,7 +491,13 @@ function ProjectsSection() {
 }
 
 /** One draggable tag row in the sidebar tag tree. */
-function TagRow({ node, onOpen }: { node: TagNode; onOpen: (id: string) => void }) {
+const TagRow = memo(function TagRow({
+  node,
+  onOpen,
+}: {
+  node: TagNode;
+  onOpen: (id: string) => void;
+}) {
   const collapsed = useStore((s) => s.collapsed);
   const toggleCollapsed = useStore((s) => s.toggleCollapsed);
   const selectedId = useStore((s) => s.selectedId);
@@ -516,6 +537,7 @@ function TagRow({ node, onOpen }: { node: TagNode; onOpen: (id: string) => void 
               'flex h-7 w-5 shrink-0 items-center justify-center text-text-faint',
               !hasChildren && 'invisible',
             )}
+            title={collapsed.has(node.tag.id) ? 'Expand' : 'Collapse'}
             aria-label={collapsed.has(node.tag.id) ? 'Expand' : 'Collapse'}
           >
             <ChevronRight
@@ -540,14 +562,14 @@ function TagRow({ node, onOpen }: { node: TagNode; onOpen: (id: string) => void 
       </div>
     </div>
   );
-}
+});
 
 function TagsSection() {
   const navigate = useNavigate();
   const select = useStore((s) => s.select);
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
   const collapsed = useStore((s) => s.collapsed);
-  const close = () => setSidebarOpen(false);
+  const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
 
   const data = useDeferredQuery((db) => {
     const tags = listTags(db);
@@ -556,16 +578,24 @@ function TagsSection() {
     return { roots: buildTagTree(resolved, tagCounts(db)) };
   }, []);
 
-  const flat = data ? flattenTagTree(data.roots, collapsed) : [];
+  // Memoized so TagRow (React.memo) doesn't get a fresh `node` on every render
+  // of this section unrelated to tag data/collapse state.
+  const flat = useMemo(
+    () => (data ? flattenTagTree(data.roots, collapsed) : []),
+    [data, collapsed],
+  );
 
   // Press-and-hold to drag (~200ms), matching the task list and Projects.
   const sensors = useReorderSensors();
 
-  function openTag(id: string) {
-    select(id, 'tag');
-    navigate(`/tag/${id}`);
-    close();
-  }
+  const openTag = useCallback(
+    (id: string) => {
+      select(id, 'tag');
+      navigate(`/tag/${id}`);
+      close();
+    },
+    [select, navigate, close],
+  );
 
   function addTag() {
     const tag = mutate((db, dev) => createTag(db, dev, 'New tag'));
@@ -649,6 +679,7 @@ function TagsSection() {
         <button
           className="rounded p-1 text-text-faint hover:bg-surface-2 hover:text-text"
           onClick={addTag}
+          title="New tag"
           aria-label="New tag"
         >
           <Plus size={15} />
@@ -710,7 +741,7 @@ function UndoButtons() {
 /** One draggable perspective row. The delete button only exists while this
  *  perspective is the open view — and when it does, it stays fully visible
  *  (no hover reveal) so it is reachable on touch. */
-function PerspectiveRow({
+const PerspectiveRow = memo(function PerspectiveRow({
   p,
   selected,
   count,
@@ -721,7 +752,7 @@ function PerspectiveRow({
   selected: boolean;
   count?: number;
   onOpen: () => void;
-  onDelete: () => void;
+  onDelete: (id: string, name: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: p.id,
@@ -760,10 +791,11 @@ function PerspectiveRow({
       {selected && (
         <button
           type="button"
-          onClick={onDelete}
+          onClick={() => onDelete(p.id, p.name)}
           // stop the drag sensor from claiming the press so a tap deletes
           onPointerDown={(e) => e.stopPropagation()}
           className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-text-faint hover:text-danger"
+          title={`Delete ${p.name}`}
           aria-label={`Delete ${p.name}`}
         >
           <X size={13} />
@@ -771,7 +803,7 @@ function PerspectiveRow({
       )}
     </div>
   );
-}
+});
 
 function PerspectivesSection() {
   const navigate = useNavigate();
@@ -780,7 +812,7 @@ function PerspectivesSection() {
   // A sync bumps dbRevision after applying settings; re-read so a perspective
   // added/removed/reordered on another device shows up without a navigation.
   const dbRevision = useStore((s) => s.dbRevision);
-  const close = () => setSidebarOpen(false);
+  const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
   const sensors = useReorderSensors();
 
   const [perspectives, setPerspectives] = useState<SavedPerspective[]>(getPerspectives);
@@ -796,14 +828,19 @@ function PerspectivesSection() {
     [perspectives],
   );
 
-  if (perspectives.length === 0) return null;
+  // Stable identity (only depends on the current route) so PerspectiveRow's
+  // memo isn't defeated by a fresh per-row closure every render.
+  const deletePerspective = useCallback(
+    (id: string, name: string) => {
+      if (!window.confirm(`Delete perspective "${name}"?`)) return;
+      removePerspective(id);
+      setPerspectives(getPerspectives());
+      if (location.pathname === `/view/${id}`) navigate('/today');
+    },
+    [location.pathname, navigate],
+  );
 
-  function deletePerspective(id: string, name: string) {
-    if (!window.confirm(`Delete perspective "${name}"?`)) return;
-    removePerspective(id);
-    setPerspectives(getPerspectives());
-    if (location.pathname === `/view/${id}`) navigate('/today');
-  }
+  if (perspectives.length === 0) return null;
 
   function onDragEnd(e: DragEndEvent) {
     const { active, over } = e;
@@ -840,7 +877,7 @@ function PerspectivesSection() {
                   selected={location.pathname === `/view/${p.id}`}
                   count={counts?.[p.id]}
                   onOpen={close}
-                  onDelete={() => deletePerspective(p.id, p.name)}
+                  onDelete={deletePerspective}
                 />
               ))}
             </div>

@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "tsx --test --experimental-test-coverage \"src/**/*.test.ts\"",
-    "add-user": "tsx scripts/add-user.ts"
+    "add-user": "tsx scripts/add-user.ts",
+    "backup": "tsx scripts/backup-dbs.ts"
   },
   "dependencies": {
     "@carbon/core": "*",

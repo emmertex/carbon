@@ -30,6 +30,7 @@ import {
 import { Plus } from 'lucide-react';
 import { useQuery } from '@/hooks/useQuery';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
+import { isCompactViewport } from '@/hooks/useCompact';
 import { itemAssignees } from '@/lib/enrich';
 import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
@@ -293,7 +294,7 @@ export function TaskTree({
   const [returnToId, setReturnToId] = useState<string | null>(null);
 
   const idxOf = (id: string | null) => visible.findIndex((f) => f.id === id);
-  const wideEnough = () => typeof window !== 'undefined' && window.innerWidth >= 1024;
+  const wideEnough = () => !isCompactViewport();
 
   // Keep the keyboard-focused row in view.
   useEffect(() => {

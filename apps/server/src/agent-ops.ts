@@ -128,6 +128,10 @@ export interface ItemsInput {
   status?: string;
   /** 'task' (default, back-compat) | 'note' | 'all'. */
   type?: string;
+  /** ISO datetimes bounding due_date (inclusive). Either one restricts the result to items
+   *  that HAVE a due date, sorted soonest-first — "what's due this week?" style questions. */
+  due_before?: string;
+  due_after?: string;
   limit?: number;
   detail?: boolean;
 }
@@ -453,10 +457,31 @@ export function createAgentOps(deps: AgentApiDeps) {
     let pool = taskPool(userId, list, tag, { includeDone: status !== 'active', itemType });
     if (status === 'active') pool = pool.filter((i) => i.type === 'note' || i.status === 'active');
     else if (status === 'done') pool = pool.filter((i) => i.status === 'done');
+    // Date-window questions ("what's due this week?"). Bounds are normalized to the same
+    // UTC form due_date is stored in, so plain string compares are correct. Only items WITH
+    // a due date can match; soonest-first so the limit keeps the most urgent ones instead
+    // of an arbitrary 50 on big workspaces.
+    const dueBefore = input.due_before ? normalizeDateTime(input.due_before) : null;
+    const dueAfter = input.due_after ? normalizeDateTime(input.due_after) : null;
+    const dueFiltered = !!(dueBefore || dueAfter);
+    if (dueFiltered) {
+      pool = pool
+        .filter(
+          (i) =>
+            i.due_date && (!dueBefore || i.due_date <= dueBefore) && (!dueAfter || i.due_date >= dueAfter),
+        )
+        .sort((a, b) => (a.due_date! < b.due_date! ? -1 : 1));
+    }
     const q = input.q?.trim();
     if (q) pool = rankBy(q, pool, [(i) => i.title]).map((s) => s.item);
     pool = pool.slice(0, limit);
-    return ok({ items: pool.map(input.detail ? detailItem : minimalItem) });
+    // A due-filtered ask is about dates, so surface due_date even without detail:true.
+    const shape = input.detail
+      ? detailItem
+      : dueFiltered
+        ? (it: Item) => ({ ...minimalItem(it), due_date: it.due_date })
+        : minimalItem;
+    return ok({ items: pool.map(shape) });
   }
 
   const SNIPPET_RADIUS = 80; // chars of context either side of a match
@@ -653,6 +678,29 @@ export function createAgentOps(deps: AgentApiDeps) {
     // an explicit include_done for "untick X" style queries that omit the flag.
     const includeDone = !done || input.include_done === true;
     const pool = taskPool(userId, list, tag, { includeDone });
+
+    // No ids/queries but a list or tag: sweep the whole thing ("tick everything off my
+    // shopping list", "untick my weekly items"). Only ever a named list/tag — a bare
+    // complete{} stays an error rather than acting on the global pool. The tag-scoped pool
+    // can contain projects, so filter to tasks; skip items already in the requested state.
+    if (!input.ids?.length && !input.queries?.length) {
+      if (!list && !tag) {
+        return input.list || input.tag
+          ? fail('list or tag not found', 404)
+          : fail('specify queries, ids, list, or tag', 400);
+      }
+      for (const it of pool) {
+        if (it.type !== 'task' || (it.status === 'done') === done) continue;
+        if (!canWrite(userId, it.id)) {
+          unmatched.push({ query: it.title, reason: 'forbidden' });
+          continue;
+        }
+        setCompleted(db, deviceId, it.id, done);
+        matched.push({ query: it.title, id: it.id, title: it.title });
+      }
+      return ok({ matched, unmatched, done });
+    }
+
     for (const query of input.queries ?? []) {
       const m = bestMatch(query, pool, [(i) => i.title]);
       if (!m.matched) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import {
@@ -77,7 +77,7 @@ function EntryShell({
 
 /** Renders one entry per the global grouping toggle and its order mode. The
  *  optional `grip` is the drag handle, anchored to the top row only. */
-export function PlanEntryRows({
+export const PlanEntryRows = memo(function PlanEntryRows({
   entry,
   grouping,
   grip,
@@ -154,10 +154,10 @@ export function PlanEntryRows({
     </>
   );
   return <EntryShell grip={grip} topRow={topRow} rest={rest} />;
-}
+});
 
 /** A reorderable entry: same content, with a drag handle anchored to the top row. */
-function SortableEntry({
+const SortableEntry = memo(function SortableEntry({
   entry,
   grouping,
   focused = false,
@@ -184,7 +184,7 @@ function SortableEntry({
       <PlanEntryRows entry={entry} grouping={grouping} focused={focused} />
     </div>
   );
-}
+});
 
 /** Renders a list of plan entries with the shared subtask-surfacing presentation.
  *  When `reorderable`, the top-level entries (parents) can be drag-sorted. */

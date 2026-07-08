@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { test, describe, afterEach } from 'node:test';
-import { getProjects, getChildren } from '@carbon/core';
+import { getProjects, getChildren, createItem } from '@carbon/core';
 import { openControlDb } from './control';
 import { createAgent, getAgent, setNlSettings, getAgentUsage } from './agents';
 import { HOST_LM_AGENT_ID } from './host-lm';
@@ -221,6 +221,9 @@ describe('telegram dispatch into the NL loop', () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('alice', 'pw');
     makeAgentOn(db);
+    // The list must already exist: since 4dc8907 the loop defaults create_list_if_missing
+    // to false, so an add against a missing list is refused rather than creating it.
+    createItem(db, deviceId, { type: 'project', title: 'shopping list', ownerId: uid });
     const sent: Array<{ chatId: string; text: string }> = [];
     const deps = makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent });
 

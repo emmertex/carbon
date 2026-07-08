@@ -193,7 +193,7 @@ export const useStore = create<AppState>((set, get) => ({
   redoCount: 0,
   quickAddFocusNonce: 0,
   nlEnabled: false,
-  nlKeywords: ['can', 'add', 'check off', 'mark off', 'mark as'],
+  nlKeywords: ['can', 'add', 'remind', 'check off', 'mark off', 'mark as'],
   toast: null,
   interrupt: null,
 
