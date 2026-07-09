@@ -72,6 +72,11 @@ function loadServiceAccount(): ServiceAccount | null {
     console.error('[carbon] failed to load FCM service account:', e);
     serviceAccount = null;
   }
+  if (serviceAccount === null) {
+    console.warn(
+      '[carbon] FCM disabled: set FCM_SERVICE_ACCOUNT_JSON or FCM_SERVICE_ACCOUNT_FILE to push to native apps',
+    );
+  }
   return serviceAccount;
 }
 
@@ -118,14 +123,22 @@ async function getAccessToken(sa: ServiceAccount): Promise<string | null> {
 
 // ----- send -----------------------------------------------------------------
 
-/** Deliver a payload to every FCM token registered to a user. No-op if unconfigured. */
-export async function sendFcmToUser(db: Db, userId: string, payload: PushPayload): Promise<void> {
+/** Deliver a payload to every FCM token registered to a user. No-op if unconfigured.
+ *  Returns delivery counts (see DeliveryResult in push.ts): unconfigured or tokenless
+ *  users contribute zero targets; dead tokens removed mid-send don't count either. */
+export async function sendFcmToUser(
+  db: Db,
+  userId: string,
+  payload: PushPayload,
+): Promise<{ targets: number; delivered: number }> {
+  const result = { targets: 0, delivered: 0 };
   const sa = loadServiceAccount();
-  if (!sa) return;
+  if (!sa) return result;
   const tokens = tokensForUser(db, userId);
-  if (tokens.length === 0) return;
+  if (tokens.length === 0) return result;
+  result.targets = tokens.length;
   const accessToken = await getAccessToken(sa);
-  if (!accessToken) return;
+  if (!accessToken) return result;
 
   const endpoint = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
   await Promise.all(
@@ -148,9 +161,12 @@ export async function sendFcmToUser(db: Db, userId: string, payload: PushPayload
             },
           }),
         });
-        if (res.status === 404 || res.status === 410) {
+        if (res.ok) {
+          result.delivered++;
+        } else if (res.status === 404 || res.status === 410) {
           removeFcmToken(db, token); // token gone — drop it
-        } else if (!res.ok) {
+          result.targets--;
+        } else {
           console.error('[carbon] FCM send failed:', res.status, await res.text());
         }
       } catch (e) {
@@ -158,4 +174,5 @@ export async function sendFcmToUser(db: Db, userId: string, payload: PushPayload
       }
     }),
   );
+  return result;
 }

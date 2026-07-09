@@ -5,6 +5,26 @@ starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+
+## v0.7.4
+**Release Fix**
+
+
+## v0.7.3
+**Sync visibility and local-data recovery**
+- Sync errors are now spelled out in Settings → Sync instead of hiding in a tooltip on
+  the cloud icon (which never showed on touch devices). The panel shows live sync state,
+  the actual failure message, and when the last successful sync happened.
+- Added a **Reset local data** button (Settings → Sync): erases this device's local
+  database and re-downloads everything from the server. This is the recovery path when
+  projects or tasks are missing or the local copy is corrupt/half-migrated — a symptom
+  that could otherwise survive a sign-out/sign-in because the bad local data was kept.
+- Signing in now offers **Merge** (keep local tasks and combine with the account — the
+  previous default) or **Replace** (discard local and pull the account fresh) whenever
+  the device already has local data. Clean installs sign in silently as before.
+- Signing out now asks whether to **keep** the local copy for offline use or **erase**
+  it, so nothing is left behind on shared devices.
+
 ## v0.7.2
 **Natural-language assistant overhaul**
 - Everyday phrasings now work in the quick-add bar and Telegram: past-tense completion

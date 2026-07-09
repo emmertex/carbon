@@ -9,7 +9,8 @@ import {
 } from '@/lib/config';
 import { isNative } from '@/lib/platform';
 import { useStore } from '@/lib/store';
-import { signIn, syncNow } from '@/lib/sync';
+import { signIn, syncNow, resetLocalDataAndReload } from '@/lib/sync';
+import { localItemCount } from '@/lib/db';
 
 /**
  * Full-screen sign-in. Reached when the configured server requires a login
@@ -36,13 +37,18 @@ export function SignInGate() {
   );
   // Start on credentials when a server is already wired up (the common tenant /
   // self-host case); otherwise ask for the workspace + domain first.
-  const [step, setStep] = useState<'url' | 'creds'>(getServerConfig().url ? 'creds' : 'url');
+  const [step, setStep] = useState<'url' | 'creds' | 'merge'>(
+    getServerConfig().url ? 'creds' : 'url',
+  );
   const [workspace, setWorkspace] = useState(initial.workspace);
   const [domain, setDomain] = useState(initial.domain);
   const [username, setUsername] = useState(getServerConfig().username);
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // How many local (pre-sign-in) items are at stake, so the merge/replace step can
+  // tell the user what "replace" would discard.
+  const [localCount, setLocalCount] = useState(0);
 
   const inputCls =
     'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent';
@@ -72,6 +78,15 @@ export function SignInGate() {
     const result = await signIn(password);
     setBusy(false); // never leave the spinner stuck (W5)
     if (result === 'ok') {
+      // If there's local data on this device, let the user choose whether to keep
+      // it (merge — the default claim-and-sync) or discard it and pull the account
+      // fresh (replace). A clean install (nothing local) just signs in and syncs.
+      const n = localItemCount();
+      if (n > 0) {
+        setLocalCount(n);
+        setStep('merge');
+        return;
+      }
       closeLogin(); // dismiss the gate now that we're signed in
       void syncNow();
     } else if (result === 'error') {
@@ -79,6 +94,19 @@ export function SignInGate() {
     } else {
       setError('Sign-in failed — check your username and password.');
     }
+  }
+
+  /** Keep local items: claim the unowned ones into this account (handled by the
+   *  first sync's identity step) and merge with whatever the server has. */
+  function mergeLocal() {
+    closeLogin();
+    void syncNow();
+  }
+
+  /** Discard the local database and re-pull everything from the server. Reloads. */
+  function replaceLocal() {
+    setBusy(true);
+    void resetLocalDataAndReload();
   }
 
   return (
@@ -150,7 +178,7 @@ export function SignInGate() {
               <ArrowLeft size={15} /> Back to Carbon
             </button>
           </>
-        ) : (
+        ) : step === 'creds' ? (
           <>
             <h1 className="mb-1 text-xl font-semibold">Sign in to Carbon</h1>
             <p className="mb-6 text-sm text-text-muted">
@@ -201,6 +229,43 @@ export function SignInGate() {
               <Link to="/signup" className="text-accent">
                 Create one
               </Link>
+            </div>
+          </>
+        ) : (
+          <>
+            <h1 className="mb-1 text-xl font-semibold">You have local tasks on this device</h1>
+            <p className="mb-6 text-sm text-text-muted">
+              Signed in as <span className="font-medium text-text">{username.trim()}</span>. This
+              device already has {localCount} local {localCount === 1 ? 'item' : 'items'}. What
+              should happen to {localCount === 1 ? 'it' : 'them'}?
+            </p>
+            <div className="space-y-3">
+              <button
+                onClick={mergeLocal}
+                disabled={busy}
+                className="w-full rounded-lg border border-border bg-surface p-3 text-left hover:border-accent disabled:opacity-50"
+              >
+                <span className="block text-sm font-medium text-text">Merge with my account</span>
+                <span className="mt-0.5 block text-xs text-text-muted">
+                  Keep the tasks on this device and combine them with everything in your account.
+                  Recommended for normal sign-in.
+                </span>
+              </button>
+              <button
+                onClick={replaceLocal}
+                disabled={busy}
+                className="flex w-full flex-col items-start rounded-lg border border-red-500/40 p-3 text-left hover:bg-red-500/10 disabled:opacity-50"
+              >
+                <span className="flex items-center gap-2 text-sm font-medium text-red-500">
+                  {busy && <Loader2 className="animate-spin" size={14} />}
+                  Replace with my account's data
+                </span>
+                <span className="mt-0.5 block text-xs text-text-muted">
+                  Erase this device's {localCount} local {localCount === 1 ? 'item' : 'items'} and
+                  re-download everything from the server. Use this if the local copy is wrong or out
+                  of date.
+                </span>
+              </button>
             </div>
           </>
         )}

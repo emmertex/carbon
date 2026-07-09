@@ -1,6 +1,7 @@
 import initSqlJs, { type Database as SqlJsDatabase, type Statement } from 'sql.js';
 import localforage from 'localforage';
 import { perf } from './perf';
+import { clearBlobs } from './blobs';
 import {
   migrate,
   ensureDeviceId,
@@ -318,6 +319,27 @@ export function exportDb(): Uint8Array {
  *  landing after this write would silently undo the import before the reload. */
 export async function importDb(bytes: Uint8Array): Promise<void> {
   await supersedePendingWrites(() => localforage.setItem(STORE_KEY, bytes).then(() => undefined));
+}
+
+/** Erase the persisted local database (items, ops, tags, sync cursors, device id).
+ *  Server credentials live in localStorage and are left untouched, so the next
+ *  launch signs back in and re-pulls everything fresh from the server. The live
+ *  in-memory DB still holds the old data after this resolves — callers MUST reload
+ *  the app immediately (any pending write would otherwise re-persist the old data,
+ *  so those are superseded first). */
+export async function wipeLocalDb(): Promise<void> {
+  await supersedePendingWrites(() => localforage.removeItem(STORE_KEY).then(() => undefined));
+  // Blobs (attachments) live in a separate localforage store — clear them too so a
+  // reset doesn't leave orphaned cached files behind. They re-download on demand.
+  await clearBlobs();
+}
+
+/** Count of non-deleted items (projects + tasks) held in the local DB. Used to
+ *  decide whether signing in should offer to merge or replace local data. */
+export function localItemCount(): number {
+  if (!dbInstance) return 0;
+  const row = dbInstance.get<{ n: number }>('SELECT COUNT(*) AS n FROM items WHERE deleted = 0');
+  return row?.n ?? 0;
 }
 
 /** Open backup bytes as a throwaway in-memory DB to read from, without touching

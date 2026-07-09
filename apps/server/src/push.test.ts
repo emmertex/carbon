@@ -5,7 +5,7 @@ import webpush from 'web-push';
 import { makeTestDb, makeHono, appFetch, type TestDb } from './test-app';
 import { saveSubscription, removeSubscription, checkReminders, notifyTask } from './push';
 import { saveFcmToken, removeFcmToken } from './fcm';
-import { createItem, updateItem, createTag, updateTag, setItemTags, tagId } from '@carbon/core';
+import { createItem, updateItem, createTag, updateTag, setItemTags, tagId, shareItem } from '@carbon/core';
 import type { AuthVars } from './auth';
 
 function buildPushApp(db: TestDb, vapidPublicKey: string) {
@@ -265,6 +265,175 @@ describe('notifyTask WebPush error handling', () => {
     assert.ok(
       !db.get('SELECT 1 FROM push_subscriptions WHERE endpoint = ?', [endpoint]),
       'subscription is cleaned up for a 410',
+    );
+  });
+});
+
+// ─── Per-tenant VAPID signing ─────────────────────────────────────────────────
+
+describe('per-tenant VAPID', () => {
+  test('each tenant signs with its own keys, not a process-global pair', async () => {
+    const a = makeTestDb();
+    const b = makeTestDb();
+    assert.notEqual(a.vapidPublicKey, b.vapidPublicKey, 'tenants generate distinct keypairs');
+
+    const setup = (t: ReturnType<typeof makeTestDb>, name: string) => {
+      const { id: userId } = t.addUser(name, 'pw');
+      saveSubscription(t.db, userId, {
+        endpoint: `https://push.example.com/${name}`,
+        keys: { p256dh: 'A', auth: 'B' },
+      });
+      return createItem(t.db, t.deviceId, { title: name, ownerId: userId });
+    };
+    const itemA = setup(a, 'tenant-a');
+    const itemB = setup(b, 'tenant-b');
+
+    const realSend = webpush.sendNotification;
+    const signedWith: Record<string, string | undefined> = {};
+    webpush.sendNotification = (async (sub: { endpoint: string }, _p: unknown, opts?: unknown) => {
+      signedWith[sub.endpoint] = (opts as { vapidDetails?: { publicKey: string } })?.vapidDetails
+        ?.publicKey;
+      return { statusCode: 201, body: '', headers: {} };
+    }) as unknown as typeof webpush.sendNotification;
+    try {
+      await notifyTask(a.db, itemA.id, { title: 'hi', body: 'a' });
+      await notifyTask(b.db, itemB.id, { title: 'hi', body: 'b' });
+    } finally {
+      webpush.sendNotification = realSend;
+    }
+
+    assert.equal(signedWith['https://push.example.com/tenant-a'], a.vapidPublicKey);
+    assert.equal(signedWith['https://push.example.com/tenant-b'], b.vapidPublicKey);
+  });
+});
+
+// ─── Shared-user fan-out ──────────────────────────────────────────────────────
+
+describe('notifyTask shared-user fan-out', () => {
+  test('notifies users the task is shared with, including inherited shares', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: ownerId } = addUser('owner', 'pw');
+    const { id: directId } = addUser('direct', 'pw');
+    const { id: inheritedId } = addUser('inherited', 'pw');
+    for (const [uid, name] of [
+      [ownerId, 'owner'],
+      [directId, 'direct'],
+      [inheritedId, 'inherited'],
+    ] as const) {
+      saveSubscription(db, uid, {
+        endpoint: `https://push.example.com/${name}`,
+        keys: { p256dh: 'A', auth: 'B' },
+      });
+    }
+    const parent = createItem(db, deviceId, { title: 'parent', ownerId });
+    const child = createItem(db, deviceId, { title: 'child', ownerId, parentId: parent.id });
+    shareItem(db, deviceId, child.id, directId, 'read');
+    shareItem(db, deviceId, parent.id, inheritedId, 'write');
+
+    const realSend = webpush.sendNotification;
+    const endpoints: string[] = [];
+    webpush.sendNotification = (async (sub: { endpoint: string }) => {
+      endpoints.push(sub.endpoint);
+      return { statusCode: 201, body: '', headers: {} };
+    }) as unknown as typeof webpush.sendNotification;
+    try {
+      const sent = await notifyTask(db, child.id, { title: 'hi', body: 'there' });
+      assert.equal(sent.targets, 3);
+      assert.equal(sent.delivered, 3);
+    } finally {
+      webpush.sendNotification = realSend;
+    }
+
+    assert.deepEqual(endpoints.sort(), [
+      'https://push.example.com/direct',
+      'https://push.example.com/inherited',
+      'https://push.example.com/owner',
+    ]);
+  });
+});
+
+// ─── Retry on failed delivery ─────────────────────────────────────────────────
+
+describe('checkReminders delivery accounting', () => {
+  test('a failed send is retried on the next tick instead of being latched as sent', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser('u', 'pw');
+    saveSubscription(db, userId, {
+      endpoint: 'https://push.example.com/flaky',
+      keys: { p256dh: 'A', auth: 'B' },
+    });
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const item = createItem(db, deviceId, { title: 'task', ownerId: userId });
+    updateItem(db, deviceId, item.id, { due_date: past });
+
+    const sent = () =>
+      !!db.get('SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ?', [item.id, 'due']);
+
+    const realSend = webpush.sendNotification;
+    const realError = console.error;
+    console.error = () => {};
+    try {
+      // Tick 1: every send fails (e.g. push service outage / bad signature).
+      webpush.sendNotification = (async () => {
+        throw Object.assign(new Error('unauthorized'), { statusCode: 401 });
+      }) as typeof webpush.sendNotification;
+      await checkReminders(db);
+      assert.ok(!sent(), 'failed delivery is not marked sent');
+
+      // Tick 2: the send succeeds — now it latches.
+      webpush.sendNotification = (async () => ({
+        statusCode: 201,
+        body: '',
+        headers: {},
+      })) as unknown as typeof webpush.sendNotification;
+      await checkReminders(db);
+      assert.ok(sent(), 'successful delivery is marked sent');
+    } finally {
+      webpush.sendNotification = realSend;
+      console.error = realError;
+    }
+  });
+
+  test('an alert with no subscriptions anywhere is still marked sent (nothing to deliver)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser('u', 'pw');
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const item = createItem(db, deviceId, { title: 'task', ownerId: userId });
+    updateItem(db, deviceId, item.id, { due_date: past });
+
+    await checkReminders(db);
+    assert.ok(
+      db.get('SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ?', [item.id, 'due']),
+      'no-subscriber alerts latch immediately, matching red-state-only users',
+    );
+  });
+
+  test('a persistently failing alert older than a day gives up and latches', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser('u', 'pw');
+    saveSubscription(db, userId, {
+      endpoint: 'https://push.example.com/dead',
+      keys: { p256dh: 'A', auth: 'B' },
+    });
+    const stale = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const item = createItem(db, deviceId, { title: 'task', ownerId: userId });
+    updateItem(db, deviceId, item.id, { due_date: stale });
+
+    const realSend = webpush.sendNotification;
+    const realError = console.error;
+    console.error = () => {};
+    webpush.sendNotification = (async () => {
+      throw Object.assign(new Error('unauthorized'), { statusCode: 401 });
+    }) as typeof webpush.sendNotification;
+    try {
+      await checkReminders(db);
+    } finally {
+      webpush.sendNotification = realSend;
+      console.error = realError;
+    }
+    assert.ok(
+      db.get('SELECT 1 AS x FROM reminders_sent WHERE item_id = ? AND kind = ?', [item.id, 'due']),
+      'day-old undeliverable alerts latch instead of retrying forever',
     );
   });
 });

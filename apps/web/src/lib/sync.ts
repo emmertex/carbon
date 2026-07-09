@@ -14,7 +14,7 @@ import {
   type RecordOp,
   type User,
 } from '@carbon/core';
-import { getDb, getDeviceId, getMeta, setMeta, persist, schedulePersist } from './db';
+import { getDb, getDeviceId, getMeta, setMeta, persist, schedulePersist, wipeLocalDb } from './db';
 import {
   getServerConfig,
   saveServerConfig,
@@ -182,8 +182,11 @@ async function ensureSession(): Promise<void> {
   await signIn(cfg.password);
 }
 
-/** Sign out: revoke the session server-side and drop all local credentials. */
-export async function signOut(): Promise<void> {
+/** Sign out: revoke the session server-side and drop all local credentials.
+ *  Local data is left in place unless `eraseLocal` is set — see the sign-out
+ *  prompt in Settings. When erasing, the caller reloads the app after this
+ *  resolves so it comes back up on an empty, local-only database. */
+export async function signOut(eraseLocal = false): Promise<void> {
   const cfg = getServerConfig();
   if (cfg.url && cfg.token) {
     try {
@@ -195,6 +198,19 @@ export async function signOut(): Promise<void> {
   saveServerConfig({ ...getServerConfig(), token: '', password: '' });
   saveCurrentUser(null);
   useStore.getState().setCurrentUser(null);
+  if (eraseLocal) await wipeLocalDb();
+}
+
+/**
+ * Discard the entire local database and reload so the app re-pulls everything
+ * fresh from the server. Signed-in credentials (in localStorage) are kept, so the
+ * reload lands signed in and a full sync repopulates projects/tasks. This is the
+ * recovery path for a corrupt or half-migrated local DB — the server copy is the
+ * source of truth. Callers must confirm with the user first: any local changes not
+ * yet pushed to the server are discarded. */
+export async function resetLocalDataAndReload(): Promise<void> {
+  await wipeLocalDb();
+  window.location.reload();
 }
 
 /**

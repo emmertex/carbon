@@ -108,6 +108,14 @@ export async function exportBlobs(): Promise<Record<string, ArrayBuffer>> {
   return out;
 }
 
+/** Drop every locally-cached blob and the pending-upload queue. Used when wiping
+ *  the local database — blobs live in a separate localforage store and would
+ *  otherwise survive the reset. They re-download from the server on demand after
+ *  the next sync. */
+export async function clearBlobs(): Promise<void> {
+  await store.clear();
+}
+
 /** Replace all locally-cached blobs (for import). */
 export async function replaceBlobs(map: Record<string, ArrayBuffer>): Promise<void> {
   await store.clear();

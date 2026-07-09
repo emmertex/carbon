@@ -1,5 +1,12 @@
 import webpush from 'web-push';
-import { type Db, getItem, listAssigneesForItem, heldTagIds, itemHasHeldTag } from '@carbon/core';
+import {
+  type Db,
+  getItem,
+  listAssigneesForItem,
+  effectiveShares,
+  heldTagIds,
+  itemHasHeldTag,
+} from '@carbon/core';
 import { sendFcmToUser } from './fcm';
 import { alreadySent, markSent } from './reminders-sent';
 
@@ -44,8 +51,25 @@ export function initVapid(db: Db): string {
     setMeta(db, 'vapid_public', pub);
     setMeta(db, 'vapid_private', priv);
   }
-  webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@carbon.local', pub, priv);
   return pub;
+}
+
+interface VapidDetails {
+  subject: string;
+  publicKey: string;
+  privateKey: string;
+}
+
+/** Per-tenant VAPID credentials, passed to each send. Never installed globally via
+ *  webpush.setVapidDetails: that mutates a process-wide singleton, so with multiple
+ *  tenants (each with its own generated keypair) the last tenant initialized would
+ *  sign every other tenant's pushes with the wrong key and the push services reject
+ *  them all with 401 "VAPID public key mismatch". */
+function vapidDetailsFor(db: Db): VapidDetails | null {
+  const publicKey = process.env.VAPID_PUBLIC_KEY || getMeta(db, 'vapid_public');
+  const privateKey = process.env.VAPID_PRIVATE_KEY || getMeta(db, 'vapid_private');
+  if (!publicKey || !privateKey) return null;
+  return { subject: process.env.VAPID_SUBJECT || 'mailto:admin@carbon.local', publicKey, privateKey };
 }
 
 interface BrowserSubscription {
@@ -87,40 +111,66 @@ export interface PushPayload {
   tag?: string;
 }
 
-async function sendToUser(db: Db, userId: string, payload: PushPayload): Promise<void> {
+/** Delivery outcome: `targets` counts live subscriptions/tokens attempted (dead
+ *  404/410 endpoints removed mid-send don't count); `delivered` counts successes. */
+export interface DeliveryResult {
+  targets: number;
+  delivered: number;
+}
+
+async function sendToUser(db: Db, userId: string, payload: PushPayload): Promise<DeliveryResult> {
   const subs = db.all<SubRow>('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?', [
     userId,
   ]);
-  await Promise.all([
+  const vapid = vapidDetailsFor(db);
+  if (!vapid && subs.length > 0) {
+    console.error('[carbon] web push skipped: no VAPID keys for this tenant');
+  }
+  const result: DeliveryResult = { targets: 0, delivered: 0 };
+  const [fcm] = await Promise.all([
+    // FCM (Capacitor / Android) — no-op unless a service account is configured
+    sendFcmToUser(db, userId, payload),
     // Web Push (browser / desktop PWA)
     ...subs.map(async (s) => {
+      if (!vapid) return; // nothing signable
+      result.targets++;
       try {
         await webpush.sendNotification(
           { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
           JSON.stringify(payload),
+          { vapidDetails: vapid },
         );
+        result.delivered++;
       } catch (err) {
         const code = (err as { statusCode?: number }).statusCode;
         if (code === 404 || code === 410) {
           removeSubscription(db, s.endpoint); // gone
+          result.targets--;
         } else {
           console.error('[carbon] web push send failed:', err);
         }
       }
     }),
-    // FCM (Capacitor / Android) — no-op unless a service account is configured
-    sendFcmToUser(db, userId, payload),
   ]);
+  result.targets += fcm.targets;
+  result.delivered += fcm.delivered;
+  return result;
 }
 
-/** Notify everyone responsible for a task: its owner + assignees. */
-export async function notifyTask(db: Db, itemId: string, payload: PushPayload): Promise<void> {
+/** Notify everyone responsible for a task: its owner, assignees, and every user it
+ *  is shared with (directly or inherited from an ancestor). */
+export async function notifyTask(db: Db, itemId: string, payload: PushPayload): Promise<DeliveryResult> {
   const item = getItem(db, itemId);
-  if (!item) return;
+  if (!item) return { targets: 0, delivered: 0 };
   const recipients = new Set<string>();
   if (item.owner_id) recipients.add(item.owner_id);
   for (const a of listAssigneesForItem(db, itemId)) recipients.add(a.user_id);
-  await Promise.all([...recipients].map((uid) => sendToUser(db, uid, payload)));
+  for (const s of effectiveShares(db, itemId)) recipients.add(s.user_id);
+  const results = await Promise.all([...recipients].map((uid) => sendToUser(db, uid, payload)));
+  return results.reduce(
+    (acc, r) => ({ targets: acc.targets + r.targets, delivered: acc.delivered + r.delivered }),
+    { targets: 0, delivered: 0 },
+  );
 }
 
 
@@ -159,36 +209,33 @@ export async function checkReminders(db: Db): Promise<void> {
          OR (reminder_at IS NOT NULL AND reminder_at <= ?))`,
     [nowIso, nowIso, nowIso],
   );
+  // A send counts as done when something was delivered, or there was nothing to
+  // deliver to (no live subscriptions — matches red-state-only users). When live
+  // subscriptions exist but every send failed (push-service outage, bad VAPID
+  // signature, …), leave the marker unwritten so the next tick retries, up to a
+  // day past the alert time — beyond that, give up rather than flood a user who
+  // re-subscribes next week with stale alerts.
+  const retryCutoff = new Date(Date.now() - 86_400_000).toISOString();
   // Tasks carrying an on-hold tag behave like deferred — all their alerts are muted.
   const held = heldTagIds(db);
   for (const t of due) {
     if (itemHasHeldTag(db, t.id, held)) continue;
-    if (t.reminder_at && t.reminder_at <= nowIso && !alreadySent(db, t.id, 'reminder', t.reminder_at)) {
-      await notifyTask(db, t.id, {
-        title: 'Reminder',
+    const kinds = [
+      { kind: 'reminder', when: t.reminder_at, title: 'Reminder' },
+      { kind: 'due', when: t.due_date, title: 'Task due' },
+      { kind: 'defer', when: t.defer_date, title: 'Task now available' },
+    ] as const;
+    for (const { kind, when, title } of kinds) {
+      if (!when || when > nowIso || alreadySent(db, t.id, kind, when)) continue;
+      const sent = await notifyTask(db, t.id, {
+        title,
         body: t.title || 'Untitled task',
         url: '/today',
-        tag: `reminder:${t.id}`,
+        tag: `${kind}:${t.id}`,
       });
-      markSent(db, t.id, 'reminder', t.reminder_at);
-    }
-    if (t.due_date && t.due_date <= nowIso && !alreadySent(db, t.id, 'due', t.due_date)) {
-      await notifyTask(db, t.id, {
-        title: 'Task due',
-        body: t.title || 'Untitled task',
-        url: '/today',
-        tag: `due:${t.id}`,
-      });
-      markSent(db, t.id, 'due', t.due_date);
-    }
-    if (t.defer_date && t.defer_date <= nowIso && !alreadySent(db, t.id, 'defer', t.defer_date)) {
-      await notifyTask(db, t.id, {
-        title: 'Task now available',
-        body: t.title || 'Untitled task',
-        url: '/today',
-        tag: `defer:${t.id}`,
-      });
-      markSent(db, t.id, 'defer', t.defer_date);
+      if (sent.delivered > 0 || sent.targets === 0 || when < retryCutoff) {
+        markSent(db, t.id, kind, when);
+      }
     }
   }
 }
