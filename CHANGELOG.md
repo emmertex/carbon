@@ -6,6 +6,24 @@ GitHub Release body and the public mirror commit message — so keep each headin
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
 
+## v0.7.5
+**Mobile sync fix**
+- Fixed sync failing permanently with *"tried to bind a value of an unknown type"* on
+  fresh devices — most visibly the Android app after a reset/resync. Record-ops written
+  before newer schema columns existed (e.g. attachments before `item_id` was added)
+  carry data JSON without those keys, and the ingest upserts bound the missing values
+  raw, which SQLite rejects. Long-lived browser sessions never hit this because their
+  sync cursor was already past the legacy ops; a first full pull from history always did.
+  All record upserts now default missing nullable fields to NULL.
+- Sync can no longer be wedged forever by a single bad op: an unappliable op is skipped
+  (and logged to the console) instead of rolling back the whole batch — previously the
+  cursor could never advance past it, so every retry re-hit the same op.
+- Item-op ingest hardened the same way: object field values are stored as their JSON
+  string, booleans as 0/1, and a missing `fields` key is tolerated.
+- Android build script now uses JDK 21 — Capacitor 8 requires it, and builds under
+  JDK 17 failed with "invalid source release: 21" (so APKs built since the Capacitor 8
+  bump may not have included what they were meant to).
+
 ## v0.7.4
 **Release Fix**
 

@@ -179,18 +179,21 @@ export function upsertUser(db: Db, user: User): void {
        plan_default_estimate_min = excluded.plan_default_estimate_min,
        is_remote = excluded.is_remote, home_server = excluded.home_server,
        updated_at = excluded.updated_at, deleted = excluded.deleted`,
+    // `?? null` throughout: rows arriving via sync may predate newer columns
+    // (older server / legacy record-op), and a missing key binds `undefined`,
+    // which both SQL drivers reject — wedging the entire sync ingest.
     [
       user.id,
       username,
-      user.display_name,
-      user.role,
+      user.display_name ?? null,
+      user.role ?? 'member',
       user.is_bot ? 1 : 0,
-      user.avatar_color,
-      user.avatar_initial,
-      user.plan_startup_min,
-      user.plan_default_estimate_min,
+      user.avatar_color ?? null,
+      user.avatar_initial ?? null,
+      user.plan_startup_min ?? null,
+      user.plan_default_estimate_min ?? null,
       user.is_remote ? 1 : 0,
-      user.home_server,
+      user.home_server ?? null,
       user.created_at,
       user.updated_at,
       user.deleted ? 1 : 0,
@@ -1282,7 +1285,7 @@ export function upsertTag(db: Db, tag: Tag): void {
     [
       tag.id,
       tag.name,
-      tag.color,
+      tag.color ?? null,
       tag.status || 'active',
       tag.sort_order ?? 0,
       tag.geo ?? null,
@@ -1486,10 +1489,10 @@ export function upsertTimeLog(db: Db, log: TimeLog): void {
     [
       log.id,
       log.item_id,
-      log.user_id,
+      log.user_id ?? null,
       log.start_time,
-      log.end_time,
-      log.note,
+      log.end_time ?? null,
+      log.note ?? null,
       log.created_at,
       log.updated_at,
       log.kind ?? 'task',
@@ -1613,7 +1616,7 @@ export function upsertShare(db: Db, s: Share): void {
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET permission = excluded.permission,
        updated_at = excluded.updated_at, deleted = excluded.deleted`,
-    [s.id, s.item_id, s.user_id, s.permission, s.created_at, s.updated_at, s.deleted ? 1 : 0],
+    [s.id, s.item_id, s.user_id, s.permission ?? 'read', s.created_at, s.updated_at, s.deleted ? 1 : 0],
   );
 }
 
@@ -1870,8 +1873,8 @@ export function upsertComment(db: Db, c: Comment): void {
     [
       c.id,
       c.item_id,
-      c.author_id,
-      c.body,
+      c.author_id ?? null,
+      c.body ?? '',
       JSON.stringify(c.mentions ?? []),
       c.created_at,
       c.updated_at,
@@ -1957,16 +1960,20 @@ export function upsertAttachment(db: Db, a: Attachment): void {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        deleted = CASE WHEN attachments.deleted = 1 THEN 1 ELSE excluded.deleted END`,
+    // `?? null` for the nullable columns: attachment record-ops that predate the
+    // item_id denormalization (schema v4) carry no item_id key, and a missing key
+    // binds `undefined` — which sql.js rejects, wedging a fresh device's first
+    // full sync on the first legacy attachment it pulls.
     [
       a.id,
       a.parent_type,
       a.parent_id,
-      a.item_id,
+      a.item_id ?? null,
       a.filename,
-      a.mime_type,
-      a.size,
+      a.mime_type ?? null,
+      a.size ?? 0,
       a.hash,
-      a.created_by,
+      a.created_by ?? null,
       a.created_at,
       a.deleted ? 1 : 0,
     ],
@@ -2050,7 +2057,7 @@ export function upsertPlan(db: Db, plan: Plan): void {
      ON CONFLICT(id) DO UPDATE SET
        user_id = excluded.user_id, item_id = excluded.item_id,
        added_at = excluded.added_at, deleted = excluded.deleted`,
-    [plan.id, plan.user_id, plan.item_id, plan.added_at, plan.deleted ? 1 : 0],
+    [plan.id, plan.user_id ?? null, plan.item_id, plan.added_at, plan.deleted ? 1 : 0],
   );
 }
 
@@ -2167,14 +2174,20 @@ export function reapplyAllRecordOps(db: Db): void {
     data: string;
   }>('SELECT id, entity, row_id, ts, device_id, data FROM record_ops ORDER BY rowid');
   for (const r of rows) {
-    applyRecordOp(db, {
-      id: r.id,
-      entity: r.entity,
-      row_id: r.row_id,
-      ts: Number(r.ts),
-      device_id: r.device_id,
-      data: JSON.parse(r.data),
-    });
+    // A legacy-shaped op already in the local log must not abort startup (this
+    // runs from initDb) — skip it, like ingestRecordOps does.
+    try {
+      applyRecordOp(db, {
+        id: r.id,
+        entity: r.entity,
+        row_id: r.row_id,
+        ts: Number(r.ts),
+        device_id: r.device_id,
+        data: JSON.parse(r.data),
+      });
+    } catch (e) {
+      console.error(`[carbon] skipping unappliable ${r.entity} record-op ${r.id} on reapply:`, e);
+    }
   }
 }
 
@@ -2185,8 +2198,16 @@ export function ingestRecordOps(db: Db, ops: RecordOp[], markSynced: boolean): R
     for (const op of ops) {
       if (op.ts > maxTs) maxTs = op.ts;
       if (recordOpExists(db, op.id)) continue;
-      insertRecordOp(db, op, markSynced);
-      applyRecordOp(db, op);
+      // Mirror ingestOps: one malformed record-op (e.g. a legacy shape missing a
+      // field the upsert binds) must not throw and roll back the batch — the sync
+      // cursor never advances past it, so the device re-hits it every sync forever.
+      try {
+        insertRecordOp(db, op, markSynced);
+        applyRecordOp(db, op);
+      } catch (e) {
+        console.error(`[carbon] skipping unappliable ${op.entity} record-op ${op.id}:`, e);
+        continue;
+      }
       fresh.push(op);
     }
     observeTs(db, maxTs);

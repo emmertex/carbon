@@ -196,3 +196,106 @@ test('claimUnowned assigns owner_id to currently-unowned items', () => {
   assert.equal(n, 1);
   assert.equal(getItem(db, t.id)?.owner_id, 'user-1');
 });
+
+// Y3 — legacy record-ops (created before newer columns existed) carry data JSON
+// without those keys. A missing key binds `undefined`, which every SQL driver
+// rejects — and because ingest ran in one throwing transaction, a fresh device's
+// first full sync would wedge forever on the first legacy op it pulled (the
+// APK "tried to bind a value of an unknown type" bug). Missing keys must
+// coalesce to NULL/defaults and ingest must converge.
+test('ingestRecordOps applies a legacy attachment op missing item_id/mime_type/size', () => {
+  const db = openMemoryDb();
+  // Pre-schema-v4 shape: no item_id, no mime_type, no size, no created_by.
+  const legacy = {
+    id: 'att-legacy-1',
+    parent_type: 'item',
+    parent_id: 'item-1',
+    filename: 'old.pdf',
+    hash: 'a'.repeat(64),
+    created_at: '2025-01-01T00:00:00.000Z',
+    deleted: false,
+  };
+  const fresh = ingestRecordOps(
+    db,
+    [
+      {
+        id: 'rop-legacy-1',
+        entity: 'attachment',
+        row_id: legacy.id,
+        ts: 1000,
+        device_id: B,
+        data: legacy,
+      },
+    ],
+    true,
+  );
+  assert.equal(fresh.length, 1);
+  const row = db.get<{ item_id: string | null; size: number }>(
+    'SELECT item_id, size FROM attachments WHERE id = ?',
+    ['att-legacy-1'],
+  );
+  assert.ok(row, 'attachment materialized');
+  assert.equal(row!.item_id, null);
+  assert.equal(row!.size, 0);
+});
+
+// Y4 — one genuinely unappliable op must not roll back the batch or block the ops
+// after it; it is skipped (logged) and everything else converges.
+test('ingestRecordOps skips a poison op and still applies the rest of the batch', () => {
+  const db = openMemoryDb();
+  const poison = {
+    id: 'rop-poison-1',
+    entity: 'share',
+    row_id: 'share-x',
+    ts: 1000,
+    device_id: B,
+    data: { id: 'share-x' }, // missing item_id/user_id/timestamps → NOT NULL violation
+  };
+  const good = {
+    id: 'rop-good-1',
+    entity: 'share',
+    row_id: 's:item-1:user-1',
+    ts: 1001,
+    device_id: B,
+    data: {
+      id: 's:item-1:user-1',
+      item_id: 'item-1',
+      user_id: 'user-1',
+      permission: 'write',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      deleted: false,
+    },
+  };
+  let fresh: unknown[] = [];
+  assert.doesNotThrow(() => {
+    fresh = ingestRecordOps(db, [poison, good], true);
+  });
+  assert.equal(fresh.length, 1, 'only the good op counts as ingested');
+  assert.equal(listSharesForItem(db, 'item-1').length, 1, 'good share applied');
+  // Re-syncing the same batch stays quiet: the poison op was skipped (not stored),
+  // the good one is deduped.
+  assert.doesNotThrow(() => ingestRecordOps(db, [poison, good], true));
+});
+
+// Y5 — item ops from a foreign/legacy client can carry decoded JSON (an object)
+// where the column stores a string, or a missing `fields` altogether. Neither may
+// throw out of ingestOps; object values are serialized to the stored JSON string.
+test('ingestOps tolerates object field values and a missing fields key', () => {
+  const db = openMemoryDb();
+  const item = createItem(db, A, { title: 'target' });
+  const objectFields: Op = {
+    id: 'op-obj-1',
+    item_id: item.id,
+    ts: Date.now() + 1000,
+    device_id: B,
+    fields: { recurrence: { type: 'weekly', interval: 1 } as unknown as string },
+  };
+  const noFields = { id: 'op-nofields-1', item_id: item.id, ts: 5, device_id: B } as Op;
+  assert.doesNotThrow(() => ingestOps(db, [objectFields, noFields], true));
+  assert.equal(
+    getItem(db, item.id)?.recurrence,
+    JSON.stringify({ type: 'weekly', interval: 1 }),
+    'object value stored as its JSON string',
+  );
+});

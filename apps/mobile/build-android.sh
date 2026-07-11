@@ -22,7 +22,8 @@ set -euo pipefail
 
 export ANDROID_HOME=/opt/android-sdk
 export ANDROID_SDK_ROOT=/opt/android-sdk
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+# Capacitor 8 compiles against Java 21 (17 fails with "invalid source release: 21").
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ADB="$ANDROID_HOME/platform-tools/adb"
 
 MOBILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

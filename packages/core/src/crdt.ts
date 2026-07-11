@@ -58,7 +58,11 @@ export function causalNowIso(db: Db): string {
 
 function toStorage(field: keyof ItemPatch, value: unknown): SqlValue {
   if (value === null || value === undefined) return null;
-  if (BOOLEAN_FIELDS.has(field)) return value ? 1 : 0;
+  if (BOOLEAN_FIELDS.has(field) || typeof value === 'boolean') return value ? 1 : 0;
+  // Legacy/foreign ops can carry decoded JSON (geo/alerts/recurrence) instead of the
+  // string the column stores — serialize rather than hand the driver an unbindable
+  // object (sql.js/better-sqlite3 both throw, which would wedge ingest forever).
+  if (typeof value === 'object') return JSON.stringify(value);
   return value as SqlValue;
 }
 
@@ -98,11 +102,12 @@ export function applyOp(db: Db, op: Op): void {
   const setCols: string[] = [];
   const setVals: SqlValue[] = [];
 
+  const fields = op.fields ?? {}; // a malformed op may carry null/missing fields
   for (const field of ITEM_PATCH_FIELDS) {
-    if (!(field in op.fields)) continue;
+    if (!(field in fields)) continue;
     if (!wins(op.ts, op.device_id, clocks[field])) continue;
     setCols.push(`"${field}" = ?`);
-    setVals.push(toStorage(field, op.fields[field]));
+    setVals.push(toStorage(field, fields[field]));
     clocks[field] = { ts: op.ts, dev: op.device_id };
   }
 
@@ -143,7 +148,7 @@ export function insertOp(db: Db, op: Op, synced: boolean): void {
     `INSERT INTO ops (id, item_id, ts, device_id, fields, synced)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO NOTHING`,
-    [op.id, op.item_id, op.ts, op.device_id, JSON.stringify(op.fields), synced ? 1 : 0],
+    [op.id, op.item_id, op.ts, op.device_id, JSON.stringify(op.fields ?? {}), synced ? 1 : 0],
   );
 }
 
@@ -198,8 +203,18 @@ export function ingestOps(db: Db, ops: Op[], markSynced: boolean): Op[] {
       if (op.ts > maxTs) maxTs = op.ts;
       const seen = db.get('SELECT 1 AS x FROM ops WHERE id = ?', [op.id]);
       if (seen) continue;
-      insertOp(db, op, markSynced);
-      applyOp(db, op);
+      // A single malformed op (legacy shape, foreign client) must not throw here:
+      // the transaction would roll back the whole batch, and because the sync
+      // cursor only advances on success, every future sync would re-fetch and
+      // re-hit the same op — permanently wedging the device. Skip it and converge
+      // on everything else.
+      try {
+        insertOp(db, op, markSynced);
+        applyOp(db, op);
+      } catch (e) {
+        console.error(`[carbon] skipping unappliable op ${op.id} (item ${op.item_id}):`, e);
+        continue;
+      }
       fresh.push(op);
     }
     // Advance our clock past everything in the batch so the next local edit wins.

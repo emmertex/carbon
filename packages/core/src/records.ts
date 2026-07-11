@@ -36,7 +36,7 @@ export function insertRecordOp(db: Db, op: RecordOp, synced: boolean): void {
     `INSERT INTO record_ops (id, entity, row_id, ts, device_id, data, synced)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO NOTHING`,
-    [op.id, op.entity, op.row_id, op.ts, op.device_id, JSON.stringify(op.data), synced ? 1 : 0],
+    [op.id, op.entity, op.row_id, op.ts, op.device_id, JSON.stringify(op.data ?? {}), synced ? 1 : 0],
   );
 }
 
