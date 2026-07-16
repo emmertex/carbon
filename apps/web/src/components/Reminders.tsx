@@ -15,6 +15,12 @@ import {
   stopLocalReminders,
 } from '@/lib/localReminders';
 import { startGeofencing, stopGeofencing, geofencePref, geofencingSupported } from '@/lib/geo';
+import {
+  gpsTrackPref,
+  setGpsTrackPref,
+  gpsTrackSupported,
+} from '@/lib/gpsTrack';
+import { trackingGpsPrefOn, trackingGpsPrefOff } from '@/lib/trackingLifecycle';
 import { requestNativePermission } from '@/lib/nativeReminders';
 import { isCapacitor } from '@/lib/platform';
 import { SettingsSection } from './settings/SettingsSection';
@@ -41,6 +47,7 @@ export function Reminders() {
   const [localOn, setLocalOn] = useState(localRemindersPref());
   const [msg, setMsg] = useState<string | null>(null);
   const [geoOn, setGeoOn] = useState(geofencePref());
+  const [gpsOn, setGpsOn] = useState(gpsTrackPref());
 
   useEffect(() => {
     void isPushEnabled().then(setPushOn);
@@ -92,6 +99,28 @@ export function Reminders() {
     }
   }
 
+  async function toggleGpsTrack() {
+    if (gpsOn) {
+      setGpsTrackPref(false);
+      await trackingGpsPrefOff();
+      setGpsOn(false);
+      setMsg('GPS time tracking off');
+    } else {
+      await ensureNotificationPermission();
+      setGpsTrackPref(true);
+      const ok = await trackingGpsPrefOn();
+      setGpsOn(ok);
+      setMsg(
+        ok
+          ? isCapacitor
+            ? 'GPS tracking on — records in the background while a timer runs'
+            : 'GPS tracking on — records while this tab is open during a timer'
+          : 'Could not start GPS tracking (permission denied?)',
+      );
+      if (!ok) setGpsTrackPref(false);
+    }
+  }
+
   const remindersSupported = pushMode ? pushSupported() : localRemindersSupported();
   const remindersHint = !pushSupported() ? (
     "Notifications aren't supported in this browser."
@@ -128,6 +157,18 @@ export function Reminders() {
           disabled={!geofencingSupported()}
           onChange={() => toggleGeo()}
           hint="Uses this device's location while the app is open — no server needed. For background geofencing, link your Home Assistant person (under Home Assistant below) and let HA call the server on zone changes."
+        />
+
+        <SettingsToggle
+          label="Record GPS while time-tracking"
+          checked={gpsOn}
+          disabled={!gpsTrackSupported()}
+          onChange={() => void toggleGpsTrack()}
+          hint={
+            isCapacitor
+              ? 'While a timer is running, records a denoised track (≤1 min between points) and attaches it as a note when you stop. Uses a background notification on Android.'
+              : 'While a timer is running and this tab is open, records a denoised track and attaches it as a note when you stop. Background recording requires the Android app.'
+          }
         />
       </div>
     </SettingsSection>

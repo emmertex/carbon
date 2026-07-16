@@ -23,7 +23,8 @@
     - Plus natural-language agent API (/api/agent/*) helpers: agent_lists(), agent_tags(),
       agent_items(), agent_resolve(), agent_add(), agent_complete(), agent_update(),
       agent_set_tag_geo(), agent_nearby(), agent_users(), agent_share(), agent_assign(),
-      agent_start_timer(), agent_stop_timer() — the server fuzzy-matches names, so pass plain
+      agent_start_timer(), agent_stop_timer(), agent_pause_timer(), agent_resume_timer(),
+      agent_add_timer_note(), agent_timer_context() — the server fuzzy-matches names, so pass plain
       names (never ids). agent_add() also takes scheduling fields (due_date/reminder_at/
       recurrence) via tasks=[{...}]. See docs/carbon-agent-api.md §6.
       (Bulk tag add/remove — POST /api/agent/tasks/tag — is available via carbon-nl's

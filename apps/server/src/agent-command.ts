@@ -57,6 +57,9 @@ const MUTATING_TOOLS = new Set([
   'assign',
   'start_timer',
   'stop_timer',
+  'pause_timer',
+  'resume_timer',
+  'add_timer_note',
 ]);
 
 // "Nearest PLACE" needs a location to anchor to. We use the user's last-known HA/GPS fix,
@@ -99,7 +102,10 @@ A plain "remind me at TIME" with no event → set both due_date and reminder_at 
 or change them later via update.
 - Sharing & assigning. "Share X with NAME" → share {query:"X", users:["NAME"]}. "Assign X to NAME" → \
 assign {query:"X", users:["NAME"]}. Call users first if unsure who exists. remove:true unshares/unassigns.
-- Time tracking. "Start a timer on X" → start_timer {query:"X"}. "Stop the timer" → stop_timer {}.
+- Time tracking (v2 sessions). "Start a timer on X" → start_timer {query:"X"}. \
+"Start timing project Y" → start_timer {query:"Y", project:true}. "Stop the timer" → stop_timer {}. \
+"Pause for 10 minutes" → pause_timer {minutes:10}. "Pause the last 5 minutes" → pause_timer {minutes:5, before:true}. \
+"Resume" → resume_timer {}. "Add a time note: traffic jam" → add_timer_note {title:"traffic jam"}.
 - Editing. "Rename X to Y" → update {updates:[{query:"X", patch:{title:"Y"}}]}. "Make X high priority" → \
 patch {priority:3} (0 none, 1 low, 2 medium, 3 high); "flag X" → patch {flagged:true}. "Remove the due \
 date" → patch {due_date:null}.
@@ -480,17 +486,59 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'start_timer',
-    description: 'Start time tracking on a task (stops any timer already running). Target by query.',
+    description:
+      'Start time tracking on a task or project (parks any other open session). Target by query or id.',
     parameters: {
       type: 'object',
-      properties: { query: { type: 'string' }, list: { type: 'string' } },
-      required: ['query'],
+      properties: {
+        query: { type: 'string' },
+        id: { type: 'string' },
+        list: { type: 'string' },
+        project: {
+          type: 'boolean',
+          description: 'Force a project-level session (no task segment)',
+        },
+      },
     },
   },
   {
     name: 'stop_timer',
-    description: 'Stop the currently running time-tracking timer.',
+    description: 'Stop the currently running time-tracking session.',
     parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'pause_timer',
+    description:
+      'Pause the active session. minutes=null/omit for indefinite; before:true carves out the last N minutes retroactively.',
+    parameters: {
+      type: 'object',
+      properties: {
+        minutes: { type: 'number' },
+        before: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'resume_timer',
+    description: 'Resume from a break pause, or resume a parked session via session_id.',
+    parameters: {
+      type: 'object',
+      properties: { session_id: { type: 'string' } },
+    },
+  },
+  {
+    name: 'add_timer_note',
+    description:
+      'Add a time note to the active tracking session (creates a note under the tracked task/project and pins it in the time block).',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        body: { type: 'string' },
+        metadata: { type: 'object' },
+      },
+      required: ['title'],
+    },
   },
 ];
 
@@ -676,6 +724,12 @@ async function execTool(
       return ops.startTimer(userId, args);
     case 'stop_timer':
       return ops.stopTimer(userId);
+    case 'pause_timer':
+      return ops.pauseTimer(userId, args);
+    case 'resume_timer':
+      return ops.resumeTimer(userId, args);
+    case 'add_timer_note':
+      return ops.addTimerNote(userId, args as { title: string });
     default:
       return { ok: false, status: 400, error: `unknown tool: ${name}` };
   }
@@ -785,6 +839,9 @@ function actionToToolCall(a: Record<string, unknown>): ToolCall | null {
     assign: 'assign',
     start_timer: 'start_timer',
     stop_timer: 'stop_timer',
+    pause_timer: 'pause_timer',
+    resume_timer: 'resume_timer',
+    add_timer_note: 'add_timer_note',
     search_notes: 'search_notes',
     search: 'search_notes',
     find_notes: 'search_notes',
@@ -918,8 +975,22 @@ function buildReply(executed: ExecutedTool[], modelText: string): string {
         );
       }
     } else if (e.tool === 'stop_timer') {
-      const stopped = d.stopped as { title: string } | null;
-      lines.push(stopped ? `Stopped timer${stopped.title ? ` on ${stopped.title}` : ''}.` : 'No timer running.');
+      const stopped = d.stopped as {
+        task?: { title: string } | null;
+        project?: { title: string } | null;
+      } | null;
+      if (!stopped) lines.push('No timer running.');
+      else {
+        const label = stopped.task?.title || stopped.project?.title;
+        lines.push(label ? `Stopped timer on ${label}.` : 'Stopped timer.');
+      }
+    } else if (e.tool === 'pause_timer') {
+      lines.push('Paused timer.');
+    } else if (e.tool === 'resume_timer') {
+      lines.push('Resumed timer.');
+    } else if (e.tool === 'add_timer_note') {
+      const note = d.note as { title: string } | undefined;
+      lines.push(note ? `Added time note: ${note.title}.` : 'Added time note.');
     }
   }
   // Soft note when a "remind me at PLACE" geo lookup couldn't be pinned — the tasks + tag

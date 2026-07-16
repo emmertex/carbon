@@ -243,6 +243,7 @@ interface ItemRow extends Row {
   sort_order: number;
   order_mode: string | null;
   sys_kind: string | null;
+  metadata: string | null;
   created_at: string;
   updated_at: string;
   deleted: number;
@@ -273,6 +274,7 @@ function rowToItem(r: ItemRow): Item {
     sort_order: r.sort_order,
     order_mode: (r.order_mode as OrderMode) || 'parallel',
     sys_kind: r.sys_kind,
+    metadata: r.metadata ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
     deleted: !!r.deleted,
@@ -396,6 +398,20 @@ export interface CreateItemInput {
   orderMode?: OrderMode;
   /** System-notice marker (federation offer, billing issue, …); null = user task. */
   sysKind?: string | null;
+  /** Arbitrary JSON string (or object — stringified). null = none. */
+  metadata?: string | Record<string, unknown> | null;
+}
+
+/** Normalize a metadata input to the TEXT column form (JSON string or null). */
+export function encodeMetadata(
+  value: string | Record<string, unknown> | null | undefined,
+): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const t = value.trim();
+    return t === '' ? null : t;
+  }
+  return JSON.stringify(value);
 }
 
 export function createItem(db: Db, deviceId: string, input: CreateItemInput): Item {
@@ -426,6 +442,7 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
     sort_order: input.sortOrder ?? nextSortOrder(db, input.parentId ?? null),
     order_mode: input.orderMode ?? 'parallel',
     sys_kind: input.sysKind ?? null,
+    metadata: encodeMetadata(input.metadata),
     created_at: now,
     updated_at: now,
     deleted: false,

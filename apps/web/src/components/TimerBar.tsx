@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Square, Timer, Pause, Play, ChevronRight } from 'lucide-react';
+import { Square, Timer, Pause, Play, ChevronRight, StickyNote, Satellite } from 'lucide-react';
 import {
   getTimeContext,
   getItem,
@@ -9,10 +9,10 @@ import {
   pauseBefore,
   resume,
   resumeSuspended,
-  stopActive,
   findMergeCandidate,
   mergeSessions,
   MERGE_QUICK_WINDOW_MS,
+  addTimeNote,
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { useTicker } from '@/hooks/useTicker';
@@ -20,6 +20,8 @@ import { mutate } from '@/lib/mutate';
 import { useStore } from '@/lib/store';
 import { formatDuration } from '@/lib/date';
 import { cn } from '@/lib/cn';
+import { trackingStopActive, trackingResumeSuspended } from '@/lib/trackingLifecycle';
+import { gpsTrackRecording, gpsTrackPointCount } from '@/lib/gpsTrack';
 
 const DURATIONS = [5, 10, 15, 30];
 
@@ -36,6 +38,8 @@ export function TimerBar() {
   const [menu, setMenu] = useState(false);
   const [custom, setCustom] = useState('');
   const [mergeDismissed, setMergeDismissed] = useState<string | null>(null);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteTitle, setNoteTitle] = useState('');
 
   const data = useQuery(
     (db) => {
@@ -58,6 +62,8 @@ export function TimerBar() {
     [uid],
   );
   useTicker(1000, !!data);
+  const gpsOn = gpsTrackRecording();
+  const gpsPoints = gpsTrackPointCount();
 
   if (!data) return null;
   const { ctx, project, task, startMs, pausedMs, suspended, merge } = data;
@@ -83,6 +89,17 @@ export function TimerBar() {
     setMenu(false);
     setCustom('');
   };
+
+  function submitNote(e: React.FormEvent) {
+    e.preventDefault();
+    const title = noteTitle.trim();
+    if (!title) return;
+    mutate((db, dev) => {
+      addTimeNote(db, dev, uid, { title });
+    });
+    setNoteTitle('');
+    setNoteOpen(false);
+  }
 
   return (
     <div className="border-b border-border bg-accent-soft">
@@ -111,6 +128,28 @@ export function TimerBar() {
         <span className="shrink-0 tabular-nums text-accent">{formatDuration(elapsed)}</span>
       )}
 
+      {gpsOn && (
+        <span
+          title={`GPS track recording${gpsPoints ? ` · ${gpsPoints} points` : ''}`}
+          className="flex shrink-0 items-center gap-0.5 text-accent"
+        >
+          <Satellite size={12} />
+          {gpsPoints > 0 && <span className="tabular-nums text-[10px]">{gpsPoints}</span>}
+        </span>
+      )}
+
+      <button
+        type="button"
+        onClick={() => {
+          setNoteOpen((o) => !o);
+          setMenu(false);
+        }}
+        title="Add time note"
+        className="flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs font-medium hover:bg-surface-2"
+      >
+        <StickyNote size={11} /> Note
+      </button>
+
       {ctx.paused ? (
         <button
           onClick={() => act((db, dev) => resume(db, dev, uid))}
@@ -128,11 +167,33 @@ export function TimerBar() {
       )}
 
       <button
-        onClick={() => act((db, dev) => stopActive(db, dev, uid))}
+        onClick={() => void trackingStopActive()}
         className="flex items-center gap-1 rounded-md bg-accent px-2 py-0.5 text-xs font-medium text-accent-fg hover:bg-accent-hover"
       >
         <Square size={11} fill="currentColor" /> Stop
       </button>
+
+      {noteOpen && (
+        <form
+          onSubmit={submitNote}
+          className="absolute right-4 top-full z-50 mt-1 flex w-72 items-center gap-1 rounded-lg border border-border bg-surface p-2 text-xs shadow-lg"
+        >
+          <input
+            autoFocus
+            value={noteTitle}
+            onChange={(e) => setNoteTitle(e.target.value)}
+            placeholder="Time note…"
+            className="w-full rounded border border-border bg-surface px-2 py-1 outline-none"
+          />
+          <button
+            type="submit"
+            disabled={!noteTitle.trim()}
+            className="shrink-0 rounded bg-accent px-2 py-1 font-medium text-accent-fg disabled:opacity-40"
+          >
+            Add
+          </button>
+        </form>
+      )}
 
       {menu && !ctx.paused && (
         <div className="absolute right-4 top-full z-50 mt-1 w-64 rounded-lg border border-border bg-surface p-2 text-xs shadow-lg">
@@ -216,7 +277,9 @@ export function TimerBar() {
           {suspended.map((s) => (
             <button
               key={s.id}
-              onClick={() => act((db, dev) => resumeSuspended(db, dev, uid, s.id))}
+              onClick={() =>
+                void trackingResumeSuspended((db, dev) => resumeSuspended(db, dev, uid, s.id))
+              }
               className="flex items-center gap-1 rounded border border-border px-2 py-0.5 text-text-muted hover:bg-surface-2"
               title="Resume"
             >

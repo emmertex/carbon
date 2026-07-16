@@ -67,6 +67,10 @@ export interface Item {
   /** Non-null marks a Carbon-authored system notice (federation offer, billing
    *  issue, invoice, …); the value is the notice `kind`. null = ordinary task. */
   sys_kind: string | null;
+  /** Arbitrary JSON (stored as TEXT). Integrations may stash structured payloads
+   *  (e.g. GPX travel data on a tracker note). null = none. No dedicated editor —
+   *  the side panel only offers a "See metadata" peek when set. */
+  metadata: string | null;
   created_at: string;
   updated_at: string;
   deleted: boolean;
@@ -106,6 +110,7 @@ export type ItemPatch = Partial<
     | 'sort_order'
     | 'order_mode'
     | 'sys_kind'
+    | 'metadata'
     | 'deleted'
   >
 >;
@@ -133,6 +138,7 @@ export const ITEM_PATCH_FIELDS = [
   'sort_order',
   'order_mode',
   'sys_kind',
+  'metadata',
   'deleted',
 ] as const satisfies readonly (keyof ItemPatch)[];
 
@@ -185,7 +191,7 @@ export interface ItemTag {
   deleted: boolean;
 }
 
-export type TimeLogKind = 'session' | 'task' | 'pause' | 'complete';
+export type TimeLogKind = 'session' | 'task' | 'pause' | 'complete' | 'note';
 
 export interface TimeLog {
   id: string;
@@ -196,10 +202,11 @@ export interface TimeLog {
   note: string | null;
   created_at: string;
   updated_at: string;
-  /** 'session' (project block), 'task' (segment inside a session), 'pause', or
-   *  'complete' (a zero-duration marker at the moment a task was completed). */
+  /** 'session' (project block), 'task' (segment inside a session), 'pause',
+   *  'complete' (zero-duration marker when a task finished), or 'note'
+   *  (zero-duration marker pointing at a note item created while tracking). */
   kind: TimeLogKind;
-  /** For task segments and pauses: the enclosing session id. */
+  /** For task segments, pauses, completions, and time notes: the enclosing session id. */
   session_id: string | null;
   deleted: boolean;
 }

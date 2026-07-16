@@ -37,6 +37,7 @@ function item(over: Partial<Item>): Item {
     sort_order: 0,
     order_mode: "parallel",
     sys_kind: null,
+    metadata: null,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     deleted: false,

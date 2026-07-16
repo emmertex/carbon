@@ -46,10 +46,21 @@ import {
   unshareItem,
   assignItem,
   unassignItem,
-  startTimer,
-  stopTimer,
-  getRunningTimer,
+  getTimeContext,
+  startSession,
+  startTask,
+  stopActive,
+  pauseNow,
+  pauseBefore,
+  resume,
+  resumeSuspended,
+  addTimeNote,
+  removeTimeNote,
+  listSessions,
+  getSessionBlock,
+  sessionAnchor,
   type ItemPatch,
+  type RemoveTimeNoteMode,
 } from '@carbon/core';
 import { bestMatch, rankBy } from './fuzzy';
 import { makeOsmProvider, geocodeConfigFromEnv, type GeocodeProvider } from './geocode';
@@ -234,11 +245,38 @@ export interface AssignInput {
   /** Unassign instead of assign. */
   remove?: boolean;
 }
-/** Start a timer on a single task (resolved by id or fuzzy query). */
-export interface TimerInput {
+/** Start a v2 session/task timer (resolved by id or fuzzy query). */
+export interface TimerStartInput {
   id?: string;
   query?: string;
   list?: ListRef;
+  /** When true (or the match is a project), start a project session with no task. */
+  project?: boolean;
+}
+export interface TimerPauseInput {
+  /** Auto-resume after N minutes; omit/null = indefinite. Ignored when `before` is set. */
+  minutes?: number | null;
+  /** When true, carve out the last `minutes` as a retroactive pause (requires minutes > 0). */
+  before?: boolean;
+}
+export interface TimerResumeInput {
+  /** Resume a parked session by id; omit to resume from the active break pause. */
+  session_id?: string;
+}
+export interface TimerNoteInput {
+  title: string;
+  body?: string | null;
+  metadata?: string | Record<string, unknown> | null;
+  session_id?: string | null;
+}
+export interface TimerSessionsInput {
+  from?: string;
+  to?: string;
+}
+export interface TimerRemoveNoteInput {
+  log_id: string;
+  /** `reference` = unlink from block only; `note` = also delete the note item. */
+  mode?: RemoveTimeNoteMode;
 }
 export interface TagGeoInput {
   tag?: string;
@@ -293,6 +331,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     estimate_minutes: it.estimate_minutes,
     flagged: it.flagged,
     priority: it.priority,
+    metadata: it.metadata,
   });
 
   // ----- resolution helpers (fuzzy) -----------------------------------------
@@ -730,6 +769,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     'flagged',
     'priority',
     'status',
+    'metadata',
   ] as const;
 
   function update(userId: string, input: UpdateInput) {
@@ -772,6 +812,12 @@ export function createAgentOps(deps: AgentApiDeps) {
       }
       // recurrence is stored as a JSON string; accept the model's object form.
       if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
+      // metadata is likewise TEXT JSON; accept an object and stringify.
+      if ('metadata' in patch) {
+        const m = patch.metadata as unknown;
+        if (m != null && typeof m === 'object') patch.metadata = JSON.stringify(m);
+        else if (m === '') patch.metadata = null;
+      }
       for (const k of ['due_date', 'defer_date', 'reminder_at'] as const) {
         if (k in patch) (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);
       }
@@ -1076,45 +1122,232 @@ export function createAgentOps(deps: AgentApiDeps) {
     });
   }
 
-  // Resolve a single task from id or a fuzzy query (completed included), for the timer ops.
-  const findOneTask = (userId: string, input: TimerInput): Item | null => {
+  // Resolve a task or project for the v2 timer start op.
+  const findTimerTarget = (userId: string, input: TimerStartInput): Item | null => {
     if (input.id) {
       const it = getItem(db, input.id);
-      // Task-only: time tracking has no meaning on a note. The query path uses taskPool
-      // (task-only) already; guard the raw-id path to match.
-      return it && !it.deleted && it.type !== 'note' && canSee(userId, it.id) ? it : null;
+      return it && !it.deleted && it.type !== 'folder' && canSee(userId, it.id) ? it : null;
     }
     if (input.query) {
-      const pool = taskPool(userId, findList(userId, input.list), null, { includeDone: true });
-      return bestMatch(input.query, pool, [(i) => i.title]).matched?.item ?? null;
+      // Prefer tasks; projects are also valid when `project` is set or nothing task-matched.
+      const list = findList(userId, input.list);
+      const tasks = taskPool(userId, list, null, { includeDone: true });
+      const taskHit = bestMatch(input.query, tasks, [(i) => i.title]).matched?.item;
+      if (taskHit && !input.project) return taskHit;
+      const projects = getProjects(db).filter(
+        (p) => !p.deleted && canSee(userId, p.id),
+      );
+      const projHit = bestMatch(input.query, projects, [(i) => i.title]).matched?.item;
+      if (input.project) return projHit ?? null;
+      return taskHit ?? projHit ?? null;
     }
     return null;
   };
 
-  function startTimer_(userId: string, input: TimerInput) {
-    const target = findOneTask(userId, input);
+  const serializeContext = (userId: string) => {
+    const uid = ownerOf(userId);
+    const ctx = getTimeContext(db, uid);
+    const itemOf = (id: string | undefined) => {
+      if (!id) return null;
+      const it = getItem(db, id);
+      return it ? { id: it.id, title: it.title, type: it.type } : { id, title: '', type: 'task' as const };
+    };
+    return {
+      session: ctx.session
+        ? {
+            id: ctx.session.id,
+            project: itemOf(ctx.session.item_id),
+            start_time: ctx.session.start_time,
+          }
+        : null,
+      task: ctx.task ? itemOf(ctx.task.item_id) : null,
+      paused: ctx.paused,
+      pause_ends_at: ctx.pauseEndsAt,
+      suspended: ctx.suspended.map((s) => ({
+        id: s.id,
+        project: itemOf(s.item_id),
+        start_time: s.start_time,
+      })),
+    };
+  };
+
+  function timerContext_(userId: string) {
+    return ok(serializeContext(userId));
+  }
+
+  function startTimer_(userId: string, input: TimerStartInput) {
+    const target = findTimerTarget(userId, input);
     if (!target) return fail('task not found', 404);
     if (!canWrite(userId, target.id)) return fail('forbidden', 403);
-    // One running timer per user: stop any in-flight one before starting the new one.
-    const running = getRunningTimer(db, ownerOf(userId) ?? undefined);
-    let stopped: { id: string; title: string } | null = null;
-    if (running && running.item_id !== target.id) {
-      stopTimer(db, deviceId, running.id);
-      const prev = getItem(db, running.item_id);
-      stopped = prev ? { id: prev.id, title: prev.title } : null;
+    const uid = ownerOf(userId);
+    const before = getTimeContext(db, uid);
+    const prevTask = before.task ? getItem(db, before.task.item_id) : null;
+    const prevSession = before.session ? getItem(db, before.session.item_id) : null;
+    if (target.type === 'project' || input.project) {
+      const projectId = target.type === 'project' ? target.id : sessionAnchor(db, target.id);
+      startSession(db, deviceId, projectId, uid);
+    } else {
+      startTask(db, deviceId, target.id, uid);
     }
-    if (!running || running.item_id !== target.id) {
-      startTimer(db, deviceId, target.id, ownerOf(userId));
-    }
-    return ok({ started: { id: target.id, title: target.title }, stopped });
+    const after = serializeContext(userId);
+    const stopped =
+      prevTask && prevTask.id !== target.id
+        ? { id: prevTask.id, title: prevTask.title }
+        : prevSession && before.session && before.session.item_id !== (after.session?.project?.id ?? '')
+          ? { id: prevSession.id, title: prevSession.title }
+          : null;
+    return ok({
+      started: { id: target.id, title: target.title, type: target.type },
+      stopped,
+      context: after,
+    });
   }
 
   function stopTimer_(userId: string) {
-    const running = getRunningTimer(db, ownerOf(userId) ?? undefined);
-    if (!running) return ok({ stopped: null });
-    stopTimer(db, deviceId, running.id);
-    const it = getItem(db, running.item_id);
-    return ok({ stopped: it ? { id: it.id, title: it.title } : { id: running.item_id, title: '' } });
+    const uid = ownerOf(userId);
+    const before = getTimeContext(db, uid);
+    if (!before.session) return ok({ stopped: null, context: serializeContext(userId) });
+    const proj = getItem(db, before.session.item_id);
+    const task = before.task ? getItem(db, before.task.item_id) : null;
+    stopActive(db, deviceId, uid);
+    return ok({
+      stopped: {
+        session_id: before.session.id,
+        project: proj ? { id: proj.id, title: proj.title } : null,
+        task: task ? { id: task.id, title: task.title } : null,
+      },
+      context: serializeContext(userId),
+    });
+  }
+
+  function pauseTimer_(userId: string, input: TimerPauseInput) {
+    const uid = ownerOf(userId);
+    const ctx = getTimeContext(db, uid);
+    if (!ctx.session) return fail('no active session', 409);
+    if (ctx.paused) return fail('already paused', 409);
+    if (input.before) {
+      const m = Number(input.minutes);
+      if (!(m > 0)) return fail('minutes required for before-pause', 400);
+      pauseBefore(db, deviceId, uid, m);
+    } else {
+      const minutes =
+        input.minutes === undefined || input.minutes === null ? null : Number(input.minutes);
+      if (minutes != null && !(minutes > 0)) return fail('minutes must be positive', 400);
+      pauseNow(db, deviceId, uid, minutes);
+    }
+    return ok({ context: serializeContext(userId) });
+  }
+
+  function resumeTimer_(userId: string, input: TimerResumeInput = {}) {
+    const uid = ownerOf(userId);
+    if (input.session_id) {
+      const open = getTimeContext(db, uid).suspended.find((s) => s.id === input.session_id);
+      if (!open) return fail('suspended session not found', 404);
+      resumeSuspended(db, deviceId, uid, input.session_id);
+    } else {
+      const ctx = getTimeContext(db, uid);
+      if (!ctx.session || !ctx.paused) return fail('not paused', 409);
+      resume(db, deviceId, uid);
+    }
+    return ok({ context: serializeContext(userId) });
+  }
+
+  function addTimerNote_(userId: string, input: TimerNoteInput) {
+    const title = typeof input.title === 'string' ? input.title.trim() : '';
+    if (!title) return fail('title required', 400);
+    const uid = ownerOf(userId);
+    const result = addTimeNote(db, deviceId, uid, {
+      title,
+      body: input.body ?? null,
+      metadata: input.metadata ?? null,
+      sessionId: input.session_id ?? null,
+    });
+    if (!result) return fail('no active session', 409);
+    return ok({
+      note: {
+        id: result.note.id,
+        title: result.note.title,
+        parent_id: result.note.parent_id,
+        metadata: result.note.metadata,
+      },
+      log: { id: result.log.id, session_id: result.log.session_id, start_time: result.log.start_time },
+      context: serializeContext(userId),
+    });
+  }
+
+  function removeTimerNote_(userId: string, input: TimerRemoveNoteInput) {
+    if (!input.log_id) return fail('log_id required', 400);
+    const mode: RemoveTimeNoteMode = input.mode === 'note' ? 'note' : 'reference';
+    // Ownership: the time_log must belong to this user (or open-mode null).
+    const row = db.get<{ user_id: string | null; kind: string; deleted: number }>(
+      'SELECT user_id, kind, deleted FROM time_logs WHERE id = ?',
+      [input.log_id],
+    );
+    if (!row || row.deleted || row.kind !== 'note') return fail('note marker not found', 404);
+    const uid = ownerOf(userId);
+    if (uid != null && row.user_id != null && row.user_id !== uid) return fail('forbidden', 403);
+    if (!removeTimeNote(db, deviceId, input.log_id, mode)) return fail('note marker not found', 404);
+    return ok({ removed: true, mode });
+  }
+
+  function listTimerSessions_(userId: string, input: TimerSessionsInput = {}) {
+    const uid = ownerOf(userId);
+    const to = input.to ?? new Date().toISOString();
+    const from =
+      input.from ??
+      new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+    const sessions = listSessions(db, from, to, uid);
+    const blocks = sessions.map((s) => {
+      const b = getSessionBlock(db, s);
+      return {
+        session: {
+          id: s.id,
+          project: b.project
+            ? { id: b.project.id, title: b.project.title }
+            : { id: s.item_id, title: 'Project' },
+          start_time: s.start_time,
+          end_time: s.end_time,
+        },
+        tracked_ms: b.trackedMs,
+        wall_ms: b.wallMs,
+        untracked_ms: b.untrackedMs,
+        segments: b.segments.map((seg) => ({
+          id: seg.log.id,
+          item: seg.item
+            ? { id: seg.item.id, title: seg.item.title, deleted: seg.item.deleted }
+            : { id: seg.log.item_id, title: 'Task', deleted: true },
+          start_time: seg.log.start_time,
+          end_time: seg.log.end_time,
+          ms: seg.ms,
+        })),
+        pauses: b.pauses.map((p) => ({
+          id: p.id,
+          start_time: p.start_time,
+          end_time: p.end_time,
+          suspend: p.note === 'suspend',
+        })),
+        completions: b.completions.map((c) => ({
+          id: c.log.id,
+          item: c.item
+            ? { id: c.item.id, title: c.item.title }
+            : { id: c.log.item_id, title: 'Task' },
+          at: c.log.start_time,
+        })),
+        notes: b.notes.map((n) => ({
+          id: n.log.id,
+          item: n.item
+            ? {
+                id: n.item.id,
+                title: n.item.deleted ? '(deleted note)' : n.item.title,
+                deleted: n.item.deleted,
+                metadata: n.item.metadata,
+              }
+            : { id: n.log.item_id, title: '(deleted note)', deleted: true, metadata: null },
+          at: n.log.start_time,
+        })),
+      };
+    });
+    return ok({ from, to, sessions: blocks });
   }
 
   return {
@@ -1134,7 +1367,13 @@ export function createAgentOps(deps: AgentApiDeps) {
     users,
     share,
     assign,
+    timerContext: timerContext_,
     startTimer: startTimer_,
     stopTimer: stopTimer_,
+    pauseTimer: pauseTimer_,
+    resumeTimer: resumeTimer_,
+    addTimerNote: addTimerNote_,
+    removeTimerNote: removeTimerNote_,
+    listTimerSessions: listTimerSessions_,
   };
 }

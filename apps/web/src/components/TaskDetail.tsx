@@ -38,8 +38,6 @@ import {
   sessionAnchor,
   recordCompletion,
   removeCompletion,
-  startTask,
-  stopActive,
   listUsers,
   listSharesForItem,
   listAssigneesForItem,
@@ -75,6 +73,7 @@ import { NoteEditor } from "./NoteEditor";
 import { itemTagsResolved } from "@/lib/enrich";
 import { abbreviateTagPath } from "@/lib/tagLabel";
 import { holdCompleted, releaseCompleted } from "@/lib/completion";
+import { trackingStartTask, trackingStopActive } from "@/lib/trackingLifecycle";
 import { useQuery } from "@/hooks/useQuery";
 import { useTicker } from "@/hooks/useTicker";
 import { useFocusItem } from "@/hooks/useFocusItem";
@@ -450,9 +449,8 @@ export function TaskDetail({ id }: { id: string }) {
   const perUser = [...byUser.entries()].filter(([, ms]) => ms > 0);
 
   function toggleTimer() {
-    const uid = currentUser?.id ?? null;
-    if (trackingHere) mutate((db, dev) => stopActive(db, dev, uid));
-    else mutate((db, dev) => startTask(db, dev, id, uid));
+    if (trackingHere) void trackingStopActive();
+    else void trackingStartTask(id);
   }
 
   // Move the item between the three lifecycle states. `done` runs the full
@@ -805,6 +803,9 @@ export function TaskDetail({ id }: { id: string }) {
             className={cn(isNote && "flex flex-1 flex-col")}
             minHeightClassName={isNote ? "min-h-[60vh]" : undefined}
           />
+          {item.metadata && (
+            <MetadataPeek metadata={item.metadata} />
+          )}
         </div>
 
         {/* Task-scheduling sections (priority, order mode, scheduling/recurrence,
@@ -1511,3 +1512,31 @@ export function TaskDetail({ id }: { id: string }) {
     </div>
   );
 }
+
+/** Collapsed peek for arbitrary item.metadata JSON — no editor, just visibility. */
+function MetadataPeek({ metadata }: { metadata: string }) {
+  const [open, setOpen] = useState(false);
+  let pretty = metadata;
+  try {
+    pretty = JSON.stringify(JSON.parse(metadata), null, 2);
+  } catch {
+    /* keep raw */
+  }
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="text-xs text-accent hover:underline"
+      >
+        {open ? "Hide metadata" : "See metadata"}
+      </button>
+      {open && (
+        <pre className="mt-1 max-h-48 overflow-auto rounded border border-border bg-surface-2 p-2 text-[11px] leading-snug text-text-muted">
+          {pretty}
+        </pre>
+      )}
+    </div>
+  );
+}
+

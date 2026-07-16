@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Download, Plus } from 'lucide-react';
+import { Download, Plus, Trash2 } from 'lucide-react';
 import {
   listSessions,
   getSessionBlock,
@@ -19,6 +19,7 @@ import {
   addSegment,
   updateSegment,
   removeSegment,
+  removeTimeNote,
   MERGE_BLOCK_WINDOW_MS,
   type Item,
   type TimeLog,
@@ -361,6 +362,21 @@ function BlockBar({ block }: { block: SessionBlock }) {
           className="absolute inset-y-0 -ml-px w-0.5 bg-success"
         />
       ))}
+      {block.notes.map((n) => {
+        const deleted = !n.item || n.item.deleted;
+        const title = deleted ? '(deleted note)' : n.item!.title || 'Note';
+        return (
+          <span
+            key={n.log.id}
+            title={title}
+            style={{ left: `${pct(new Date(n.log.start_time).getTime())}%` }}
+            className={cn(
+              'absolute inset-y-0 -ml-px w-0.5',
+              deleted ? 'bg-text-faint' : 'bg-accent',
+            )}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -582,9 +598,88 @@ function Block({
               ))}
             </ul>
           )}
+          {block.notes.length > 0 && (
+            <ul className="space-y-0.5">
+              {block.notes.map((n) => (
+                <TimeNoteRow key={n.log.id} entry={n} />
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+function timeNoteTitle(item: Item | undefined): string {
+  if (!item || item.deleted) return '(deleted note)';
+  return item.title || 'Note';
+}
+
+function TimeNoteRow({ entry }: { entry: SessionBlock['notes'][number] }) {
+  const [confirm, setConfirm] = useState(false);
+  const deleted = !entry.item || entry.item.deleted;
+  return (
+    <li className="flex flex-col gap-1 text-accent">
+      <div className="flex items-center gap-2">
+        <span className={cn('truncate', deleted && 'italic text-text-faint')}>
+          ✎ {timeNoteTitle(entry.item)}
+        </span>
+        <span className="ml-auto tabular-nums text-text-muted">{fmtTime(entry.log.start_time)}</span>
+        {!deleted && (
+          <button
+            type="button"
+            title="Remove from block"
+            onClick={() => setConfirm((c) => !c)}
+            className="rounded p-0.5 text-text-faint hover:bg-surface-2 hover:text-danger"
+          >
+            <Trash2 size={12} />
+          </button>
+        )}
+        {deleted && (
+          <button
+            type="button"
+            title="Remove reference"
+            onClick={() => mutate((db, dev) => removeTimeNote(db, dev, entry.log.id, 'reference'))}
+            className="rounded p-0.5 text-text-faint hover:bg-surface-2 hover:text-danger"
+          >
+            <Trash2 size={12} />
+          </button>
+        )}
+      </div>
+      {confirm && (
+        <div className="flex flex-wrap items-center gap-1 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text">
+          <span className="text-text-muted">Remove:</span>
+          <button
+            type="button"
+            onClick={() => {
+              mutate((db, dev) => removeTimeNote(db, dev, entry.log.id, 'reference'));
+              setConfirm(false);
+            }}
+            className="rounded border border-border px-1.5 py-0.5 hover:bg-surface"
+          >
+            From block only
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              mutate((db, dev) => removeTimeNote(db, dev, entry.log.id, 'note'));
+              setConfirm(false);
+            }}
+            className="rounded border border-border px-1.5 py-0.5 text-danger hover:bg-surface"
+          >
+            Delete note
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirm(false)}
+            className="ml-auto text-text-muted hover:text-text"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </li>
   );
 }
 

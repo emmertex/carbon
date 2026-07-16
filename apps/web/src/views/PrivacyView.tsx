@@ -115,12 +115,16 @@ export function PrivacyView() {
               — to show task reminders on time, including after a reboot.
             </li>
             <li>
-              <strong className="text-text">Location (foreground only)</strong> —
-              used for location-based reminders while the app is open. Matching
-              against your tasks happens on your device. In local-only mode your
-              location is never transmitted; if you enable location sharing with a
-              sync server, it is pushed there under the limits described above. This
-              permission is optional.
+              <strong className="text-text">Location</strong> — used for
+              location-based reminders while the app is open, and (when enabled)
+              for GPS tracks attached to time-tracking sessions. On Android the
+              track recorder may run as a foreground service with a persistent
+              notification while a timer is active. Matching against your tasks
+              happens on your device. In local-only mode your location is never
+              transmitted; if you enable location sharing with a sync server, the
+              latest fix is pushed there under the limits described above. Track
+              blobs sync like other attachments when sync is on. This permission
+              is optional.
             </li>
             <li>
               <strong className="text-text">Vibrate</strong> — for reminder alerts.

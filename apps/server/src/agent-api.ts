@@ -118,12 +118,55 @@ export function registerAgentApi(api: App, deps: AgentApiDeps): void {
     return send(c, ops.assign(c.get('userId'), b));
   });
 
+  // Time tracking v2 — sessions, pauses, time notes (replaces the legacy single-timer API).
+  api.get('/agent/timer', requireScope('tasks:read'), (c) =>
+    send(c, ops.timerContext(c.get('userId'))),
+  );
+
+  api.get('/agent/timer/sessions', requireScope('tasks:read'), (c) =>
+    send(
+      c,
+      ops.listTimerSessions(c.get('userId'), {
+        from: c.req.query('from') ?? undefined,
+        to: c.req.query('to') ?? undefined,
+      }),
+    ),
+  );
+
   api.post('/agent/timer/start', requireScope('tasks:write'), async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.startTimer>[1];
     return send(c, ops.startTimer(c.get('userId'), b));
   });
 
-  api.post('/agent/timer/stop', requireScope('tasks:write'), (c) => send(c, ops.stopTimer(c.get('userId'))));
+  api.post('/agent/timer/stop', requireScope('tasks:write'), (c) =>
+    send(c, ops.stopTimer(c.get('userId'))),
+  );
+
+  api.post('/agent/timer/pause', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.pauseTimer>[1];
+    return send(c, ops.pauseTimer(c.get('userId'), b));
+  });
+
+  api.post('/agent/timer/resume', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.resumeTimer>[1];
+    return send(c, ops.resumeTimer(c.get('userId'), b));
+  });
+
+  api.post('/agent/timer/note', requireScope('tasks:write'), async (c) => {
+    const b = (await c.req.json().catch(() => ({}))) as Parameters<typeof ops.addTimerNote>[1];
+    return send(c, ops.addTimerNote(c.get('userId'), b));
+  });
+
+  api.delete('/agent/timer/notes/:logId', requireScope('tasks:write'), (c) => {
+    const mode = c.req.query('mode');
+    return send(
+      c,
+      ops.removeTimerNote(c.get('userId'), {
+        log_id: c.req.param('logId'),
+        mode: mode === 'note' ? 'note' : 'reference',
+      }),
+    );
+  });
 
   // Read-only place lookup: returns nearby candidates for the location editor. No mutation,
   // so tasks:read; browser sessions pass requireScope automatically.

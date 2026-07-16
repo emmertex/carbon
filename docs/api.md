@@ -84,9 +84,9 @@ curl -X POST "$BASE/api/tasks/<id>/attachments" \
 ```
 
 `POST /api/tasks` currently accepts `title` (required), plus `note`, `project_id`, `due_date`,
-`flagged`, and `priority`. `PATCH /api/tasks/:id` accepts `title`, `note`, `status`, `due_date`,
-`defer_date`, `flagged`, `priority`, `parent_id`, `geo`, `color`, `recurrence`, and
-`review_interval`.
+`flagged`, `priority`, and `metadata` (arbitrary JSON object or string). `PATCH /api/tasks/:id`
+accepts `title`, `note`, `status`, `due_date`, `defer_date`, `flagged`, `priority`, `parent_id`,
+`geo`, `color`, `recurrence`, `review_interval`, and `metadata`.
 
 ## Natural-language agent endpoints (`/api/agent/*`)
 
@@ -111,8 +111,14 @@ model just passes plain names. Same scopes as above. Full contract + worked call
 | GET       | `/api/agent/users`          | `tasks:read`  | People a task can be shared with / assigned to (non-bot)                                 |
 | POST      | `/api/agent/tasks/share`    | `tasks:write` | Share task(s) with users by name (`remove` to unshare)                                   |
 | POST      | `/api/agent/tasks/assign`   | `tasks:write` | Assign task(s) to users by name (`remove` to unassign)                                   |
-| POST      | `/api/agent/timer/start`    | `tasks:write` | Start a timer on a task (auto-stops the prior one)                                       |
-| POST      | `/api/agent/timer/stop`     | `tasks:write` | Stop the running timer                                                                   |
+| GET       | `/api/agent/timer`          | `tasks:read`  | Active session context (`session`, `task`, `paused`, `suspended`)                |
+| GET       | `/api/agent/timer/sessions` | `tasks:read`  | Session blocks in a date range (`?from=`/`?to=`, default last 7 days)            |
+| POST      | `/api/agent/timer/start`    | `tasks:write` | Start a v2 task/project session (`id`/`query`, optional `project:true`)          |
+| POST      | `/api/agent/timer/stop`     | `tasks:write` | Stop the active session                                                          |
+| POST      | `/api/agent/timer/pause`    | `tasks:write` | Pause now (`minutes`) or retroactively (`before:true`)                           |
+| POST      | `/api/agent/timer/resume`   | `tasks:write` | Resume break pause, or a parked session via `session_id`                         |
+| POST      | `/api/agent/timer/note`     | `tasks:write` | Add a time note (`title`, optional `body`/`metadata`) to the active session      |
+| DELETE    | `/api/agent/timer/notes/:id`| `tasks:write` | Remove a time-note marker (`?mode=reference\|note`)                              |
 | GET       | `/api/agent/config`         | `tasks:read`  | `{enabled, keywords}` — drives the in-app Add box                                        |
 | POST      | `/api/agent/command`        | `inbox:write` | Run an in-app NL command (LLM tool-loop, acts as the user) → `{reply, executed, usage}`  |
 | POST      | `/api/agent/filter`         | `tasks:read`  | NL → advanced-filter expression builder (`{expr}`)                                       |

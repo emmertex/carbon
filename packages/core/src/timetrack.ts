@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Db, Row } from './db';
 import type { Item, TimeLog, TimeLogKind } from './types';
-import { getItem, getItemTags, rowToTimeLog, recordRecordOp } from './repo';
+import { getItem, getItemTags, rowToTimeLog, recordRecordOp, createItem, encodeMetadata, deleteItem } from './repo';
 import { causalNowIso } from './crdt';
 
 // Time tracking v2 — see docs/time-tracking-design.md.
@@ -11,6 +11,8 @@ import { causalNowIso } from './crdt';
 // project resumes its suspended session. Break pauses have note null.
 // A *completion* (kind 'complete') is a zero-duration marker recorded at the
 // moment a task inside an open session is finished — a data point, not a span.
+// A *time note* (kind 'note') is a zero-duration marker pointing at a note item
+// created while tracking (child of the active task, or project root if no task).
 
 const SUSPEND = 'suspend';
 const iso = () => new Date().toISOString();
@@ -283,6 +285,92 @@ export function removeCompletion(db: Db, dev: string, taskId: string, userId: st
   if (r) emit(db, dev, { ...rowToTimeLog(r), deleted: true });
 }
 
+export interface AddTimeNoteInput {
+  title: string;
+  /** Optional note body (items.note column). */
+  body?: string | null;
+  /** Arbitrary JSON for the note item. */
+  metadata?: string | Record<string, unknown> | null;
+  /** Prefer this open session; otherwise the active session for `userId`. */
+  sessionId?: string | null;
+}
+
+/**
+ * Create a note under the currently tracked task (or the project root when only
+ * a session is running) and pin a zero-duration `kind:'note'` marker into the
+ * open session. Does not stop the running task segment. Returns null when there
+ * is no open (non-suspended) session to attach to.
+ */
+export function addTimeNote(
+  db: Db,
+  dev: string,
+  userId: string | null,
+  input: AddTimeNoteInput,
+): { note: Item; log: TimeLog } | null {
+  const title = input.title.trim();
+  if (!title) return null;
+  const ctx = getTimeContext(db, userId);
+  let session = ctx.session;
+  if (input.sessionId) {
+    const wanted = openSessions(db, userId).find((s) => s.id === input.sessionId);
+    if (!wanted) return null;
+    session = wanted;
+  }
+  if (!session) return null;
+  // Parent: active task segment's item, else the session's project.
+  const parentId = ctx.session?.id === session.id && ctx.task ? ctx.task.item_id : session.item_id;
+  const note = createItem(db, dev, {
+    type: 'note',
+    title,
+    note: input.body ?? null,
+    parentId,
+    ownerId: userId,
+    metadata: encodeMetadata(input.metadata),
+  });
+  const at = iso();
+  const log = emit(
+    db,
+    dev,
+    makeLog({
+      kind: 'note',
+      itemId: note.id,
+      userId,
+      sessionId: session.id,
+      start: at,
+      end: at,
+    }),
+  );
+  return { note, log };
+}
+
+export type RemoveTimeNoteMode = 'reference' | 'note';
+
+/**
+ * Remove a time-note marker from its block.
+ * - `reference`: soft-delete only the time_log row (note item stays in the task list).
+ * - `note`: soft-delete the note item as well (and the marker).
+ * Returns false if the log id is not a live `kind:'note'` marker.
+ */
+export function removeTimeNote(
+  db: Db,
+  dev: string,
+  logId: string,
+  mode: RemoveTimeNoteMode = 'reference',
+): boolean {
+  const r = db.get<TLRow>(
+    "SELECT * FROM time_logs WHERE id = ? AND kind = 'note' AND deleted = 0",
+    [logId],
+  );
+  if (!r) return false;
+  const log = rowToTimeLog(r);
+  emit(db, dev, { ...log, deleted: true });
+  if (mode === 'note') {
+    const item = getItem(db, log.item_id);
+    if (item && !item.deleted) deleteItem(db, dev, log.item_id);
+  }
+  return true;
+}
+
 // ----- read models ----------------------------------------------------------
 
 function sessionRows(db: Db, sessionId: string, kind: TimeLogKind): TimeLog[] {
@@ -314,6 +402,8 @@ export interface SessionBlock {
   pauses: TimeLog[];
   /** Zero-duration completion markers, with the task they finished. */
   completions: { log: TimeLog; item: Item | undefined }[];
+  /** Zero-duration time-note markers; `item` may be deleted (tombstoned). */
+  notes: { log: TimeLog; item: Item | undefined }[];
   /** Pause-adjusted time actually tracked (per {@link trackedMs}). */
   trackedMs: number;
   /** Wall-clock span start→end (or now), pauses included. */
@@ -332,6 +422,10 @@ export function getSessionBlock(db: Db, session: TimeLog, upToMs: number = Date.
     log,
     item: getItem(db, log.item_id),
   }));
+  const notes = sessionRows(db, session.id, 'note').map((log) => ({
+    log,
+    item: getItem(db, log.item_id),
+  }));
   const tracked = trackedMs(db, session, upToMs);
   const segTotal = segments.reduce((n, s) => n + s.ms, 0);
   const end = session.end_time ? ms(session.end_time) : upToMs;
@@ -341,6 +435,7 @@ export function getSessionBlock(db: Db, session: TimeLog, upToMs: number = Date.
     segments,
     pauses: sessionRows(db, session.id, 'pause'),
     completions,
+    notes,
     trackedMs: tracked,
     wallMs: Math.max(0, end - ms(session.start_time)),
     untrackedMs: Math.max(0, tracked - segTotal),
@@ -375,11 +470,12 @@ export function toCsv(db: Db, blocks: SessionBlock[]): string {
       date, s.id, project, 'Session', project, tagNames(db, s.item_id),
       s.start_time, end, min(b.wallMs), min(b.wallMs), min(b.trackedMs), min(b.untrackedMs),
     ]);
-    // Interleave task segments, pauses and completions in chronological order.
+    // Interleave task segments, pauses, completions and time notes chronologically.
     const entries = [
       ...b.segments.map((seg) => ({ t: seg.log.start_time, kind: 'seg' as const, seg })),
       ...b.pauses.map((p) => ({ t: p.start_time, kind: 'pause' as const, p })),
       ...b.completions.map((c) => ({ t: c.log.start_time, kind: 'done' as const, c })),
+      ...b.notes.map((n) => ({ t: n.log.start_time, kind: 'note' as const, n })),
     ].sort((a, z) => a.t.localeCompare(z.t));
     for (const e of entries) {
       if (e.kind === 'seg') {
@@ -395,10 +491,17 @@ export function toCsv(db: Db, blocks: SessionBlock[]): string {
           date, s.id, project, e.p.note === SUSPEND ? 'Suspend' : 'Pause', project, '',
           e.p.start_time, pe ?? '', min(Math.max(0, dur)), '', '', '',
         ]);
-      } else {
+      } else if (e.kind === 'done') {
         rows.push([
           date, s.id, project, 'Completed', e.c.item?.title || 'Task', tagNames(db, e.c.log.item_id),
           e.c.log.start_time, e.c.log.start_time, '', '', '', '',
+        ]);
+      } else {
+        const title =
+          !e.n.item || e.n.item.deleted ? '(deleted note)' : e.n.item.title || 'Note';
+        rows.push([
+          date, s.id, project, 'Note', title, e.n.item && !e.n.item.deleted ? tagNames(db, e.n.log.item_id) : '',
+          e.n.log.start_time, e.n.log.start_time, '', '', '', '',
         ]);
       }
     }
@@ -604,7 +707,9 @@ export function deleteUntrackedGap(
     const gapEndMs = ms(gap.end);
     for (const c of sessionChildren(db, sessionId)) {
       const goesRight =
-        c.kind === 'complete' ? ms(c.start_time) > gapStartMs : ms(c.start_time) >= gapEndMs;
+        c.kind === 'complete' || c.kind === 'note'
+          ? ms(c.start_time) > gapStartMs
+          : ms(c.start_time) >= gapEndMs;
       if (goesRight) emit(db, dev, { ...c, session_id: right.id });
     }
     emit(db, dev, { ...session, end_time: gap.start });

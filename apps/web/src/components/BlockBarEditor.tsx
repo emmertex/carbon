@@ -232,6 +232,22 @@ export function BlockBarEditor({
             className="pointer-events-none absolute inset-y-0 -ml-px w-0.5 bg-success"
           />
         ))}
+        {block.notes.map((n) => {
+          const deleted = !n.item || n.item.deleted;
+          const title = deleted ? '(deleted note)' : n.item!.title || 'Note';
+          return (
+            <span
+              key={n.log.id}
+              title={title}
+              style={{ left: `${pct(new Date(n.log.start_time).getTime())}%` }}
+              className={
+                deleted
+                  ? 'pointer-events-none absolute inset-y-0 -ml-px w-0.5 bg-text-faint'
+                  : 'pointer-events-none absolute inset-y-0 -ml-px w-0.5 bg-accent'
+              }
+            />
+          );
+        })}
       </div>
       <div className="mt-0.5 flex justify-between text-[10px] text-text-faint">
         <span>{fmtTime(start)}</span>

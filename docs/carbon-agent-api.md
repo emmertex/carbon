@@ -372,14 +372,26 @@ share) if the assignee doesn't already have any. Both resolve people by name (fu
 are **write-gated** — you can only share/assign a task you own or have write access to; anything you
 can't is reported under `unmatched` with `reason:"forbidden"`.
 
-### Time tracking
+### Time tracking (v2 sessions)
 
 ```
-POST /api/agent/timer/start  { "query":"write report" }   → { started:{id,title}, stopped:{id,title}|null }
-POST /api/agent/timer/stop   { }                          → { stopped:{id,title}|null }
+GET  /api/agent/timer                                              → { session, task, paused, pause_ends_at, suspended }
+GET  /api/agent/timer/sessions?from=&to=                           → { from, to, sessions:[{session,segments,pauses,completions,notes,…}] }
+POST /api/agent/timer/start  { "query":"write report" }            → { started, stopped, context }
+POST /api/agent/timer/start  { "query":"Work", "project":true }    → project session (no task segment)
+POST /api/agent/timer/stop   { }                                   → { stopped, context }
+POST /api/agent/timer/pause  { "minutes":10 }                      → pause now (omit minutes = indefinite)
+POST /api/agent/timer/pause  { "minutes":5, "before":true }        → retroactive pause of last N minutes
+POST /api/agent/timer/resume { }                                   → resume from break pause
+POST /api/agent/timer/resume { "session_id":"…" }                  → resume a parked session
+POST /api/agent/timer/note   { "title":"Traffic", "metadata":{…} } → { note, log, context }
+DELETE /api/agent/timer/notes/:logId?mode=reference|note           → unlink only, or also delete the note item
 ```
 
-One timer runs per user — starting a new one auto-stops the previous (reported as `stopped`).
+Starting a task parks any other open project session (reported under `stopped` when a prior
+task/project was active). Time notes are real `type:'note'` items nested under the tracked
+task (or the project root when only a session is running), plus a zero-duration marker in
+the block. `metadata` is arbitrary JSON stored on the note item.
 
 ### Worked sequences (canonical utterances)
 
@@ -390,7 +402,7 @@ One timer runs per user — starting a new one auto-stops the previous (reported
 - **"Remind me to take my son to swimming every Tuesday at 5pm, an hour before, and share it with Rachel."** →
   `POST /tasks/batch {tasks:[{title:"Take son to swimming", due_date:"2026-07-07T17:00:00Z", reminder_at:"2026-07-07T16:00:00Z", recurrence:{type:"weekly",interval:1,daysOfWeek:[2]}}]}`
   then `POST /tasks/share {query:"Take son to swimming", users:["Rachel"]}`.
-- **"Start a timer on the report."** → `POST /timer/start {query:"report"}`; later **"stop the timer"** → `POST /timer/stop {}`.
+- **"Start a timer on the report."** → `POST /timer/start {query:"report"}`; **"add a note: traffic"** → `POST /timer/note {title:"traffic"}`; later **"stop the timer"** → `POST /timer/stop {}`.
 
 ### Geocoding env (place lookup for "nearest Coles")
 

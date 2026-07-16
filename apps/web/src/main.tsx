@@ -68,6 +68,9 @@ function bootApp(): void {
       // Resume foreground geofencing if the user enabled it.
       const { geofencePref, startGeofencing } = await import('./lib/geo');
       if (geofencePref()) void startGeofencing();
+      // Resume GPS track recorder if a session is open and the pref is on.
+      const { resumeGpsIfNeeded } = await import('./lib/gpsTrack');
+      void resumeGpsIfNeeded();
       // Resume local reminders if enabled (native scheduling on Capacitor, else scan).
       const { localRemindersPref, startLocalReminders } = await import('./lib/localReminders');
       if (localRemindersPref()) void startLocalReminders();

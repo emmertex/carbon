@@ -868,6 +868,10 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       dueDate: (b.due_date as string) ?? null,
       flagged: !!b.flagged,
       priority: typeof b.priority === 'number' ? b.priority : 0,
+      metadata:
+        'metadata' in b
+          ? ((b.metadata as string | Record<string, unknown> | null) ?? null)
+          : undefined,
     });
     return c.json(item, 201);
   });
@@ -903,8 +907,17 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       'color',
       'recurrence',
       'review_interval',
+      'metadata',
     ] as const;
     for (const k of fields) if (k in b) (patch as Record<string, unknown>)[k] = b[k];
+    if ('metadata' in patch) {
+      const m = patch.metadata as unknown;
+      if (m != null && typeof m === 'object') {
+        (patch as Record<string, unknown>).metadata = JSON.stringify(m);
+      } else if (m === '') {
+        patch.metadata = null;
+      }
+    }
     // A raw status patch must keep completed_at in step (mirrors setCompleted) —
     // completed-item age logic (e.g. the purge feature) relies on the stamp.
     if (typeof patch.status === 'string' && patch.status !== item.status) {

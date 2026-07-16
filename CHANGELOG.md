@@ -6,6 +6,33 @@ GitHub Release body and the public mirror commit message — so keep each headin
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
 
+## v0.8.2
+**GPS tracks on time sessions (background on Android)**
+- Opt-in **Record GPS while time-tracking** (Settings → Reminders & location).
+  While a timer runs, the device records a denoised track (≤1 minute between
+  points; move must exceed 5× reported accuracy) and, on stop or project park,
+  attaches it as a JSON blob on a time note with a small metadata summary
+  (point count, distance, bbox, blob hash) — keeping the CRDT ops log small.
+- **Android**: uses free `@capgo/background-geolocation` with a foreground-service
+  notification so tracks continue with the screen off. Web/desktop fall back to
+  foreground watching only.
+- Timer bar shows a satellite indicator (and point count) while recording.
+
+## v0.8.1
+**Time tracking API, time notes, and item metadata**
+- Agent/REST timer API now drives the full v2 time-tracking engine (sessions,
+  pauses, resume, parked projects) instead of the unused legacy single-timer
+  start/stop. New endpoints: context, session list, pause/resume, and time notes.
+- **Time notes**: while tracking, add a note from the timer bar (or
+  `POST /api/agent/timer/note`). Creates a real note under the active task — or
+  at the project root when only a session is running — and pins a timestamped
+  marker in the time block. Deleting from the block offers *from block only* or
+  *delete note*; deleting the note from the task list leaves the block marker
+  labelled *(deleted note)*.
+- Items gain an optional **`metadata`** JSON field (API + sync; no editor yet).
+  Side panels show a **See metadata** link when set — useful for stashing things
+  like GPX travel data on a tracker note until a dedicated UI exists.
+
 ## v0.8.0
 **Time tracking: merge, split and segment editing**
 - Accidentally stopped and restarted tracking? If you restart a project within

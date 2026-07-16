@@ -425,6 +425,7 @@ export function createPatch(item: Item): ItemPatch {
     sort_order: item.sort_order,
     order_mode: item.order_mode,
     sys_kind: item.sys_kind,
+    metadata: item.metadata,
     deleted: item.deleted,
   };
 }

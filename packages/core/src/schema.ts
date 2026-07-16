@@ -486,4 +486,12 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 21,
+  // Arbitrary JSON payload on any item (tasks, notes, projects, …). Stored as
+  // TEXT like geo/recurrence; integrations can stash structured data (e.g. GPX
+  // on a time-tracking note) without a dedicated column per use-case.
+  up: `ALTER TABLE items ADD COLUMN metadata TEXT;`,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -196,15 +196,43 @@ def agent_assign(users, query=None, queries=None, ids=None, list=None, tag=None,
     return _api("POST", "/api/agent/tasks/assign", {k: v for k, v in body.items() if v is not None})
 
 
-def agent_start_timer(query=None, id=None, list=None):
-    """Start a timer on a task (resolved by query/id). Auto-stops any running timer."""
-    body = {"query": query, "id": id, "list": list}
+def agent_start_timer(query=None, id=None, list=None, project=False):
+    """Start a v2 timer on a task or project (parks any other open session)."""
+    body = {"query": query, "id": id, "list": list, "project": project or None}
     return _api("POST", "/api/agent/timer/start", {k: v for k, v in body.items() if v is not None})
 
 
 def agent_stop_timer():
-    """Stop the currently running timer. Returns {stopped:{id,title}|null}."""
+    """Stop the currently running session. Returns {stopped, context}."""
     return _api("POST", "/api/agent/timer/stop", {})
+
+
+def agent_timer_context():
+    """Active session context: session, task, paused, suspended."""
+    return _api("GET", "/api/agent/timer")
+
+
+def agent_pause_timer(minutes=None, before=False):
+    """Pause now (minutes=None = indefinite) or retroactively (before=True)."""
+    body = {"minutes": minutes, "before": before or None}
+    return _api("POST", "/api/agent/timer/pause", {k: v for k, v in body.items() if v is not None})
+
+
+def agent_resume_timer(session_id=None):
+    """Resume from a break pause, or a parked session via session_id."""
+    body = {"session_id": session_id}
+    return _api("POST", "/api/agent/timer/resume", {k: v for k, v in body.items() if v is not None})
+
+
+def agent_add_timer_note(title, body=None, metadata=None, session_id=None):
+    """Add a time note to the active session (note item + block marker)."""
+    payload = {"title": title, "body": body, "metadata": metadata, "session_id": session_id}
+    return _api("POST", "/api/agent/timer/note", {k: v for k, v in payload.items() if v is not None})
+
+
+def agent_remove_timer_note(log_id, mode="reference"):
+    """Remove a time-note marker. mode=reference|note (also delete the note item)."""
+    return _api("DELETE", f"/api/agent/timer/notes/{log_id}?mode={mode}")
 
 
 # ── Webhook HTTP server ──────────────────────────────────────────────

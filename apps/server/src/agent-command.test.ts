@@ -477,27 +477,33 @@ describe('runAgentCommand — scheduling, sharing, assigning, timers, completed 
     assert.equal(hasWriteAccess(db, task.id, rachelId), true);
   });
 
-  test('timers: start auto-stops a prior running timer; stop ends it', async () => {
+  test('timers: start parks prior session; stop ends it; notes attach under task', async () => {
     const { db, deviceId, addUser } = makeTestDb();
     const { id: uid } = addUser('a', 'pw');
-    const { getRunningTimer } = await import('@carbon/core');
+    const { getTimeContext, getChildren } = await import('@carbon/core');
     const agent = makeAgent(db);
-    const t1 = createItem(db, deviceId, { type: 'task', title: 'Write report', ownerId: uid });
-    const t2 = createItem(db, deviceId, { type: 'task', title: 'Review PR', ownerId: uid });
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Work', ownerId: uid });
+    const t1 = createItem(db, deviceId, { type: 'task', title: 'Write report', parentId: proj.id, ownerId: uid });
+    const t2 = createItem(db, deviceId, { type: 'task', title: 'Review PR', parentId: proj.id, ownerId: uid });
 
     stubLLM([toolResp('start_timer', { query: 'write report' }), doneResp()]);
     await runAgentCommand(deps(db, deviceId), agent, uid, 'start a timer on write report', true);
-    assert.equal(getRunningTimer(db, uid)?.item_id, t1.id);
+    assert.equal(getTimeContext(db, uid).task?.item_id, t1.id);
 
     stubLLM([toolResp('start_timer', { query: 'review PR' }), doneResp()]);
     const r2 = await runAgentCommand(deps(db, deviceId), agent, uid, 'start a timer on review PR', true);
-    assert.match(r2.reply, /Started timer on Review PR \(stopped Write report\)/);
-    assert.equal(getRunningTimer(db, uid)?.item_id, t2.id);
+    assert.match(r2.reply, /Started timer on Review PR/);
+    assert.equal(getTimeContext(db, uid).task?.item_id, t2.id);
+
+    stubLLM([toolResp('add_timer_note', { title: 'Blocked on review' }), doneResp()]);
+    const rNote = await runAgentCommand(deps(db, deviceId), agent, uid, 'add a time note blocked on review', true);
+    assert.match(rNote.reply, /Added time note: Blocked on review/);
+    assert.equal(getChildren(db, t2.id).filter((i) => i.type === 'note').length, 1);
 
     stubLLM([toolResp('stop_timer', {}), doneResp()]);
     const r3 = await runAgentCommand(deps(db, deviceId), agent, uid, 'stop the timer', true);
     assert.match(r3.reply, /Stopped timer on Review PR/);
-    assert.equal(getRunningTimer(db, uid), undefined);
+    assert.equal(getTimeContext(db, uid).session, null);
   });
 });
 

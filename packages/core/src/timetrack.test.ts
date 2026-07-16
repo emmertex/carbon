@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { openMemoryDb } from './test-helpers';
-import { createItem, createTag, setItemTags, saveTimeLog, rowToTimeLog } from './repo';
+import { createItem, createTag, setItemTags, saveTimeLog, rowToTimeLog, getItem, deleteItem } from './repo';
 import type { TimeLog } from './types';
 import {
   startSession,
@@ -26,6 +26,8 @@ import {
   trackedMs,
   MERGE_QUICK_WINDOW_MS,
   MERGE_BLOCK_WINDOW_MS,
+  addTimeNote,
+  removeTimeNote,
 } from './timetrack';
 
 const A = 'device-a';
@@ -506,4 +508,75 @@ test('segmentBounds windows a segment between covered neighbors', () => {
   const bounds = segmentBounds(getSessionBlock(db, s), b.id);
   assert.equal(bounds.minStartMs, T0 + 20 * 60_000);
   assert.equal(bounds.maxEndMs, T0 + 50 * 60_000);
+});
+
+
+test('addTimeNote nests under the active task and pins a marker', () => {
+  const db = openMemoryDb();
+  const proj = createItem(db, A, { title: 'proj', type: 'project' });
+  const task = createItem(db, A, { title: 't', type: 'task', parentId: proj.id });
+  startTask(db, A, task.id, U);
+
+  const result = addTimeNote(db, A, U, {
+    title: 'Traffic',
+    body: 'slow',
+    metadata: { gpx: '<trk/>' },
+  });
+  assert.ok(result);
+  assert.equal(result!.note.type, 'note');
+  assert.equal(result!.note.parent_id, task.id);
+  assert.equal(result!.note.note, 'slow');
+  assert.ok(result!.note.metadata?.includes('gpx'));
+  assert.equal(result!.log.kind, 'note');
+  assert.equal(result!.log.item_id, result!.note.id);
+  assert.equal(result!.log.start_time, result!.log.end_time);
+
+  // Running task segment is undisturbed.
+  const ctx = getTimeContext(db, U);
+  assert.ok(ctx.task);
+  assert.equal(ctx.task!.item_id, task.id);
+
+  const block = getSessionBlock(db, ctx.session!);
+  assert.equal(block.notes.length, 1);
+  assert.equal(block.notes[0]!.item?.title, 'Traffic');
+
+  // Remove reference only — note item survives.
+  assert.equal(removeTimeNote(db, A, result!.log.id, 'reference'), true);
+  assert.equal(getSessionBlock(db, ctx.session!).notes.length, 0);
+  assert.equal(getItem(db, result!.note.id)?.deleted, false);
+});
+
+test('addTimeNote under project root when only a session is active', () => {
+  const db = openMemoryDb();
+  const proj = createItem(db, A, { title: 'proj', type: 'project' });
+  startSession(db, A, proj.id, U);
+  const result = addTimeNote(db, A, U, { title: 'Break note' });
+  assert.ok(result);
+  assert.equal(result!.note.parent_id, proj.id);
+});
+
+test('removeTimeNote mode=note deletes the note item; deleted note stays labelled in block', () => {
+  const db = openMemoryDb();
+  const proj = createItem(db, A, { title: 'proj', type: 'project' });
+  const task = createItem(db, A, { title: 't', type: 'task', parentId: proj.id });
+  startTask(db, A, task.id, U);
+
+  const a = addTimeNote(db, A, U, { title: 'A' })!;
+  const b = addTimeNote(db, A, U, { title: 'B' })!;
+
+  assert.equal(removeTimeNote(db, A, a.log.id, 'note'), true);
+  assert.equal(getItem(db, a.note.id)?.deleted, true);
+
+  // Delete note B from the task list; marker remains with deleted item.
+  deleteItem(db, A, b.note.id);
+  const session = getTimeContext(db, U).session!;
+  const notes = getSessionBlock(db, session).notes;
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0]!.log.id, b.log.id);
+  assert.equal(notes[0]!.item?.deleted, true);
+});
+
+test('addTimeNote is a no-op without an active session', () => {
+  const db = openMemoryDb();
+  assert.equal(addTimeNote(db, A, U, { title: 'x' }), null);
 });

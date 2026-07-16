@@ -13,6 +13,9 @@ const config: CapacitorConfig = {
     // pointing the app at an https URL (e.g. via Nginx Proxy Manager). Set
     // `allowMixedContent: true` only as a last resort for http-only servers.
     allowMixedContent: false,
+    // Keeps @capgo/background-geolocation updates flowing past Android's ~5 min
+    // WebView throttle while the app is backgrounded.
+    useLegacyBridge: true,
   },
   plugins: {
     PushNotifications: {

@@ -8,8 +8,6 @@ import {
   listTags,
   getProjects,
   getTimeContext,
-  startSession,
-  stopActive,
   type Item,
 } from '@carbon/core';
 import { cn } from '@/lib/cn';
@@ -17,6 +15,7 @@ import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { createFromQuickAdd } from '@/lib/quickadd';
+import { trackingStartSession, trackingStopActive } from '@/lib/trackingLifecycle';
 import { enrichItems } from '@/lib/enrich';
 import { filterByPrefs } from '@/lib/filter-expr';
 import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
@@ -97,9 +96,8 @@ export function ContainerView() {
   const isProject = item.type === 'project';
 
   function toggleTrack() {
-    const uid = getCurrentUserId();
-    if (tracking) mutate((db, dev) => stopActive(db, dev, uid));
-    else mutate((db, dev) => startSession(db, dev, id, uid));
+    if (tracking) void trackingStopActive();
+    else void trackingStartSession(id);
   }
 
   function create(text: string, type: 'task' | 'note' = 'task') {
