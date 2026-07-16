@@ -9,7 +9,7 @@ import {
 import { useStore } from '@/lib/store';
 import { cn } from '@/lib/cn';
 import { SettingsSection } from './SettingsSection';
-import { ThemeChip } from './controls';
+import { SegmentedControl } from '../ui/SegmentedControl';
 
 export function AppearanceSection() {
   const themeMode = useStore((s) => s.themeMode);
@@ -29,43 +29,30 @@ export function AppearanceSection() {
   return (
     <SettingsSection id="appearance" title="Appearance">
       <span className="mb-1 block text-sm font-medium">Mode</span>
-      <div className="mb-4 flex flex-wrap gap-2">
-        {THEME_MODES.map((m) => (
-          <ThemeChip
-            key={m.id}
-            label={m.label}
-            active={themeMode === m.id}
-            onClick={() => setThemeMode(m.id)}
-          />
-        ))}
+      <div className="mb-4">
+        <SegmentedControl
+          value={themeMode}
+          onChange={setThemeMode}
+          options={THEME_MODES.map((m) => ({ value: m.id, label: m.label }))}
+        />
       </div>
 
       <div className="mb-4 grid gap-4 sm:grid-cols-2">
         <div>
           <span className="mb-1 block text-sm font-medium">Light theme</span>
-          <div className="flex flex-wrap gap-2">
-            {LIGHT_THEMES.map((t) => (
-              <ThemeChip
-                key={t.id}
-                label={t.label}
-                active={lightTheme === t.id}
-                onClick={() => setLightTheme(t.id)}
-              />
-            ))}
-          </div>
+          <SegmentedControl
+            value={lightTheme}
+            onChange={setLightTheme}
+            options={LIGHT_THEMES.map((t) => ({ value: t.id, label: t.label }))}
+          />
         </div>
         <div>
           <span className="mb-1 block text-sm font-medium">Dark theme</span>
-          <div className="flex flex-wrap gap-2">
-            {DARK_THEMES.map((t) => (
-              <ThemeChip
-                key={t.id}
-                label={t.label}
-                active={darkTheme === t.id}
-                onClick={() => setDarkTheme(t.id)}
-              />
-            ))}
-          </div>
+          <SegmentedControl
+            value={darkTheme}
+            onChange={setDarkTheme}
+            options={DARK_THEMES.map((t) => ({ value: t.id, label: t.label }))}
+          />
         </div>
       </div>
 

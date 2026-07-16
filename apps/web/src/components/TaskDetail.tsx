@@ -98,6 +98,17 @@ import {
   logDuration,
 } from "@/lib/date";
 import { cn } from "@/lib/cn";
+import {
+  inputCls as inputBase,
+  chipCls,
+  btnIcon,
+  btnPrimary,
+  Label,
+  Pill,
+} from "./ui/controls";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { Select } from "./ui/Select";
+import { Chip } from "./Chip";
 
 const PRIORITIES = [
   { value: 0, label: "None" },
@@ -106,11 +117,7 @@ const PRIORITIES = [
   { value: 3, label: "High" },
 ];
 
-const inputCls =
-  "w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm outline-none focus:border-accent";
-
-const chipCls =
-  "rounded-lg border border-border px-2 py-1 text-xs text-text-muted hover:bg-surface-2 hover:text-text";
+const inputCls = cn("w-full", inputBase);
 
 /** Today / Tomorrow / 3 Days / 1 Week quick-set buttons + a date picker for
  *  anything else. `onPick` receives a yyyy-MM-dd string; `onClear` clears the field. */
@@ -203,14 +210,6 @@ const UNIT: Record<RecurrenceRule["type"], string> = {
   monthly: "month",
   yearly: "year",
 };
-
-function Label({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="mb-1 block text-xs font-medium text-text-muted">
-      {children}
-    </span>
-  );
-}
 
 /** A searchable, type-to-filter task picker (like the tag input, but resolves to
  *  a task id so duplicate titles stay unambiguous). Each pick calls `onAdd`;
@@ -632,7 +631,7 @@ export function TaskDetail({ id }: { id: string }) {
       <header className="flex items-center gap-1 border-b border-border px-3 py-2">
         <button
           onClick={() => select(null)}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+          className={cn(btnIcon, "p-2")}
           aria-label="Close"
         >
           <X size={18} />
@@ -645,8 +644,9 @@ export function TaskDetail({ id }: { id: string }) {
           <button
             onClick={toggleTimer}
             className={cn(
-              "rounded-lg p-2 hover:bg-surface-2",
-              trackingHere ? "text-danger" : "text-text-muted hover:text-text",
+              btnIcon,
+              "p-2",
+              trackingHere && "text-danger hover:text-danger",
             )}
             aria-label={trackingHere ? "Stop recording time" : "Record time"}
             title={trackingHere ? "Stop recording time" : "Record time"}
@@ -661,10 +661,7 @@ export function TaskDetail({ id }: { id: string }) {
         {item.type !== "project" && (
           <button
             onClick={togglePlan}
-            className={cn(
-              "rounded-lg p-2 hover:bg-surface-2",
-              inPlan ? "text-accent" : "text-text-muted hover:text-text",
-            )}
+            className={cn(btnIcon, "p-2", inPlan && "text-accent hover:text-accent")}
             aria-label={inPlan ? "Remove from Plan" : "Add to Plan"}
             title={inPlan ? "In Plan" : "Add to Plan"}
           >
@@ -673,7 +670,7 @@ export function TaskDetail({ id }: { id: string }) {
         )}
         <button
           onClick={() => focusItem(item)}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+          className={cn(btnIcon, "p-2")}
           aria-label="Focus"
           title="Focus on this task"
         >
@@ -681,10 +678,7 @@ export function TaskDetail({ id }: { id: string }) {
         </button>
         <button
           onClick={() => patch({ flagged: !item.flagged })}
-          className={cn(
-            "rounded-lg p-2 hover:bg-surface-2",
-            item.flagged ? "text-warning" : "text-text-muted hover:text-text",
-          )}
+          className={cn(btnIcon, "p-2", item.flagged && "text-warning hover:text-warning")}
           aria-label="Flag"
         >
           <Flag size={17} fill={item.flagged ? "currentColor" : "none"} />
@@ -692,7 +686,7 @@ export function TaskDetail({ id }: { id: string }) {
         {item.type === "note" && (
           <button
             onClick={() => void exportSingleNote(getDb(), id)}
-            className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+            className={cn(btnIcon, "p-2")}
             aria-label="Export note"
             title={
               collectAssetHashes(item.note).length
@@ -705,7 +699,7 @@ export function TaskDetail({ id }: { id: string }) {
         )}
         <button
           onClick={remove}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-danger"
+          className={cn(btnIcon, "p-2 hover:text-danger")}
           aria-label="Delete"
         >
           <Trash2 size={17} />
@@ -764,49 +758,29 @@ export function TaskDetail({ id }: { id: string }) {
             {/* Lifecycle status — a segmented pill directly under the title. Active/
                 Done/Dropped always render (including projects) so every lifecycle
                 state remains reachable; the "Note" conversion pill is task-only. */}
-            <div className="mt-1 inline-flex overflow-hidden rounded-full border border-border text-xs">
-              {(
-                [
-                  ["active", "Active", "bg-accent text-accent-fg"],
-                  ["done", "Done", "bg-success text-white"],
-                  ["dropped", "Dropped", "bg-surface-2 text-text-muted line-through"],
-                ] as [Item["status"], string, string][]
-              ).map(([s, label, selCls], i) => {
-                const active = item.type !== "note" && item.status === s;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => selectStatusPill(s)}
-                    aria-pressed={active}
-                    className={cn(
-                      "px-3 py-1 font-medium transition-colors",
-                      i > 0 && "border-l border-border",
-                      active
-                        ? selCls
-                        : "text-text-muted hover:bg-surface-2 hover:text-text",
-                    )}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-              {item.type !== "project" && (
-                <button
-                  type="button"
-                  onClick={() => setType("note")}
-                  aria-pressed={item.type === "note"}
-                  className={cn(
-                    "border-l border-border px-3 py-1 font-medium transition-colors",
-                    item.type === "note"
-                      ? "bg-accent text-accent-fg"
-                      : "text-text-muted hover:bg-surface-2 hover:text-text",
-                  )}
-                >
-                  Note
-                </button>
-              )}
-            </div>
+            <SegmentedControl<Item["status"] | "note">
+              className="mt-1"
+              value={item.type === "note" ? "note" : item.status}
+              onChange={(v) =>
+                v === "note" ? setType("note") : selectStatusPill(v)
+              }
+              options={[
+                { value: "active", label: "Active" },
+                {
+                  value: "done",
+                  label: "Done",
+                  activeClassName: "bg-success/15 text-success",
+                },
+                {
+                  value: "dropped",
+                  label: "Dropped",
+                  activeClassName: "bg-surface-2 text-text-muted line-through",
+                },
+                ...(item.type !== "project"
+                  ? [{ value: "note" as const, label: "Note" }]
+                  : []),
+              ]}
+            />
             {item.type === "note" && (
               <p className="mt-1 text-xs text-text-faint">
                 Converting back to a task restores its dates, flags and status.
@@ -884,8 +858,7 @@ export function TaskDetail({ id }: { id: string }) {
             {!isNote && (
               <div>
                 <Label>Priority</Label>
-                <select
-                  className={inputCls}
+                <Select
                   value={item.priority}
                   onChange={(e) => patch({ priority: Number(e.target.value) })}
                 >
@@ -894,13 +867,12 @@ export function TaskDetail({ id }: { id: string }) {
                       {p.label}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             )}
             <div>
               <Label>Project</Label>
-              <select
-                className={inputCls}
+              <Select
                 value={projectId ?? ""}
                 onChange={(e) => patch({ parent_id: e.target.value || null })}
               >
@@ -912,7 +884,7 @@ export function TaskDetail({ id }: { id: string }) {
                       {p.title || "Untitled project"}
                     </option>
                   ))}
-              </select>
+              </Select>
             </div>
           </div>
         )}
@@ -922,23 +894,15 @@ export function TaskDetail({ id }: { id: string }) {
             <Label>Tags</Label>
             <div className="flex flex-wrap items-center gap-1.5">
               {tags.map((t) => (
-                <span
+                <Pill
                   key={t.id}
                   title={t.name}
-                  className="flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                  onRemove={() => removeTag(t.id)}
+                  removeLabel={`Remove ${t.name}`}
                 >
                   <TagMark color={t.color} />
                   {abbreviateTagPath(t.name)}
-                  <button
-                    onClick={() => removeTag(t.id)}
-                    aria-label={`Remove ${t.name}`}
-                  >
-                    <X
-                      size={12}
-                      className="text-text-faint hover:text-danger"
-                    />
-                  </button>
-                </span>
+                </Pill>
               ))}
               <input
                 list="all-tags"
@@ -968,29 +932,17 @@ export function TaskDetail({ id }: { id: string }) {
         {!isNote && (isProject || hasChildren) && (
           <div>
             <Label>Order</Label>
-            <div className="flex overflow-hidden rounded-lg border border-border text-xs">
-              {(
-                [
-                  ["parallel", "Parallel"],
-                  ["sequential", "Sequential"],
-                  ["single", "Single action"],
-                ] as [OrderMode, string][]
-              ).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => patch({ order_mode: mode })}
-                  className={cn(
-                    "flex-1 px-2 py-1.5 font-medium",
-                    item.order_mode === mode
-                      ? "bg-accent-soft text-accent"
-                      : "text-text-muted hover:bg-surface-2",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl<OrderMode>
+              block
+              segmentClassName="py-1.5"
+              value={item.order_mode ?? null}
+              onChange={(mode) => patch({ order_mode: mode })}
+              options={[
+                { value: "parallel", label: "Parallel" },
+                { value: "sequential", label: "Sequential" },
+                { value: "single", label: "Single action" },
+              ]}
+            />
             {item.order_mode === "sequential" && (
               <p className="mt-1 text-xs text-text-faint">
                 Only the first incomplete child is available; later ones stay blocked
@@ -1129,8 +1081,7 @@ export function TaskDetail({ id }: { id: string }) {
                 </span>
               </Label>
               <div className="flex gap-2">
-                <select
-                  className={inputCls}
+                <Select
                   value={
                     !recurrence
                       ? ""
@@ -1172,7 +1123,7 @@ export function TaskDetail({ id }: { id: string }) {
                   <option value="q">Every 3 months</option>
                   <option value="h">Every 6 months</option>
                   <option value="yearly">Yearly</option>
-                </select>
+                </Select>
                 {recurrence && (
                   <label className="flex items-center gap-1 text-xs text-text-faint">
                     every
@@ -1253,8 +1204,7 @@ export function TaskDetail({ id }: { id: string }) {
               {recurrence && (
                 <div className="mt-2">
                   <Label>Repeat based on</Label>
-                  <select
-                    className={inputCls}
+                  <Select
                     value={
                       recurrence.from ??
                       (recurrence.fromCompletion ? "completed" : "scheduled")
@@ -1272,7 +1222,7 @@ export function TaskDetail({ id }: { id: string }) {
                       Completed date, keep time
                     </option>
                     <option value="completed">Completed date and time</option>
-                  </select>
+                  </Select>
                 </div>
               )}
             </div>
@@ -1310,10 +1260,11 @@ export function TaskDetail({ id }: { id: string }) {
                 <Label>Blocked by (prerequisites)</Label>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {predecessors.map((p) => (
-                    <span
+                    <Pill
                       key={p.id}
                       title={p.title}
-                      className="flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                      onRemove={() => removeBlockedBy(p.id)}
+                      removeLabel={`Remove ${p.title}`}
                     >
                       {p.status === "done" ? (
                         <Check size={11} className="text-success" />
@@ -1321,10 +1272,7 @@ export function TaskDetail({ id }: { id: string }) {
                         <Lock size={11} className="text-text-faint" />
                       )}
                       <span className="max-w-[10rem] truncate">{p.title || "Untitled"}</span>
-                      <button onClick={() => removeBlockedBy(p.id)} aria-label={`Remove ${p.title}`}>
-                        <X size={12} className="text-text-faint hover:text-danger" />
-                      </button>
-                    </span>
+                    </Pill>
                   ))}
                 </div>
                 <DepPicker
@@ -1337,16 +1285,14 @@ export function TaskDetail({ id }: { id: string }) {
                 <Label>Blocks</Label>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {successors.map((s) => (
-                    <span
+                    <Pill
                       key={s.id}
                       title={s.title}
-                      className="flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                      onRemove={() => removeBlocks(s.id)}
+                      removeLabel={`Remove ${s.title}`}
                     >
                       <span className="max-w-[10rem] truncate">{s.title || "Untitled"}</span>
-                      <button onClick={() => removeBlocks(s.id)} aria-label={`Remove ${s.title}`}>
-                        <X size={12} className="text-text-faint hover:text-danger" />
-                      </button>
-                    </span>
+                    </Pill>
                   ))}
                 </div>
                 <DepPicker
@@ -1366,15 +1312,11 @@ export function TaskDetail({ id }: { id: string }) {
               <Label>Assigned to</Label>
               <div className="flex flex-wrap gap-1.5">
                 {roster.map((u) => (
-                  <button
+                  <Chip
                     key={u.id}
+                    active={assignedIds.has(u.id)}
                     onClick={() => toggleAssignee(u.id)}
-                    className={cn(
-                      "flex items-center gap-1.5 rounded-full border px-2 py-1 text-xs",
-                      assignedIds.has(u.id)
-                        ? "border-accent bg-accent-soft text-accent"
-                        : "border-border text-text-muted hover:bg-surface-2",
-                    )}
+                    className="gap-1.5"
                   >
                     <span
                       className="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-semibold text-white"
@@ -1383,7 +1325,7 @@ export function TaskDetail({ id }: { id: string }) {
                       {(u.display_name || u.username).charAt(0).toUpperCase()}
                     </span>
                     {u.display_name || u.username}
-                  </button>
+                  </Chip>
                 ))}
               </div>
             </div>
@@ -1423,7 +1365,7 @@ export function TaskDetail({ id }: { id: string }) {
                             · inherited
                           </span>
                         ) : (
-                          <select
+                          <Select
                             value={direct ? direct.permission : "off"}
                             onChange={(e) =>
                               setShare(
@@ -1431,12 +1373,12 @@ export function TaskDetail({ id }: { id: string }) {
                                 e.target.value as Permission | "off",
                               )
                             }
-                            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none"
+                            className="px-2 py-1 text-xs"
                           >
                             <option value="off">No access</option>
                             <option value="read">Can view</option>
                             <option value="write">Can edit</option>
-                          </select>
+                          </Select>
                         )}
                       </div>
                     );
@@ -1510,10 +1452,10 @@ export function TaskDetail({ id }: { id: string }) {
             <button
               onClick={toggleTimer}
               className={cn(
-                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white",
-                trackingHere
-                  ? "bg-danger hover:opacity-90"
-                  : "bg-accent hover:bg-accent-hover",
+                btnPrimary,
+                "px-3 py-1.5",
+                trackingHere &&
+                  "bg-danger text-white hover:bg-danger hover:opacity-90",
               )}
             >
               {trackingHere ? (

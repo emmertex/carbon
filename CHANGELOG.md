@@ -6,6 +6,51 @@ GitHub Release body and the public mirror commit message — so keep each headin
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
 
+## v0.8.0
+**Time tracking: merge, split and segment editing**
+- Accidentally stopped and restarted tracking? If you restart a project within
+  5 minutes of stopping it, the timer bar offers to **merge with the last block** —
+  the timer continues from the original start and the gap becomes untracked time
+  inside the block.
+- Expanded blocks on the Time tracked screen offer **Merge with previous block**
+  when the same project's previous block ended within 8 hours.
+- Untracked time within a block is now listed **per gap**, in order between the
+  task segments. Leading/trailing gaps can be **trimmed** off the block; deleting
+  a gap in the middle **splits the block in two**, with segments, pauses and
+  completions kept on the correct side.
+- Task segments inside a block are now editable after the fact, within the
+  block's bounds: click a segment for **Start offset** (untracked minutes before
+  it) and **Task time** (its length) in whole minutes, plus **Snap to previous**
+  and **Fill to next** one-tap buttons. Segments can be **removed** (the time
+  becomes untracked), and tasks can be **added into any untracked gap** from a
+  picker of the block's project tasks.
+- Tapping a block's bar opens a much taller, touch-friendly editor: tap a segment
+  to get start/end **drag handles** with 1-minute snapping, clamped against
+  neighbouring segments, pauses and the block edges — working in parallel with
+  the numeric fields, which mirror the drag live.
+- All edits round to whole minutes silently, are conflict-safe under sync, and
+  never touch the currently-recording segment (the live block still merges fine).
+
+## v0.7.6
+**UI consistency pass**
+- One control language across the app. All single-choice options (task status, order
+  mode, tag hold status, Nested/Flat, view switchers, filter mode, and every settings
+  choice group) now use the same split-pill segmented control; separate pill toggles
+  remain only for independent on/off filters. Pills, icon buttons, inputs, and selects
+  share single definitions in a new `ui/` component library instead of per-file copies.
+- Settings no longer feels like a different app: billing, the card form, and the sync
+  danger zone were rebuilt on the shared controls and theme tokens, replacing hardcoded
+  reds/ambers/greens/whites with the theme's danger/warning/success colours.
+- Accent-coloured buttons now use the theme's accent text colour instead of forced
+  white, so button labels stay legible on light accents (green, amber, orange).
+- Dropdowns are consistently styled (bordered, themed, focus ring) while keeping the
+  native picker underneath for mobile friendliness.
+- Segmented controls scroll instead of clipping on narrow phone screens.
+- Fixed native dropdown popups (and date/time pickers) rendering as a white OS panel
+  with white text in dark themes on Linux: dark themes now declare
+  `color-scheme: dark`, so the browser paints native widgets in the matching scheme,
+  with themed option colours as a fallback for renderers that ignore it.
+
 ## v0.7.5
 **Mobile sync fix**
 - Fixed sync failing permanently with *"tried to bind a value of an unknown type"* on

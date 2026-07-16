@@ -23,6 +23,8 @@ import { enrichItems } from '@/lib/enrich';
 import { PlanList, GroupingToggle, planEntry } from '@/components/PlanList';
 import { TaskRow, type TaskRowData } from '@/components/TaskRow';
 import { cn } from '@/lib/cn';
+import { Chip } from '@/components/Chip';
+import { SegmentedControl } from '@/components/ui/SegmentedControl';
 
 const SEQ_DAYS = 7;
 /** Parse a 'yyyy-MM-dd' key as a *local* midnight (avoids UTC day-drift). */
@@ -185,20 +187,16 @@ export function ForecastView() {
           <h1 className="text-2xl font-bold tracking-tight">Forecast</h1>
           <p className="mt-0.5 text-sm text-text-muted">Due and deferred tasks by day.</p>
         </div>
-        <div className="flex overflow-hidden rounded-lg border border-border text-xs">
-          {(['ribbon', 'month', 'sequence'] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={cn(
-                'px-2.5 py-1 capitalize',
-                view === v ? 'bg-accent-soft text-accent' : 'hover:bg-surface-2',
-              )}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl<'ribbon' | 'month' | 'sequence'>
+          value={view}
+          onChange={setView}
+          segmentClassName="px-2.5 capitalize"
+          options={[
+            { value: 'ribbon', label: 'ribbon' },
+            { value: 'month', label: 'month' },
+            { value: 'sequence', label: 'sequence' },
+          ]}
+        />
       </div>
 
       {view !== 'month' ? (
@@ -456,19 +454,19 @@ function DayChip({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Chip
+      active={active}
       onClick={onClick}
       className={cn(
-        'flex shrink-0 flex-col items-center gap-0.5 rounded-lg border px-3 py-1.5 text-xs',
-        active
-          ? 'border-accent bg-accent-soft text-accent'
-          : 'border-border text-text-muted hover:bg-surface-2',
+        'shrink-0 flex-col gap-0.5 rounded-lg px-3 py-1.5',
         danger && !active && 'text-danger',
       )}
     >
       <span className="font-medium">{label}</span>
-      <span className={cn('tabular-nums', count === 0 && 'text-text-faint')}>{count}</span>
-    </button>
+      <span className={cn('font-normal tabular-nums', count === 0 && 'text-text-faint')}>
+        {count}
+      </span>
+    </Chip>
   );
 }
 

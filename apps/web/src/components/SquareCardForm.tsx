@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { SquareConfig } from '@/lib/billing';
+import { cn } from '@/lib/cn';
+import { btnPrimary, ErrorText } from './ui/controls';
 
 // Minimal shape of the Square Web Payments SDK we use.
 interface SquareCard {
@@ -110,11 +112,11 @@ export function SquareCardForm({
   return (
     <div className="space-y-3">
       <div ref={containerRef} className="rounded-lg border border-border bg-surface p-2" />
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      <ErrorText>{error}</ErrorText>
       <button
         onClick={pay}
         disabled={!ready || busy || tokenizing}
-        className="flex items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        className={cn(btnPrimary, 'justify-center')}
       >
         {(busy || tokenizing) && <Loader2 className="animate-spin" size={15} />}
         {submitLabel}

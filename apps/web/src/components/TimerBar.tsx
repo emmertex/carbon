@@ -10,6 +10,9 @@ import {
   resume,
   resumeSuspended,
   stopActive,
+  findMergeCandidate,
+  mergeSessions,
+  MERGE_QUICK_WINDOW_MS,
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { useTicker } from '@/hooks/useTicker';
@@ -20,6 +23,9 @@ import { cn } from '@/lib/cn';
 
 const DURATIONS = [5, 10, 15, 30];
 
+// How long after starting a session the quick-merge offer stays visible.
+const MERGE_CHIP_WINDOW_MS = 15 * 60_000;
+
 export function TimerBar() {
   const select = useStore((s) => s.select);
   const navigate = useNavigate();
@@ -29,6 +35,7 @@ export function TimerBar() {
   const uid = currentUser?.id ?? null;
   const [menu, setMenu] = useState(false);
   const [custom, setCustom] = useState('');
+  const [mergeDismissed, setMergeDismissed] = useState<string | null>(null);
 
   const data = useQuery(
     (db) => {
@@ -37,6 +44,7 @@ export function TimerBar() {
       const startMs = new Date(ctx.session.start_time).getTime();
       // Pause total up to query time = elapsed-span minus tracked; stable while running.
       const pausedMs = Date.now() - startMs - trackedMs(db, ctx.session, Date.now());
+      const mergeCandidate = findMergeCandidate(db, ctx.session, MERGE_QUICK_WINDOW_MS);
       return {
         ctx,
         startMs,
@@ -44,6 +52,7 @@ export function TimerBar() {
         project: getItem(db, ctx.session.item_id),
         task: ctx.task ? getItem(db, ctx.task.item_id) : null,
         suspended: ctx.suspended.map((s) => ({ id: s.id, title: getItem(db, s.item_id)?.title || 'Project' })),
+        merge: mergeCandidate ? { id: mergeCandidate.id, endMs: new Date(mergeCandidate.end_time!).getTime() } : null,
       };
     },
     [uid],
@@ -51,9 +60,14 @@ export function TimerBar() {
   useTicker(1000, !!data);
 
   if (!data) return null;
-  const { ctx, project, task, startMs, pausedMs, suspended } = data;
+  const { ctx, project, task, startMs, pausedMs, suspended, merge } = data;
   // Recomputed every render (ticker drives 1s updates), unlike the query result.
   const elapsed = Math.max(0, Date.now() - startMs - pausedMs);
+  // The candidate is a query-time fact; visibility decays render-side via the ticker.
+  const showMerge =
+    merge != null &&
+    mergeDismissed !== ctx.session!.id &&
+    Date.now() - startMs < MERGE_CHIP_WINDOW_MS;
 
   function openRunning() {
     if (task) {
@@ -151,6 +165,27 @@ export function TimerBar() {
         </div>
       )}
       </div>
+
+      {/* Quick merge: this block started moments after the previous one ended */}
+      {showMerge && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border/50 px-4 py-1 text-xs">
+          <span className="text-text-muted">
+            Continue previous block? Ended {Math.max(1, Math.round((Date.now() - merge.endMs) / 60_000))}m ago
+          </span>
+          <button
+            onClick={() => act((db, dev) => mergeSessions(db, dev, merge.id, ctx.session!.id))}
+            className="rounded border border-border px-2 py-0.5 font-medium hover:bg-surface-2"
+          >
+            Merge
+          </button>
+          <button
+            onClick={() => setMergeDismissed(ctx.session!.id)}
+            className="font-medium text-text-muted hover:text-text"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Complete-elsewhere interrupt prompt */}
       {interrupt && (

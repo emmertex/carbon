@@ -22,6 +22,21 @@ import {
 import { detectKind } from "./caldav-ical";
 import { ensureUserPrefsTables, setUserTimezone } from "./user-prefs";
 
+// Inbound events dated in the past are deliberately never imported (see
+// syncProject), so fixture dates for pull tests must be generated relative to
+// "now" — hardcoded ones rot as real time passes them (the July-2026 fixtures
+// started failing on 2026-07-11). Deliberately-past dates (the past-filter and
+// recurring-series tests) stay hardcoded.
+function futureDay(daysAhead: number, hourUtc = 9): Date {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + daysAhead);
+  d.setUTCHours(hourUtc, 0, 0, 0);
+  return d;
+}
+/** ICS UTC stamp, e.g. 20260710T090000Z. */
+const icsUtc = (d: Date): string =>
+  d.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, "");
+
 // ----- a tiny in-process CalDAV collection (one collection at /cal/) ---------
 
 interface Stored {
@@ -262,17 +277,18 @@ test("a new remote VEVENT becomes a dated task under the project", async () => {
     event_url: `${mock.base}/cal/`,
     sync_events: true,
   });
+  const extStart = futureDay(20);
   mock.put(
     "/cal/ext-ev-1.ics",
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ext-ev-1\r\n" +
-      "SUMMARY:External meeting\r\nDTSTART:20260801T090000Z\r\nDTEND:20260801T100000Z\r\n" +
+      `SUMMARY:External meeting\r\nDTSTART:${icsUtc(extStart)}\r\nDTEND:${icsUtc(futureDay(20, 10))}\r\n` +
       "END:VEVENT\r\nEND:VCALENDAR\r\n",
   );
   const r = await syncProject(db, dev, getCaldavConfigRow(db, proj.id)!, true);
   assert.deepEqual(r.errors, []);
   const t = getChildren(db, proj.id).find((k) => k.title === "External meeting");
   assert.ok(t, "external event should create a task");
-  assert.equal(t!.due_date, "2026-08-01T09:00:00.000Z");
+  assert.equal(t!.due_date, extStart.toISOString());
 });
 
 test("a pushed event returned under a different href is not re-imported (echo)", async () => {
@@ -280,11 +296,12 @@ test("a pushed event returned under a different href is not re-imported (echo)",
   // different path than we wrote (e.g. re-encoding the '@' in the UID, or relocating
   // it). href-only matching would miss the link and re-import our own event.
   const proj = createItem(db, dev, { type: "project", title: "Echo" });
+  const echoDue = futureDay(90);
   const task = createItem(db, dev, {
     type: "task",
     title: "My event",
     parentId: proj.id,
-    dueDate: "2026-12-01T09:00:00.000Z",
+    dueDate: echoDue.toISOString(),
     ownerId: "carol",
   });
   upsertCaldavConfig(db, proj.id, {
@@ -313,7 +330,7 @@ test("a pushed event returned under a different href is not re-imported (echo)",
     (k) => k.title === "My event" && !k.deleted,
   );
   assert.equal(mine.length, 1); // no duplicate re-import
-  assert.equal(getItem(db, task.id)!.due_date, "2026-12-01T09:00:00.000Z");
+  assert.equal(getItem(db, task.id)!.due_date, echoDue.toISOString());
 });
 
 test("a recurring event whose series started in the past is still imported", async () => {
@@ -354,7 +371,7 @@ test("a pulled task inherits the project owner and is visible to that user", asy
   mock.put(
     "/cal/owned-ev.ics",
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:owned-ev\r\n" +
-      "SUMMARY:Owned meeting\r\nDTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\n" +
+      `SUMMARY:Owned meeting\r\nDTSTART:${icsUtc(futureDay(25))}\r\nDTEND:${icsUtc(futureDay(25, 10))}\r\n` +
       "END:VEVENT\r\nEND:VCALENDAR\r\n",
   );
   const r = await syncProject(db, dev, getCaldavConfigRow(db, owned.id)!, true);
@@ -383,7 +400,7 @@ test("a re-sync heals a pre-existing orphan task (null owner) into visibility", 
   mock.put(
     "/cal/heal-ev.ics",
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:heal-ev\r\n" +
-      "SUMMARY:Heal me\r\nDTSTART:20261001T090000Z\r\nDTEND:20261001T100000Z\r\n" +
+      `SUMMARY:Heal me\r\nDTSTART:${icsUtc(futureDay(35))}\r\nDTEND:${icsUtc(futureDay(35, 10))}\r\n` +
       "END:VEVENT\r\nEND:VCALENDAR\r\n",
   );
   await syncProject(db, dev, getCaldavConfigRow(db, owned.id)!, true);
@@ -410,8 +427,8 @@ test("two resources sharing a UID collapse to one task (no unique-constraint cra
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n" +
     `UID:shared-uid@x\r\nSUMMARY:${summary}\r\nDTSTART:${dt}\r\nDTEND:${dt}\r\n` +
     "END:VEVENT\r\nEND:VCALENDAR\r\n";
-  mock.put("/cal/dup-a.ics", ev("Standup", "20260710T090000Z"));
-  mock.put("/cal/dup-b.ics", ev("Standup override", "20260717T090000Z"));
+  mock.put("/cal/dup-a.ics", ev("Standup", icsUtc(futureDay(7))));
+  mock.put("/cal/dup-b.ics", ev("Standup override", icsUtc(futureDay(14))));
   const r = await syncProject(db, dev, getCaldavConfigRow(db, proj.id)!, true);
   assert.deepEqual(r.errors, []); // previously: "events: UNIQUE constraint failed…"
   const mine = getChildren(db, proj.id).filter((k) =>

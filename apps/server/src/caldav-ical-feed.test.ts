@@ -22,6 +22,24 @@ import {
 // ----- a tiny in-process iCal feed (one .ics document at /feed.ics) ----------
 // Read-only: only GET, with ETag + If-None-Match → 304 support.
 
+// Inbound events dated in the past are deliberately never imported (see
+// syncProject), so fixture dates must be generated relative to "now" — hardcoded
+// ones rot as real time passes them (the July-2026 fixtures started failing on
+// 2026-07-11).
+function futureDay(daysAhead: number, hourUtc = 9): Date {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + daysAhead);
+  d.setUTCHours(hourUtc, 0, 0, 0);
+  return d;
+}
+/** ICS UTC stamp, e.g. 20260710T090000Z. */
+const icsUtc = (d: Date): string =>
+  d.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, "");
+
+const DAY1 = futureDay(30); // primary fixture event
+const DAY1_LATE = futureDay(30, 23); // same day, late
+const DAY2 = futureDay(31); // "moved" target
+
 function feedDoc(events: string[]): string {
   return (
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
@@ -117,8 +135,8 @@ function cfg() {
 test("feed events are imported as tasks with due dates", async () => {
   mock.set(
     feedDoc([
-      vevent("a@x", "Dentist", "20260710T090000Z"),
-      vevent("b@x", "Standup", "20260710T230000Z"),
+      vevent("a@x", "Dentist", icsUtc(DAY1)),
+      vevent("b@x", "Standup", icsUtc(DAY1_LATE)),
     ]),
   );
   const r = await syncProject(db, dev, cfg(), true);
@@ -128,11 +146,11 @@ test("feed events are imported as tasks with due dates", async () => {
   const kids = getChildren(db, projectId);
   const dentist = kids.find((k) => k.title === "Dentist");
   assert.ok(dentist);
-  assert.equal(dentist!.due_date, "2026-07-10T09:00:00.000Z");
+  assert.equal(dentist!.due_date, DAY1.toISOString());
 });
 
 test("an unchanged feed (304) does nothing on the next poll", async () => {
-  mock.set(feedDoc([vevent("a@x", "Dentist", "20260710T090000Z")]));
+  mock.set(feedDoc([vevent("a@x", "Dentist", icsUtc(DAY1))]));
   await syncProject(db, dev, cfg(), true);
   const r = await syncProject(db, dev, cfg(), true); // ETag unchanged → 304
   assert.deepEqual(r.errors, []);
@@ -140,28 +158,28 @@ test("an unchanged feed (304) does nothing on the next poll", async () => {
 });
 
 test("an edited event updates the linked task", async () => {
-  mock.set(feedDoc([vevent("a@x", "Dentist", "20260710T090000Z")]));
+  mock.set(feedDoc([vevent("a@x", "Dentist", icsUtc(DAY1))]));
   await syncProject(db, dev, cfg(), true);
-  mock.set(feedDoc([vevent("a@x", "Dentist (moved)", "20260711T090000Z")]));
+  mock.set(feedDoc([vevent("a@x", "Dentist (moved)", icsUtc(DAY2))]));
   const r = await syncProject(db, dev, cfg(), true);
   assert.deepEqual(r.errors, []);
   assert.equal(r.pulled, 1);
   const kids = getChildren(db, projectId);
   const t = kids.find((k) => k.id !== projectId && !k.deleted);
   assert.equal(t!.title, "Dentist (moved)");
-  assert.equal(t!.due_date, "2026-07-11T09:00:00.000Z");
+  assert.equal(t!.due_date, DAY2.toISOString());
 });
 
 test("pure mirror: a removed event clears the task's due date, keeps the task", async () => {
   mock.set(
     feedDoc([
-      vevent("a@x", "Dentist", "20260710T090000Z"),
-      vevent("b@x", "Standup", "20260710T230000Z"),
+      vevent("a@x", "Dentist", icsUtc(DAY1)),
+      vevent("b@x", "Standup", icsUtc(DAY1_LATE)),
     ]),
   );
   await syncProject(db, dev, cfg(), true);
   const before = getChildren(db, projectId).find((k) => k.title === "Dentist")!;
-  mock.set(feedDoc([vevent("b@x", "Standup", "20260710T230000Z")])); // drop "a@x"
+  mock.set(feedDoc([vevent("b@x", "Standup", icsUtc(DAY1_LATE))])); // drop "a@x"
   const r = await syncProject(db, dev, cfg(), true);
   assert.deepEqual(r.errors, []);
   const after = getItem(db, before.id)!;
@@ -171,7 +189,7 @@ test("pure mirror: a removed event clears the task's due date, keeps the task", 
 
 test("iCal mode never writes back (server sees only GETs)", async () => {
   const beforeHits = mock.state.hits;
-  mock.set(feedDoc([vevent("a@x", "Dentist", "20260710T090000Z")]));
+  mock.set(feedDoc([vevent("a@x", "Dentist", icsUtc(DAY1))]));
   await syncProject(db, dev, cfg(), true);
   // create + edit a local task; it must never be pushed to the feed
   const local = createItem(db, dev, {
@@ -204,8 +222,8 @@ test("past events are never imported (Calendar → Carbon)", async () => {
 test("Test button reports the feed's event count", async () => {
   mock.set(
     feedDoc([
-      vevent("a@x", "Dentist", "20260710T090000Z"),
-      vevent("b@x", "Standup", "20260710T230000Z"),
+      vevent("a@x", "Dentist", icsUtc(DAY1)),
+      vevent("b@x", "Standup", icsUtc(DAY1_LATE)),
     ]),
   );
   const t = await testCaldav(db, projectId, true);

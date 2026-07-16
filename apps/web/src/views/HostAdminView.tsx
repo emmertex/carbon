@@ -10,6 +10,8 @@ import {
   type TenantRecord,
   type TenantUsage,
 } from '@/lib/host';
+import { cn } from '@/lib/cn';
+import { inputCls as inputBase, btnPrimary, btnSecondary, btnIcon, ErrorText } from '@/components/ui/controls';
 
 /** Bytes → "12 MB" / "1.2 GB", for the host-admin storage display. */
 function fmtBytes(n: number): string {
@@ -27,8 +29,7 @@ function isLocked(t: TenantRecord): boolean {
   return !!t.expires_at && Date.now() > Date.parse(t.expires_at);
 }
 
-const inputCls =
-  'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent';
+const inputCls = cn('w-full', inputBase);
 
 /**
  * Cross-tenant operator console (host admin). Lives at /host-admin, ideally on the
@@ -83,11 +84,11 @@ function HostLogin({ onAuthed }: { onAuthed: (c: HostCreds) => void }) {
           onChange={(e) => setPassword(e.target.value)}
           required
         />
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        <ErrorText>{error}</ErrorText>
         <button
           type="submit"
           disabled={busy}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className={cn(btnPrimary, 'w-full justify-center')}
         >
           {busy && <Loader2 className="animate-spin" size={16} />}
           Sign in
@@ -163,11 +164,11 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
         <div className="flex gap-2">
           <button
             onClick={() => setShowNew((v) => !v)}
-            className="flex items-center gap-1 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white"
+            className={cn(btnPrimary, 'gap-1 px-3 py-1.5')}
           >
             <Plus size={16} /> New
           </button>
-          <button onClick={onSignOut} className="rounded-lg border border-border px-3 py-1.5 text-sm">
+          <button onClick={onSignOut} className={cn(btnSecondary, 'px-3 py-1.5')}>
             Sign out
           </button>
         </div>
@@ -183,7 +184,7 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
         />
       )}
 
-      {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
+      <ErrorText className="mb-4">{error}</ErrorText>
       {tenants === null ? (
         <p className="text-sm text-text-muted">Loading…</p>
       ) : tenants.length === 0 ? (
@@ -273,16 +274,16 @@ function TenantRow({
             className={
               'rounded px-1.5 py-0.5 text-xs ' +
               (t.status === 'active'
-                ? 'bg-green-500/15 text-green-600'
+                ? 'bg-success/15 text-success'
                 : t.status === 'suspended'
-                  ? 'bg-amber-500/15 text-amber-600'
+                  ? 'bg-warning/15 text-warning'
                   : 'bg-surface-2 text-text-muted')
             }
           >
             {t.status}
           </span>
           {locked && (
-            <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-xs text-red-600">locked</span>
+            <span className="rounded bg-danger/15 px-1.5 py-0.5 text-xs text-danger">locked</span>
           )}
         </div>
         <a href={t.url} className="block truncate font-mono text-xs text-text-muted">
@@ -291,10 +292,10 @@ function TenantRow({
         {t.admin_email && (
           <span className="block truncate text-xs text-text-faint">{t.admin_email}</span>
         )}
-        <span className={'block text-xs ' + (near ? 'text-amber-600' : 'text-text-faint')}>
+        <span className={'block text-xs ' + (near ? 'text-warning' : 'text-text-faint')}>
           Storage {used} / {cap}
         </span>
-        <span className={'block text-xs ' + (usersFull ? 'text-amber-600' : 'text-text-faint')}>
+        <span className={'block text-xs ' + (usersFull ? 'text-warning' : 'text-text-faint')}>
           Users {usage ? usage.humanUsers : '…'} / {userCap}
         </span>
       </div>
@@ -371,7 +372,7 @@ function TenantRow({
       <button
         onClick={() => onLocked(t, !t.locked_at)}
         title={t.locked_at ? 'Unlock workspace' : 'Lock workspace'}
-        className="rounded-lg p-2 hover:bg-surface-2"
+        className={cn(btnIcon, 'p-2')}
       >
         {t.locked_at ? <Unlock size={16} /> : <Lock size={16} />}
       </button>
@@ -380,7 +381,7 @@ function TenantRow({
         <button
           onClick={() => onStatus(t, 'active')}
           title="Resume"
-          className="rounded-lg p-2 hover:bg-surface-2"
+          className={cn(btnIcon, 'p-2')}
         >
           <Play size={16} />
         </button>
@@ -388,7 +389,7 @@ function TenantRow({
         <button
           onClick={() => onStatus(t, 'suspended')}
           title="Suspend"
-          className="rounded-lg p-2 hover:bg-surface-2"
+          className={cn(btnIcon, 'p-2')}
         >
           <Pause size={16} />
         </button>
@@ -396,7 +397,7 @@ function TenantRow({
       <button
         onClick={() => onRemove(t)}
         title="Delete"
-        className="rounded-lg p-2 text-red-500 hover:bg-surface-2"
+        className={cn(btnIcon, 'p-2 text-danger hover:text-danger')}
       >
         <Trash2 size={16} />
       </button>
@@ -464,11 +465,11 @@ function NewTenantForm({ creds, onCreated }: { creds: HostCreds; onCreated: () =
           required
         />
       </div>
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      <ErrorText>{error}</ErrorText>
       <button
         type="submit"
         disabled={busy || !username.trim() || !password}
-        className="flex items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        className={cn(btnPrimary, 'justify-center')}
       >
         {busy && <Loader2 className="animate-spin" size={16} />}
         Create workspace

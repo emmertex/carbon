@@ -4,6 +4,7 @@ import { listUsers, type User } from '@carbon/core';
 import { getDb } from '@/lib/db';
 import type { ParsedBackup, UserMapping, UserChoice } from '@/lib/backup';
 import { Modal } from './Modal';
+import { btnPrimary, btnSecondary } from './ui/controls';
 
 const selectCls =
   'rounded-lg border border-border bg-surface px-2 py-1.5 text-sm outline-none focus:border-accent';
@@ -113,17 +114,13 @@ export function ImportModal({
       </div>
 
       <div className="mt-6 flex justify-end gap-2">
-        <button
-          onClick={onCancel}
-          disabled={busy}
-          className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-50"
-        >
+        <button onClick={onCancel} disabled={busy} className={btnSecondary}>
           Cancel
         </button>
         <button
           onClick={() => onConfirm(mapping)}
           disabled={busy}
-          className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className={btnPrimary}
         >
           {busy && <Loader2 className="animate-spin" size={16} />}
           Import

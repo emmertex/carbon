@@ -27,6 +27,9 @@ import { abbreviateTagPath } from "@/lib/tagLabel";
 import { useFeature } from "@/hooks/useFeature";
 import { AdvancedFilterBuilder } from "./AdvancedFilterBuilder";
 import { NlFilterBox } from "./NlFilterBox";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { Select } from "./ui/Select";
+import { chipCls } from "./ui/controls";
 import { describeExpr, type FilterExpr } from "@/lib/filter-expr";
 
 const PRIORITIES = [
@@ -99,22 +102,21 @@ export function ViewControls({
           + Save. The icons are spelled out inside the panel (Status group). */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-text-faint">Filters</span>
-        <div className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-text-muted">
-          <ArrowUpDown size={13} />
-          <select
-            value={prefs.sort}
-            onChange={(e) =>
-              onChange({ ...prefs, sort: e.target.value as SortKey })
-            }
-            className="bg-transparent text-xs font-medium text-text outline-none"
-          >
-            {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
-              <option key={k} value={k}>
-                {SORT_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Select
+          icon={<ArrowUpDown size={13} />}
+          value={prefs.sort}
+          onChange={(e) =>
+            onChange({ ...prefs, sort: e.target.value as SortKey })
+          }
+          className="gap-1 bg-transparent px-2 py-1 text-xs text-text-muted"
+          selectClassName="w-auto font-medium text-text"
+        >
+          {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+            <option key={k} value={k}>
+              {SORT_LABELS[k]}
+            </option>
+          ))}
+        </Select>
 
         {!advanced &&
           QUICK_FILTERS.map(({ key, label, Icon }) => (
@@ -189,7 +191,7 @@ export function ViewControls({
           ) : (
             <button
               onClick={() => setSaving(true)}
-              className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-text-muted hover:bg-surface-2"
+              className={`flex items-center gap-1 ${chipCls}`}
             >
               <BookmarkPlus size={13} /> Save view
             </button>
@@ -201,22 +203,15 @@ export function ViewControls({
           {showAdvanced && (
             <div className="flex items-center gap-2 border-b border-border pb-2">
               <span className="text-text-faint">Mode</span>
-              <div className="flex overflow-hidden rounded-md border border-border">
-                {(["basic", "advanced"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setMode(m)}
-                    className={`px-2 py-0.5 font-medium capitalize ${
-                      prefs.mode === m
-                        ? "bg-accent text-accent-fg"
-                        : "text-text-muted hover:bg-surface-2"
-                    }`}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl<"basic" | "advanced">
+                value={prefs.mode ?? "basic"}
+                onChange={setMode}
+                segmentClassName="px-2 py-0.5 capitalize"
+                options={[
+                  { value: "basic", label: "basic" },
+                  { value: "advanced", label: "advanced" },
+                ]}
+              />
             </div>
           )}
 

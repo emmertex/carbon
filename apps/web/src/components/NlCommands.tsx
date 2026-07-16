@@ -160,7 +160,7 @@ export function NlCommands() {
         {usage && (
           <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs text-text-muted">
             <div className="mb-1 flex items-center gap-1.5 font-medium text-text">
-              <Sparkles size={13} className="text-yellow-500" /> Token usage (commands)
+              <Sparkles size={13} className="text-warning" /> Token usage (commands)
             </div>
             {usage.calls} command{usage.calls === 1 ? '' : 's'} · {usage.input_tokens.toLocaleString()} in ·{' '}
             {usage.output_tokens.toLocaleString()} out

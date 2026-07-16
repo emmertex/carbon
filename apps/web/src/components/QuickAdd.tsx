@@ -103,14 +103,14 @@ export function QuickAdd({
         className={cn(
           'relative flex items-center gap-2 rounded-xl border bg-surface px-3 py-2',
           commandMode
-            ? 'border-yellow-400 focus-within:border-yellow-500'
+            ? 'border-warning/70 focus-within:border-warning'
             : 'border-border focus-within:border-accent',
         )}
       >
         {pending ? (
-          <Loader2 size={18} className="shrink-0 animate-spin text-yellow-500" />
+          <Loader2 size={18} className="shrink-0 animate-spin text-warning" />
         ) : commandMode ? (
-          <Sparkles size={18} className="shrink-0 text-yellow-500" />
+          <Sparkles size={18} className="shrink-0 text-warning" />
         ) : (
           <Plus size={18} className="shrink-0 text-text-faint" />
         )}

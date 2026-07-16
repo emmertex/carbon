@@ -11,6 +11,8 @@ import {
 } from '@/lib/billing';
 import { fetchHostInfo } from '@/lib/sync';
 import { SquareCardForm } from './SquareCardForm';
+import { cn } from '@/lib/cn';
+import { btnPrimary, btnDanger, inputCls, Field, ErrorText } from './ui/controls';
 
 /**
  * Subscription lifecycle UI, shared by the Settings section and the RenewGate. Drives
@@ -102,7 +104,7 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
 
   if (info === null) {
     return error ? (
-      <p className="text-sm text-red-500">{error}</p>
+      <ErrorText>{error}</ErrorText>
     ) : (
       <p className="text-sm text-text-muted">Loading…</p>
     );
@@ -125,7 +127,7 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
         {status === 'none' ? (
           <span className="text-text-muted">No subscription yet.</span>
         ) : status === 'pending' ? (
-          <span className="text-amber-600">Payment pending — complete it to activate.</span>
+          <span className="text-warning">Payment pending — complete it to activate.</span>
         ) : (
           <>
             <div>
@@ -137,10 +139,10 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
                   {isSquare ? '/cycle' : ''}
                 </span>
               )}
-              {flash && <Check size={14} className="ml-1 inline text-green-500" />}
+              {flash && <Check size={14} className="ml-1 inline text-success" />}
             </div>
             {status === 'past_due' ? (
-              <div className="text-red-500">Last payment failed — please update payment.</div>
+              <div className="text-danger">Last payment failed — please update payment.</div>
             ) : status === 'canceled' ? (
               <div className="text-text-muted">
                 Canceled{dateStr && <> — access through <span className="font-medium">{dateStr}</span> (won't renew)</>}.
@@ -162,7 +164,7 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
           <button
             onClick={completeSimulate}
             disabled={busy}
-            className="flex items-center gap-2 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            className={cn(btnPrimary, 'px-3 py-1.5')}
           >
             {busy && <Loader2 className="animate-spin" size={14} />}
             <CreditCard size={14} /> Complete test payment
@@ -185,7 +187,7 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
         <button
           onClick={cancel}
           disabled={busy}
-          className="rounded-lg border border-border px-3 py-1.5 text-sm hover:border-red-400 disabled:opacity-50"
+          className={cn(btnDanger, 'px-3 py-1.5')}
         >
           {busy ? 'Working…' : 'Cancel auto-renewal'}
         </button>
@@ -211,7 +213,7 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
           ? 'Auto-renewing subscription billed via Square. Cancel anytime — access lasts through the paid period.'
           : 'Demo billing (no real charge). Renewing extends access from the later of today or the current expiry.'}
       </p>
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      <ErrorText>{error}</ErrorText>
     </div>
   );
 }
@@ -272,20 +274,19 @@ function PlanPicker({
       {isSquare && selectedPlan && square && (
         <div className="space-y-3">
           {!billingEmail && (
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium">Billing email</span>
+            <Field
+              label="Billing email"
+              hint="Square emails your receipts and renewal invoices here."
+            >
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 autoCapitalize="none"
-                className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+                className={cn(inputCls, 'w-full')}
               />
-              <span className="mt-1 block text-xs text-text-faint">
-                Square emails your receipts and renewal invoices here.
-              </span>
-            </label>
+            </Field>
           )}
           {emailOk ? (
             <SquareCardForm

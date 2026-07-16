@@ -406,6 +406,307 @@ export function toCsv(db: Db, blocks: SessionBlock[]): string {
   return rows.map((r) => r.map(csvCell).join(',')).join('\n');
 }
 
+// ----- post-hoc editing: merge, gaps, segments -------------------------------
+// Blocks stay editable after the fact: adjacent blocks of the same project can
+// be merged (the gap between them becomes untracked time), untracked gaps can be
+// deleted (trimming or splitting the block), and task segments can be added,
+// re-timed or removed within the block's bounds. All writes go through emit().
+
+/** A restart within this window of stopping the same project offers a quick merge. */
+export const MERGE_QUICK_WINDOW_MS = 5 * 60_000;
+/** The expanded-block view offers merging with a previous block within this window. */
+export const MERGE_BLOCK_WINDOW_MS = 8 * 3_600_000;
+/** Segments are at least one minute; edits round to whole minutes. */
+export const MIN_SEGMENT_MS = 60_000;
+const MIN_GAP_MS = 60_000; // gaps shorter than this are rounding noise, not shown
+const GAP_MATCH_TOLERANCE_MS = 1_500; // stale-UI guard when deleting a gap
+const roundMinute = (t: number) => Math.round(t / 60_000) * 60_000;
+const isoAt = (t: number) => new Date(t).toISOString();
+
+export interface UntrackedGap {
+  start: string;
+  end: string;
+  ms: number;
+  position: 'leading' | 'middle' | 'trailing';
+}
+
+/** Covered intervals (segments + pauses, minus `excludeId`) clamped to the block
+ *  span, sorted and merged. Open entries extend to the block end (or `upToMs`). */
+function coverage(
+  block: SessionBlock,
+  upToMs: number,
+  excludeId?: string,
+): { s: number; e: number }[] {
+  const bs = ms(block.session.start_time);
+  const be = block.session.end_time ? ms(block.session.end_time) : upToMs;
+  const spans: { s: number; e: number }[] = [];
+  for (const log of [...block.segments.map((x) => x.log), ...block.pauses]) {
+    if (log.id === excludeId) continue;
+    const s = Math.max(bs, ms(log.start_time));
+    const e = Math.min(be, log.end_time ? ms(log.end_time) : be);
+    if (e > s) spans.push({ s, e });
+  }
+  spans.sort((a, b) => a.s - b.s);
+  const merged: { s: number; e: number }[] = [];
+  for (const sp of spans) {
+    const last = merged[merged.length - 1];
+    if (last && sp.s <= last.e) last.e = Math.max(last.e, sp.e);
+    else merged.push({ ...sp });
+  }
+  return merged;
+}
+
+/**
+ * The block's untracked gaps — spans covered by neither a segment nor a pause.
+ * A gap running to the end of an *open* block is its still-growing live tail
+ * (position 'trailing', not deletable); a suspended block has no such tail
+ * because its open suspend pause covers to now.
+ */
+export function computeGaps(block: SessionBlock, upToMs: number = Date.now()): UntrackedGap[] {
+  const bs = ms(block.session.start_time);
+  const be = block.session.end_time ? ms(block.session.end_time) : upToMs;
+  const gaps: UntrackedGap[] = [];
+  let cursor = bs;
+  for (const c of [...coverage(block, upToMs), { s: be, e: be }]) {
+    if (c.s - cursor >= MIN_GAP_MS) {
+      gaps.push({
+        start: isoAt(cursor),
+        end: isoAt(c.s),
+        ms: c.s - cursor,
+        // A gap spanning the whole block counts as trailing (deleting it is an end-trim).
+        position: c.s >= be ? 'trailing' : cursor <= bs ? 'leading' : 'middle',
+      });
+    }
+    cursor = Math.max(cursor, c.e);
+  }
+  return gaps;
+}
+
+/** The window a segment may occupy: from the previous covered neighbor (or block
+ *  start) to the next covered neighbor (or block end). `segmentId` null = no self
+ *  to exclude, returns the block bounds. */
+export function segmentBounds(
+  block: SessionBlock,
+  segmentId: string | null,
+  upToMs: number = Date.now(),
+): { minStartMs: number; maxEndMs: number } {
+  const bs = ms(block.session.start_time);
+  const be = block.session.end_time ? ms(block.session.end_time) : upToMs;
+  const seg = segmentId ? block.segments.find((x) => x.log.id === segmentId) : undefined;
+  let minStartMs = bs;
+  let maxEndMs = be;
+  if (seg) {
+    const segS = ms(seg.log.start_time);
+    const segE = seg.log.end_time ? ms(seg.log.end_time) : be;
+    for (const c of coverage(block, upToMs, segmentId!)) {
+      if (c.e <= segS) minStartMs = Math.max(minStartMs, c.e);
+      if (c.s >= segE) maxEndMs = Math.min(maxEndMs, c.s);
+    }
+  }
+  return { minStartMs, maxEndMs };
+}
+
+/** The most recent closed block of the same project/user ending within `windowMs`
+ *  before `session` starts — the merge target for that session, if any. */
+export function findMergeCandidate(db: Db, session: TimeLog, windowMs: number): TimeLog | null {
+  const uw = userClause(session.user_id);
+  const r = db.get<TLRow>(
+    `SELECT * FROM time_logs
+     WHERE kind = 'session' AND deleted = 0 AND ${uw.c}
+       AND item_id = ? AND id <> ?
+       AND end_time IS NOT NULL AND end_time <= ? AND end_time >= ?
+     ORDER BY end_time DESC LIMIT 1`,
+    [...uw.p, session.item_id, session.id, session.start_time, isoAt(ms(session.start_time) - windowMs)],
+  );
+  return r ? rowToTimeLog(r) : null;
+}
+
+function loadSession(db: Db, id: string): TimeLog | null {
+  const r = db.get<TLRow>(
+    "SELECT * FROM time_logs WHERE id = ? AND kind = 'session' AND deleted = 0",
+    [id],
+  );
+  return r ? rowToTimeLog(r) : null;
+}
+function sessionChildren(db: Db, sessionId: string): TimeLog[] {
+  return db
+    .all<TLRow>('SELECT * FROM time_logs WHERE session_id = ? AND deleted = 0', [sessionId])
+    .map(rowToTimeLog);
+}
+
+/**
+ * Absorb the `newerId` block into `olderId` (same project, same user). The older
+ * row survives, extended to the newer block's end — a null end reopens it, which
+ * is the timer-bar case: the survivor becomes the active session. Children of the
+ * newer block re-parent onto the survivor; the gap between the blocks is covered
+ * by nothing and so becomes untracked time. Returns the survivor, or null (no
+ * writes) if the pair isn't mergeable. Window checks are the caller's job via
+ * {@link findMergeCandidate}.
+ */
+export function mergeSessions(db: Db, dev: string, olderId: string, newerId: string): TimeLog | null {
+  const older = loadSession(db, olderId);
+  const newer = loadSession(db, newerId);
+  if (!older || !newer) return null;
+  if (older.item_id !== newer.item_id || older.user_id !== newer.user_id) return null;
+  if (!older.end_time) return null;
+  if (ms(older.start_time) >= ms(newer.start_time) || ms(older.end_time) > ms(newer.start_time))
+    return null;
+  for (const child of sessionChildren(db, newerId)) {
+    emit(db, dev, { ...child, session_id: olderId });
+  }
+  emit(db, dev, { ...newer, deleted: true });
+  return emit(db, dev, { ...older, end_time: newer.end_time });
+}
+
+/**
+ * Delete one untracked gap. Leading/trailing gaps trim the block's start/end; a
+ * middle gap splits the block into two sessions, children going to the side that
+ * contains them. The gap is re-derived and matched within a small tolerance, so a
+ * stale UI snapshot is a no-op rather than a mis-cut — and because the matched gap
+ * is uncovered by construction, no segment or pause can straddle it.
+ */
+export function deleteUntrackedGap(
+  db: Db,
+  dev: string,
+  sessionId: string,
+  gapStartIso: string,
+  gapEndIso: string,
+): void {
+  const session = loadSession(db, sessionId);
+  if (!session) return;
+  const gap = computeGaps(getSessionBlock(db, session)).find(
+    (g) =>
+      Math.abs(ms(g.start) - ms(gapStartIso)) <= GAP_MATCH_TOLERANCE_MS &&
+      Math.abs(ms(g.end) - ms(gapEndIso)) <= GAP_MATCH_TOLERANCE_MS,
+  );
+  if (!gap) return;
+  if (gap.position === 'trailing') {
+    if (!session.end_time) return; // an open block's live tail is still growing
+    emit(db, dev, { ...session, end_time: gap.start });
+  } else if (gap.position === 'leading') {
+    emit(db, dev, { ...session, start_time: gap.end });
+  } else {
+    // Split: the existing row keeps the left half; a new session takes the right,
+    // inheriting the original end (null keeps a live tail open on the right).
+    const right = emit(
+      db,
+      dev,
+      makeLog({
+        kind: 'session',
+        itemId: session.item_id,
+        userId: session.user_id,
+        sessionId: null,
+        start: gap.end,
+        end: session.end_time,
+      }),
+    );
+    const gapStartMs = ms(gap.start);
+    const gapEndMs = ms(gap.end);
+    for (const c of sessionChildren(db, sessionId)) {
+      const goesRight =
+        c.kind === 'complete' ? ms(c.start_time) > gapStartMs : ms(c.start_time) >= gapEndMs;
+      if (goesRight) emit(db, dev, { ...c, session_id: right.id });
+    }
+    emit(db, dev, { ...session, end_time: gap.start });
+  }
+}
+
+/** Round to whole minutes and grow a too-short span to MIN_SEGMENT_MS within
+ *  [lo, hi], preferring to extend the end. Null if it can't fit. */
+function fitSpan(
+  startIso: string,
+  endIso: string,
+  lo: number,
+  hi: number,
+): { s: number; e: number } | null {
+  const s = Math.max(roundMinute(ms(startIso)), lo);
+  const e = Math.min(roundMinute(ms(endIso)), hi);
+  if (Number.isNaN(s) || Number.isNaN(e)) return null;
+  if (e - s >= MIN_SEGMENT_MS) return { s, e };
+  if (s + MIN_SEGMENT_MS <= hi) return { s, e: s + MIN_SEGMENT_MS };
+  if (e - MIN_SEGMENT_MS >= lo) return { s: e - MIN_SEGMENT_MS, e };
+  return null;
+}
+
+/**
+ * Insert a closed task segment into untracked space in a block. The task must
+ * anchor to the block's project; times round to whole minutes and clamp into the
+ * gap containing the requested midpoint. Returns the segment, or null.
+ */
+export function addSegment(
+  db: Db,
+  dev: string,
+  sessionId: string,
+  taskId: string,
+  startIso: string,
+  endIso: string,
+): TimeLog | null {
+  const session = loadSession(db, sessionId);
+  if (!session) return null;
+  if (sessionAnchor(db, taskId) !== session.item_id) return null;
+  const mid = (ms(startIso) + ms(endIso)) / 2;
+  const gap = computeGaps(getSessionBlock(db, session)).find(
+    (g) => mid >= ms(g.start) && mid <= ms(g.end),
+  );
+  if (!gap) return null;
+  const span = fitSpan(startIso, endIso, ms(gap.start), ms(gap.end));
+  if (!span) return null;
+  return emit(
+    db,
+    dev,
+    makeLog({
+      kind: 'task',
+      itemId: taskId,
+      userId: session.user_id,
+      sessionId,
+      start: isoAt(span.s),
+      end: isoAt(span.e),
+    }),
+  );
+}
+
+/**
+ * Re-time a closed segment. Times round to whole minutes and clamp between the
+ * neighboring covered spans (segments/pauses — in an open block the running
+ * segment is a neighbor) and the block bounds; at least a minute must remain.
+ * The live (open) segment is never editable here — that's the timer bar's job.
+ */
+export function updateSegment(
+  db: Db,
+  dev: string,
+  segmentId: string,
+  startIso: string,
+  endIso: string,
+): TimeLog | null {
+  const r = db.get<TLRow>(
+    "SELECT * FROM time_logs WHERE id = ? AND kind = 'task' AND deleted = 0",
+    [segmentId],
+  );
+  if (!r) return null;
+  const seg = rowToTimeLog(r);
+  if (!seg.end_time || !seg.session_id) return null;
+  const session = loadSession(db, seg.session_id);
+  if (!session) return null;
+  const { minStartMs, maxEndMs } = segmentBounds(getSessionBlock(db, session), segmentId);
+  const span = fitSpan(startIso, endIso, minStartMs, maxEndMs);
+  if (!span) return null;
+  if (isoAt(span.s) === seg.start_time && isoAt(span.e) === seg.end_time) return seg;
+  return emit(db, dev, { ...seg, start_time: isoAt(span.s), end_time: isoAt(span.e) });
+}
+
+/** Soft-delete a closed segment; its span becomes untracked time. The live (open)
+ *  segment can't be removed here. */
+export function removeSegment(db: Db, dev: string, segmentId: string): void {
+  const r = db.get<TLRow>(
+    "SELECT * FROM time_logs WHERE id = ? AND kind = 'task' AND deleted = 0",
+    [segmentId],
+  );
+  if (!r) return;
+  const seg = rowToTimeLog(r);
+  if (!seg.end_time) return;
+  emit(db, dev, { ...seg, deleted: true });
+}
+
 /** Sessions overlapping [fromIso, toIso), most recent first. */
 export function listSessions(db: Db, fromIso: string, toIso: string, userId?: string | null): TimeLog[] {
   const uw = userId === undefined ? { c: '1=1', p: [] as string[] } : userClause(userId);

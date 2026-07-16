@@ -4,21 +4,39 @@ import {
   listSessions,
   getSessionBlock,
   getProjects,
+  getItem,
+  getChildren,
   getItemTags,
   listTags,
   saveTimeLog,
   deleteTimeLog,
   toCsv,
+  computeGaps,
+  segmentBounds,
+  findMergeCandidate,
+  mergeSessions,
+  deleteUntrackedGap,
+  addSegment,
+  updateSegment,
+  removeSegment,
+  MERGE_BLOCK_WINDOW_MS,
+  type Item,
   type TimeLog,
   type SessionBlock,
+  type UntrackedGap,
 } from '@carbon/core';
 import { getDb } from '@/lib/db';
 import { TagMark } from '@/components/TagMark';
+import { BlockBarEditor, taskColor, HATCH, type SegPreview } from '@/components/BlockBarEditor';
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { getCurrentUserId } from '@/lib/store';
 import { formatDuration, formatDay, toDateTimeInput, fromDateTimeInput } from '@/lib/date';
 import { cn } from '@/lib/cn';
+import { inputCls as inputBase, chipCls } from '@/components/ui/controls';
+import { SegmentedControl } from '@/components/ui/SegmentedControl';
+import { Select } from '@/components/ui/Select';
+import { Chip } from '@/components/Chip';
 
 function startOfDay(d: Date) {
   const x = new Date(d);
@@ -29,16 +47,7 @@ const fmtDay = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-
-/** Stable, evenly-spread hue per task id so segments are visually distinguishable. */
-function taskColor(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return `hsl(${h % 360} 60% 50%)`;
-}
-
-const HATCH =
-  'repeating-linear-gradient(45deg, rgba(0,0,0,0.28) 0 3px, transparent 3px 6px)';
+const isoAt = (t: number) => new Date(t).toISOString();
 
 interface Group {
   key: string;
@@ -179,36 +188,39 @@ export function TimeTrackedView() {
         <input type="date" value={fromStr} onChange={(e) => setFromStr(e.target.value)} className={inputCls} />
         <span className="text-text-faint">to</span>
         <input type="date" value={toStr} onChange={(e) => setToStr(e.target.value)} className={inputCls} />
-        <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className={inputCls}>
+        <Select
+          value={projectFilter}
+          onChange={(e) => setProjectFilter(e.target.value)}
+          className="px-2 py-1 text-xs"
+        >
           <option value="">All projects</option>
           {projects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.title || 'Untitled'}
             </option>
           ))}
-        </select>
-        <select
+        </Select>
+        <Select
           value={groupBy}
           onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
-          className={inputCls}
+          className="px-2 py-1 text-xs"
           title="Group the list with subtotals"
         >
           <option value="none">No grouping</option>
           <option value="project">By project</option>
           <option value="day">By day</option>
-        </select>
+        </Select>
         <div className="flex-1" />
-        <div className="flex overflow-hidden rounded-lg border border-border">
-          {(['list', 'timeline', 'chart'] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={cn('px-2.5 py-1 capitalize', mode === m ? 'bg-accent-soft text-accent' : 'hover:bg-surface-2')}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl<'list' | 'timeline' | 'chart'>
+          value={mode}
+          onChange={setMode}
+          segmentClassName="px-2.5 capitalize"
+          options={[
+            { value: 'list', label: 'list' },
+            { value: 'timeline', label: 'timeline' },
+            { value: 'chart', label: 'chart' },
+          ]}
+        />
         <button onClick={() => setAdding((a) => !a)} className={btnCls}>
           <Plus size={13} /> Add block
         </button>
@@ -221,18 +233,14 @@ export function TimeTrackedView() {
         <div className="mb-4 flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-text-faint">Tags:</span>
           {allTags.map((t) => (
-            <button
+            <Chip
               key={t.id}
+              active={tagIds.includes(t.id)}
               onClick={() => toggleTag(t.id)}
-              className={cn(
-                'flex items-center gap-1 rounded-full border px-2 py-0.5',
-                tagIds.includes(t.id)
-                  ? 'border-accent bg-accent-soft text-accent'
-                  : 'border-border text-text-muted hover:bg-surface-2',
-              )}
+              className="px-2 py-0.5 font-normal"
             >
               <TagMark color={t.color} /> {t.name}
-            </button>
+            </Chip>
           ))}
         </div>
       )}
@@ -258,7 +266,13 @@ export function TimeTrackedView() {
               .filter((b) => b.session.id === selectedId)
               .map((b) => (
                 <div key={b.session.id} className="mt-3">
-                  <Block block={b} onSetTimes={setTimes} onRemove={() => remove(b)} defaultOpen />
+                  <Block
+                    block={b}
+                    onSetTimes={setTimes}
+                    onRemove={() => remove(b)}
+                    onMerged={setSelectedId}
+                    defaultOpen
+                  />
                 </div>
               ))}
         </>
@@ -296,8 +310,9 @@ export function TimeTrackedView() {
   );
 }
 
-const inputCls = 'rounded-lg border border-border bg-surface px-2 py-1 outline-none focus:border-accent';
-const btnCls = 'flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 hover:bg-surface-2';
+// Compact toolbar density of the shared input/chip primitives.
+const inputCls = cn(inputBase, 'px-2 py-1 text-xs');
+const btnCls = cn(chipCls, 'flex items-center gap-1');
 
 /**
  * A compact horizontal bar showing how a block's wall-clock span was split: task
@@ -354,15 +369,74 @@ function Block({
   block,
   onSetTimes,
   onRemove,
+  onMerged,
   defaultOpen = false,
 }: {
   block: SessionBlock;
   onSetTimes: (log: TimeLog, patch: Partial<Pick<TimeLog, 'start_time' | 'end_time'>>) => void;
   onRemove: () => void;
+  /** Called with the surviving session id after a merge (this block's id is tombstoned). */
+  onMerged?: (survivorId: string) => void;
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [barEdit, setBarEdit] = useState(false);
+  const [editSegId, setEditSegId] = useState<string | null>(null);
+  const [gapSel, setGapSel] = useState<string | null>(null); // gap start ISO
+  const [addGap, setAddGap] = useState<string | null>(null); // gap start ISO with open add form
+  const [preview, setPreview] = useState<SegPreview | null>(null);
   const s = block.session;
+  const isOpenBlock = !s.end_time;
+
+  const extra = useQuery(
+    (db) => {
+      // Tasks of the block's project, for the add-segment picker.
+      const tasks: Item[] = [];
+      const anchor = getItem(db, s.item_id);
+      if (anchor?.type === 'task') tasks.push(anchor);
+      const queue = [s.item_id];
+      while (queue.length) {
+        for (const c of getChildren(db, queue.shift()!)) {
+          if (c.type === 'task') tasks.push(c);
+          queue.push(c.id);
+        }
+      }
+      return {
+        gaps: computeGaps(block),
+        mergeCand: findMergeCandidate(db, s, MERGE_BLOCK_WINDOW_MS),
+        tasks,
+      };
+    },
+    [s.id, s.start_time, s.end_time],
+  );
+  const gaps = extra?.gaps ?? [];
+  const tasks = extra?.tasks ?? [];
+  const mergeCand = extra?.mergeCand ?? null;
+
+  // Segments and untracked gaps interleaved chronologically.
+  const entries = [
+    ...block.segments.map((seg) => ({ t: seg.log.start_time, seg, gap: undefined })),
+    ...gaps.map((gap) => ({ t: gap.start, seg: undefined, gap })),
+  ].sort((a, b) => a.t.localeCompare(b.t));
+
+  function doMerge() {
+    if (!mergeCand) return;
+    mutate((db, dev) => {
+      const survivor = mergeSessions(db, dev, mergeCand.id, s.id);
+      if (survivor) onMerged?.(survivor.id);
+    });
+  }
+  const selectSeg = (id: string | null) => {
+    setEditSegId(id);
+    if (id) setGapSel(null);
+    setOpen(true);
+  };
+  const selectGap = (start: string | null) => {
+    setGapSel(start);
+    if (start) setEditSegId(null);
+    setOpen(true);
+  };
+
   return (
     <div className="rounded-lg border border-border bg-surface p-3">
       <div className="flex items-center gap-2">
@@ -378,7 +452,50 @@ function Block({
         </span>
       </div>
 
-      <BlockBar block={block} />
+      {barEdit ? (
+        <>
+          <BlockBarEditor
+            block={block}
+            gaps={gaps}
+            selectedSegId={editSegId}
+            onSelectSeg={selectSeg}
+            selectedGap={gapSel}
+            onSelectGap={selectGap}
+            preview={preview}
+            onPreview={setPreview}
+          />
+          <div className="mt-0.5 text-right">
+            <button
+              onClick={() => {
+                setBarEdit(false);
+                setPreview(null);
+              }}
+              className="text-[10px] text-text-muted hover:text-text"
+            >
+              collapse bar
+            </button>
+          </div>
+        </>
+      ) : (
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => {
+            setBarEdit(true);
+            setOpen(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              setBarEdit(true);
+              setOpen(true);
+            }
+          }}
+          title="Tap to edit segments"
+          className="cursor-pointer"
+        >
+          <BlockBar block={block} />
+        </div>
+      )}
 
       {open && (
         <div className="mt-2 space-y-2 border-t border-border pt-2 text-xs">
@@ -414,24 +531,44 @@ function Block({
               Remove
             </button>
           </div>
-          {block.segments.length > 0 && (
+          {mergeCand && (
+            <div className="flex flex-wrap items-center gap-2 text-text-muted">
+              <span>
+                Previous block ended {fmtTime(mergeCand.end_time!)} ({fmtDay(mergeCand.start_time)})
+              </span>
+              <button onClick={doMerge} className="rounded border border-border px-2 py-0.5 font-medium text-text hover:bg-surface-2">
+                Merge with previous block
+              </button>
+            </div>
+          )}
+          {entries.length > 0 && (
             <ul className="space-y-0.5">
-              {block.segments.map((seg) => (
-                <li key={seg.log.id} className="flex items-center gap-2 text-text-muted">
-                  <span
-                    className="size-2 shrink-0 rounded-sm"
-                    style={{ backgroundColor: taskColor(seg.log.item_id) }}
+              {entries.map((entry) =>
+                entry.seg ? (
+                  <SegmentRow
+                    key={entry.seg.log.id}
+                    block={block}
+                    seg={entry.seg}
+                    editing={editSegId === entry.seg.log.id}
+                    onToggle={() =>
+                      selectSeg(editSegId === entry.seg!.log.id ? null : entry.seg!.log.id)
+                    }
+                    preview={preview}
                   />
-                  <span className="truncate">{seg.item?.title || 'Task'}</span>
-                  <span className="ml-auto tabular-nums">{formatDuration(seg.ms)}</span>
-                </li>
-              ))}
-              {block.untrackedMs > 0 && (
-                <li className="flex items-center gap-2 text-text-faint">
-                  <span className="size-2 shrink-0 rounded-sm bg-surface-2" />
-                  <span className="truncate">Untracked project time</span>
-                  <span className="ml-auto tabular-nums">{formatDuration(block.untrackedMs)}</span>
-                </li>
+                ) : (
+                  <GapRow
+                    key={entry.gap!.start}
+                    gap={entry.gap!}
+                    sessionId={s.id}
+                    isOpenBlock={isOpenBlock}
+                    selected={gapSel === entry.gap!.start}
+                    tasks={tasks}
+                    adding={addGap === entry.gap!.start}
+                    onToggleAdd={() =>
+                      setAddGap(addGap === entry.gap!.start ? null : entry.gap!.start)
+                    }
+                  />
+                ),
               )}
             </ul>
           )}
@@ -448,6 +585,262 @@ function Block({
         </div>
       )}
     </div>
+  );
+}
+
+function SegmentRow({
+  block,
+  seg,
+  editing,
+  onToggle,
+  preview,
+}: {
+  block: SessionBlock;
+  seg: SessionBlock['segments'][number];
+  editing: boolean;
+  onToggle: () => void;
+  preview: SegPreview | null;
+}) {
+  const live = !seg.log.end_time;
+  const ms =
+    preview?.id === seg.log.id ? Math.max(0, preview.e - preview.s) : seg.ms;
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={live}
+        className={cn(
+          'flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-text-muted',
+          !live && 'hover:bg-surface-2',
+          editing && 'bg-surface-2',
+        )}
+      >
+        <span
+          className="size-2 shrink-0 rounded-sm"
+          style={{ backgroundColor: taskColor(seg.log.item_id) }}
+        />
+        <span className="truncate">{seg.item?.title || 'Task'}</span>
+        {live && <span className="shrink-0 text-accent">● recording</span>}
+        <span className="ml-auto tabular-nums">{formatDuration(ms)}</span>
+      </button>
+      {editing && !live && <SegmentEditor block={block} seg={seg.log} preview={preview} />}
+    </li>
+  );
+}
+
+/**
+ * Numeric editing of one closed segment: Start Offset = untracked minutes between
+ * the previous covered neighbor (or block start) and this segment; Task Time =
+ * its length. Values commit through updateSegment, which rounds and clamps —
+ * during a drag the fields mirror the live preview instead.
+ */
+function SegmentEditor({
+  block,
+  seg,
+  preview,
+}: {
+  block: SessionBlock;
+  seg: TimeLog;
+  preview: SegPreview | null;
+}) {
+  const bounds = segmentBounds(block, seg.id);
+  const segS = preview?.id === seg.id ? preview.s : new Date(seg.start_time).getTime();
+  const segE = preview?.id === seg.id ? preview.e : new Date(seg.end_time!).getTime();
+  const len = segE - segS;
+  const offsetMin = Math.max(0, Math.round((segS - bounds.minStartMs) / 60_000));
+  const lenMin = Math.max(1, Math.round(len / 60_000));
+  const commit = (startMs: number, endMs: number) =>
+    mutate((db, dev) => updateSegment(db, dev, seg.id, isoAt(startMs), isoAt(endMs)));
+  // Offset positions the segment (length fixed); Task time sizes it (start fixed).
+  const moveTo = (startMs: number) => commit(startMs, startMs + len);
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-surface-2 p-2">
+      <label className="flex items-center gap-1 text-text-muted">
+        Start offset
+        <MinutesInput
+          value={offsetMin}
+          onCommit={(n) => moveTo(bounds.minStartMs + n * 60_000)}
+        />
+        min
+      </label>
+      <label className="flex items-center gap-1 text-text-muted">
+        Task time
+        <MinutesInput min={1} value={lenMin} onCommit={(n) => commit(segS, segS + n * 60_000)} />
+        min
+      </label>
+      <button onClick={() => moveTo(bounds.minStartMs)} className={btnCls} title="Move back against the previous entry (offset 0)">
+        Snap to previous
+      </button>
+      <button onClick={() => commit(segS, bounds.maxEndMs)} className={btnCls} title="Extend to the next entry (or block end)">
+        Fill to next
+      </button>
+      <button
+        onClick={() => mutate((db, dev) => removeSegment(db, dev, seg.id))}
+        className="ml-auto text-danger hover:underline"
+      >
+        Remove
+      </button>
+    </div>
+  );
+}
+
+function GapRow({
+  gap,
+  sessionId,
+  isOpenBlock,
+  selected,
+  tasks,
+  adding,
+  onToggleAdd,
+}: {
+  gap: UntrackedGap;
+  sessionId: string;
+  isOpenBlock: boolean;
+  selected: boolean;
+  tasks: Item[];
+  adding: boolean;
+  onToggleAdd: () => void;
+}) {
+  const liveTail = gap.position === 'trailing' && isOpenBlock;
+  return (
+    <li>
+      <div
+        className={cn(
+          'flex items-center gap-2 rounded px-1 py-0.5 text-text-faint',
+          selected && 'bg-surface-2',
+        )}
+      >
+        <span className="size-2 shrink-0 rounded-sm bg-surface-2" />
+        <span className="truncate">
+          Untracked · {fmtTime(gap.start)}–{liveTail ? 'now' : fmtTime(gap.end)}
+        </span>
+        <span className="ml-auto tabular-nums">{formatDuration(gap.ms)}</span>
+        {tasks.length > 0 && !liveTail && (
+          <button onClick={onToggleAdd} className="shrink-0 text-text-muted hover:text-text">
+            + task
+          </button>
+        )}
+        {!liveTail && (
+          <button
+            onClick={() =>
+              mutate((db, dev) => deleteUntrackedGap(db, dev, sessionId, gap.start, gap.end))
+            }
+            className="shrink-0 text-danger hover:underline"
+            title={
+              gap.position === 'middle'
+                ? 'Remove this untracked time by splitting the block in two'
+                : 'Trim this untracked time off the block'
+            }
+          >
+            {gap.position === 'middle' ? 'Delete (splits)' : 'Trim'}
+          </button>
+        )}
+      </div>
+      {adding && <AddSegmentForm gap={gap} tasks={tasks} sessionId={sessionId} onDone={onToggleAdd} />}
+    </li>
+  );
+}
+
+/** Add a task segment into an untracked gap; prefilled to fill the whole gap. */
+function AddSegmentForm({
+  gap,
+  tasks,
+  sessionId,
+  onDone,
+}: {
+  gap: UntrackedGap;
+  tasks: Item[];
+  sessionId: string;
+  onDone: () => void;
+}) {
+  const gapMin = Math.max(1, Math.floor(gap.ms / 60_000));
+  const [taskId, setTaskId] = useState(tasks[0]?.id ?? '');
+  const [offset, setOffset] = useState('0');
+  const [len, setLen] = useState(String(gapMin));
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        const off = Math.min(Math.max(0, Math.round(Number(offset) || 0)), gapMin - 1);
+        const mins = Math.min(Math.max(1, Math.round(Number(len) || 0)), gapMin - off);
+        if (!taskId) return;
+        const start = new Date(gap.start).getTime() + off * 60_000;
+        mutate((db, dev) =>
+          addSegment(db, dev, sessionId, taskId, isoAt(start), isoAt(start + mins * 60_000)),
+        );
+        onDone();
+      }}
+      className="mt-1 flex flex-wrap items-center gap-2 rounded bg-surface-2 p-2"
+    >
+      <Select value={taskId} onChange={(e) => setTaskId(e.target.value)} className="px-2 py-1 text-xs">
+        {tasks.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.title || 'Task'}
+          </option>
+        ))}
+      </Select>
+      <label className="flex items-center gap-1 text-text-muted">
+        offset
+        <input
+          type="number"
+          min={0}
+          max={gapMin - 1}
+          value={offset}
+          onChange={(e) => setOffset(e.target.value)}
+          className={cn(inputCls, 'w-16')}
+        />
+      </label>
+      <label className="flex items-center gap-1 text-text-muted">
+        min
+        <input
+          type="number"
+          min={1}
+          max={gapMin}
+          value={len}
+          onChange={(e) => setLen(e.target.value)}
+          className={cn(inputCls, 'w-16')}
+        />
+      </label>
+      <button type="submit" className={btnCls}>
+        Add
+      </button>
+      <button type="button" onClick={onDone} className={btnCls}>
+        Cancel
+      </button>
+    </form>
+  );
+}
+
+/** Whole-minute numeric input that commits on blur/Enter (not per keystroke). */
+function MinutesInput({
+  value,
+  onCommit,
+  min = 0,
+}: {
+  value: number;
+  onCommit: (n: number) => void;
+  min?: number;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      type="number"
+      min={min}
+      className={cn(inputCls, 'w-16')}
+      value={draft ?? String(value)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (draft != null) {
+          const n = Number(draft);
+          if (Number.isFinite(n)) onCommit(Math.max(min, Math.round(n)));
+        }
+        setDraft(null);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+    />
   );
 }
 
@@ -713,13 +1106,13 @@ function AddBlock({
       }}
       className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-border bg-surface p-3 text-xs"
     >
-      <select value={project} onChange={(e) => setProject(e.target.value)} className={inputCls}>
+      <Select value={project} onChange={(e) => setProject(e.target.value)} className="px-2 py-1 text-xs">
         {projects.map((p) => (
           <option key={p.id} value={p.id}>
             {p.title || 'Untitled'}
           </option>
         ))}
-      </select>
+      </Select>
       <input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} className={inputCls} required />
       <input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} className={inputCls} required />
       <button type="submit" className="rounded-lg bg-accent px-3 py-1 font-medium text-accent-fg hover:bg-accent-hover">

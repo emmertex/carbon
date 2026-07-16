@@ -19,7 +19,7 @@ import { cn } from '@/lib/cn';
 
 function btnCls(active: boolean) {
   return cn(
-    'rounded-md p-1.5 text-text-faint hover:bg-surface-2 hover:text-text',
+    'rounded-lg p-1.5 text-text-faint hover:bg-surface-2 hover:text-text',
     active && 'bg-surface-2 text-text',
   );
 }

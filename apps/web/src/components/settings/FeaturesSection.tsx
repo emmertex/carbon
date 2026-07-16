@@ -8,7 +8,8 @@ import {
 } from '@/lib/features';
 import { setSettingsSyncEnabled } from '@/lib/settings-sync';
 import { SettingsSection } from './SettingsSection';
-import { ThemeChip, SettingsToggle } from './controls';
+import { SettingsToggle } from './controls';
+import { SegmentedControl } from '../ui/SegmentedControl';
 
 const PRESETS: { id: Complexity; label: string; hint: string }[] = [
   { id: 'simple', label: 'Simple', hint: 'The essentials — a calm, welcoming app.' },
@@ -56,15 +57,13 @@ export function FeaturesSection() {
         Choose how much of Carbon to show. Start simple and switch features on as you need them.
       </p>
 
-      <div className="mb-2 flex flex-wrap gap-2">
-        {PRESETS.map((p) => (
-          <ThemeChip
-            key={p.id}
-            label={p.label}
-            active={complexity === p.id}
-            onClick={() => choosePreset(p.id)}
-          />
-        ))}
+      <div className="mb-2">
+        <SegmentedControl
+          value={complexity}
+          onChange={choosePreset}
+          segmentClassName="px-2.5"
+          options={PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+        />
       </div>
       <p className="mb-5 text-xs text-text-faint">
         {PRESETS.find((p) => p.id === complexity)?.hint}

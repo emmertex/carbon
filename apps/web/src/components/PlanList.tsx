@@ -24,7 +24,7 @@ import { toggleTaskCompletion } from "@/lib/taskActions";
 import { cn } from "@/lib/cn";
 import { TaskRow, type TaskRowData } from "./TaskRow";
 import { SwipeableRow } from "./SwipeableRow";
-import { Chip } from "./Chip";
+import { SegmentedControl } from "./ui/SegmentedControl";
 
 /** A planned/matched item plus the available leaf actions to surface beneath it.
  *  For a sequential parent that's just the next action; for parallel/single it's
@@ -344,18 +344,15 @@ export function GroupingToggle({ className }: { className?: string }) {
   return (
     <div className={cn("flex items-center gap-1.5 text-xs", className)}>
       <span className="text-text-faint">List</span>
-      <Chip
-        active={grouping === "nested"}
-        onClick={() => setUiPrefs({ planGrouping: "nested" })}
-      >
-        Nested
-      </Chip>
-      <Chip
-        active={grouping === "flat"}
-        onClick={() => setUiPrefs({ planGrouping: "flat" })}
-      >
-        Flat
-      </Chip>
+      <SegmentedControl<"nested" | "flat">
+        value={grouping}
+        onChange={(v) => setUiPrefs({ planGrouping: v })}
+        segmentClassName="px-2.5"
+        options={[
+          { value: "nested", label: "Nested" },
+          { value: "flat", label: "Flat" },
+        ]}
+      />
     </div>
   );
 }

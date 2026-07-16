@@ -7,7 +7,14 @@ import { LINKS } from '@/lib/links';
 import { useStore } from '@/lib/store';
 import { avatarInitial } from '../Avatar';
 import { SettingsSection } from './SettingsSection';
-import { SettingsToggle, DocLink, btnPrimary, btnSecondary } from './controls';
+import {
+  SettingsToggle,
+  DocLink,
+  btnPrimary,
+  btnSecondary,
+  btnDanger,
+  btnDangerSolid,
+} from './controls';
 
 /** "3 minutes ago" style relative time for the last successful sync. */
 function relativeTime(ts: number): string {
@@ -163,10 +170,7 @@ export function SyncSection({
           {/* Workspace deletion is a hosted (multi-tenant) concept and runs its own
               email-OTC flow, so it's reachable here regardless of sign-in state. */}
           {baseDomain && (
-            <Link
-              to="/delete-account"
-              className="flex items-center gap-2 rounded-lg border border-red-500/40 px-4 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10"
-            >
+            <Link to="/delete-account" className={btnDanger}>
               Delete account
             </Link>
           )}
@@ -184,10 +188,7 @@ export function SyncSection({
               <button onClick={() => void signOut(false)} className={btnSecondary}>
                 Sign out, keep local data
               </button>
-              <button
-                onClick={() => void signOut(true)}
-                className="flex items-center gap-2 rounded-lg border border-red-500/40 px-4 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10"
-              >
+              <button onClick={() => void signOut(true)} className={btnDanger}>
                 Sign out &amp; erase local data
               </button>
               <button
@@ -227,7 +228,7 @@ export function SyncSection({
               <button
                 onClick={() => setConfirmReset(true)}
                 disabled={resetting}
-                className="mt-2 flex items-center gap-2 rounded-lg border border-red-500/40 px-4 py-2 text-sm font-medium text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+                className={`mt-2 ${btnDanger}`}
               >
                 Reset local data
               </button>
@@ -236,7 +237,7 @@ export function SyncSection({
                 <button
                   onClick={() => void resetLocal()}
                   disabled={resetting}
-                  className="flex items-center gap-2 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                  className={btnDangerSolid}
                 >
                   {resetting && <Loader2 className="animate-spin" size={16} />}
                   Erase &amp; re-download

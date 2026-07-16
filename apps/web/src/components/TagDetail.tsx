@@ -23,10 +23,8 @@ import { ColorSwatches } from './ColorSwatches';
 import { GeoEditor } from './GeoEditor';
 import { TagMark } from './TagMark';
 import { abbreviateTagPath } from '@/lib/tagLabel';
-
-function Label({ children }: { children: React.ReactNode }) {
-  return <div className="mb-1 text-xs font-medium text-text-muted">{children}</div>;
-}
+import { inputCls, btnIcon, Label } from './ui/controls';
+import { SegmentedControl } from './ui/SegmentedControl';
 
 export function TagDetail({ id }: { id: string }) {
   const select = useStore((s) => s.select);
@@ -72,7 +70,7 @@ export function TagDetail({ id }: { id: string }) {
         <header className="flex items-center gap-1 border-b border-border px-3 py-2">
           <button
             onClick={() => select(null)}
-            className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+            className={cn(btnIcon, 'p-2')}
             aria-label="Close"
           >
             <X size={18} />
@@ -135,7 +133,7 @@ export function TagDetail({ id }: { id: string }) {
       <header className="flex items-center gap-1 border-b border-border px-3 py-2">
         <button
           onClick={() => select(null)}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-text"
+          className={cn(btnIcon, 'p-2')}
           aria-label="Close"
         >
           <X size={18} />
@@ -144,10 +142,7 @@ export function TagDetail({ id }: { id: string }) {
         <div className="flex-1" />
         <button
           onClick={toggleHold}
-          className={cn(
-            'rounded-lg p-2 hover:bg-surface-2',
-            onHold ? 'text-warning' : 'text-text-muted hover:text-text',
-          )}
+          className={cn(btnIcon, 'p-2', onHold && 'text-warning hover:text-warning')}
           aria-label={onHold ? 'Release hold' : 'Put on hold'}
           title={onHold ? 'On hold — release' : 'Put on hold'}
         >
@@ -155,7 +150,7 @@ export function TagDetail({ id }: { id: string }) {
         </button>
         <button
           onClick={remove}
-          className="rounded-lg p-2 text-text-muted hover:bg-surface-2 hover:text-danger"
+          className={cn(btnIcon, 'p-2 hover:text-danger')}
           aria-label="Delete"
         >
           <Trash2 size={17} />
@@ -180,7 +175,7 @@ export function TagDetail({ id }: { id: string }) {
               }
             }}
             placeholder="Tag name"
-            className="w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm font-medium outline-none focus:border-accent"
+            className={cn(inputCls, 'w-full font-medium')}
           />
         </div>
         {parentPath && (
@@ -196,18 +191,20 @@ export function TagDetail({ id }: { id: string }) {
 
         <div>
           <Label>Status</Label>
-          <button
-            onClick={toggleHold}
-            className={cn(
-              'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm',
-              onHold
-                ? 'border-warning/40 bg-warning/10 text-warning'
-                : 'border-border text-text-muted hover:bg-surface-2',
-            )}
-          >
-            {onHold ? <Pause size={14} /> : <Play size={14} />}
-            {onHold ? 'On hold' : 'Active'}
-          </button>
+          <SegmentedControl<'active' | 'on-hold'>
+            value={onHold ? 'on-hold' : 'active'}
+            onChange={(v) => {
+              if ((v === 'on-hold') !== onHold) toggleHold();
+            }}
+            options={[
+              { value: 'active', label: 'Active' },
+              {
+                value: 'on-hold',
+                label: 'On hold',
+                activeClassName: 'bg-warning/10 text-warning',
+              },
+            ]}
+          />
           <p className="mt-1 text-xs text-text-faint">
             On hold fades these tasks, defers them out of Today, and mutes their reminders.
           </p>
