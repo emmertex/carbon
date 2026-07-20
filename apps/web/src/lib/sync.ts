@@ -107,7 +107,8 @@ export async function fetchHostInfo(): Promise<void> {
         appHost: h.appHost ?? null,
         version: h.version ?? null,
       });
-      useStore.getState().setWorkspaceLock(!!h.locked, h.expiresAt ?? null);
+      // expiresAt is only present on /api/health while locked (avoids leaking expiry).
+      useStore.getState().setWorkspaceLock(!!h.locked, h.locked ? (h.expiresAt ?? null) : null);
       // The role-driven server-config wiring below only makes sense when `origin`
       // is where the app is actually served from (the browser/PWA case) — on native
       // it's just the sync target, and role there doesn't mean the same thing (e.g.
@@ -141,35 +142,43 @@ export function scheduleSync(): void {
   syncTimer = setTimeout(() => void syncNow(), 800);
 }
 
-export type SignInResult = 'ok' | 'open' | 'badCredentials' | 'error';
+export type SignInResult =
+  | 'ok'
+  | 'open'
+  | 'badCredentials'
+  | 'error'
+  | { status: 'needs_enrollment'; challenge: string }
+  | { status: 'needs_2fa'; challenge: string; factors: { email: boolean; totp: boolean } };
 
 /**
- * Exchange a password for a session token (POST /api/login, Basic auth). On success
- * the token is persisted and the password is discarded — it never touches storage.
- * Returns 'open' if the server has no accounts (no token needed).
+ * Exchange a password for a session token (POST /api/login, Basic auth), or return
+ * an MFA challenge when the device is new / 2FA is not yet enrolled. On a full
+ * success the token is persisted and the password is discarded.
  */
 export async function signIn(password: string): Promise<SignInResult> {
   const cfg = getServerConfig();
   if (!cfg.url || !cfg.username) return 'badCredentials';
-  try {
-    const res = await fetch(joinUrl(cfg.url, '/api/login'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Basic ' + btoa(`${cfg.username}:${password}`),
-      },
-    });
-    if (res.status === 401) return 'badCredentials';
-    if (!res.ok) return 'error';
-    const data = (await res.json()) as { token?: string; open?: boolean };
-    if (data.token) {
-      saveServerConfig({ ...getServerConfig(), token: data.token, password: '' });
-      return 'ok';
-    }
-    return data.open ? 'open' : 'error';
-  } catch {
-    return 'error';
+  const { loginWithPassword } = await import('./mfa');
+  const result = await loginWithPassword(cfg.username, password);
+  if (result.status === 'badCredentials' || result.status === 'error') return result.status;
+  if (result.status === 'open') return 'open';
+  if (result.status === 'ok') {
+    saveServerConfig({ ...getServerConfig(), token: result.token, password: '' });
+    return 'ok';
   }
+  if (result.status === 'needs_enrollment') {
+    return { status: 'needs_enrollment', challenge: result.challenge };
+  }
+  return {
+    status: 'needs_2fa',
+    challenge: result.challenge,
+    factors: result.factors,
+  };
+}
+
+/** Persist a session token minted after MFA enroll/verify. */
+export function saveSessionToken(token: string): void {
+  saveServerConfig({ ...getServerConfig(), token, password: '' });
 }
 
 /**

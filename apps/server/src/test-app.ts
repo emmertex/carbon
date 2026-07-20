@@ -60,10 +60,11 @@ export function makeTestDb(): TestCtx {
   return { db, deviceId, vapidPublicKey, addUser };
 }
 
-/** Build a Hono app with basicAuth wired to `db`. Routes are added by the caller. */
+/** Build a Hono app with basicAuth wired to `db`. Routes are added by the caller.
+ *  Tests allow Basic everywhere; production restricts Basic to `/login` only. */
 export function makeHono(db: TestDb, allowOpen = true) {
   const app = new Hono<{ Variables: AuthVars }>();
-  app.use('*', basicAuth(db, allowOpen));
+  app.use('*', basicAuth(db, { allowOpen, basicPaths: null }));
   return app;
 }
 

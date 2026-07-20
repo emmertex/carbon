@@ -21,6 +21,7 @@ import {
   LayoutGrid,
   Undo2,
   Database,
+  HeartHandshake,
   type LucideIcon,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
@@ -61,7 +62,7 @@ const PILLARS: { icon: LucideIcon; title: string; body: string }[] = [
   {
     icon: Server,
     title: "Free, sync your way",
-    body: "Use Carbon locally free, forever. When you want sync, subscribe to hosted or self-host the open-source server — even run one for your friends.",
+    body: "Use Carbon locally free, forever. Self-host the open-source server at no cost, or use our shared host — a small contribution toward running it, not a premium subscription.",
   },
 ];
 
@@ -89,12 +90,12 @@ const SPOTLIGHTS: {
   {
     icon: Clock,
     title: "Plan real days, backed by real time",
-    body: "Estimate tasks, set a daily time budget, and let the Plan view keep you honest. Built-in time tracking records where the hours actually go — per-project sessions, task segments, pauses and CSV export.",
+    body: "Estimate tasks, set a daily time budget, and let the Plan view keep you honest. Built-in time tracking records where the hours actually go — then lets you fix them: merge accidental restarts, split gaps, drag segments, pin time notes, and optionally attach a GPS track.",
     points: [
       "Daily planner with a startup + per-task budget",
-      "Per-user time sessions, segments and pauses",
-      "Time view as list, timeline or chart",
-      "Per-project review intervals, GTD-style",
+      "Per-user sessions, segments, pauses and time notes",
+      "Merge, split and edit blocks after the fact",
+      "Optional GPS tracks while a timer runs (background on Android)",
     ],
     shot: "/shots/time.png",
   },
@@ -113,10 +114,10 @@ const SPOTLIGHTS: {
   {
     icon: Sparkles,
     title: "Capture in plain language",
-    body: 'Type "remind me to grab milk at Coles tomorrow" and your own LLM agent adds, tags, schedules and files it for you. Works in the quick-add bar, over the agent API, or from a Telegram bot for your whole server.',
+    body: 'Type "remind me to grab milk at Coles tomorrow" and your own LLM agent adds, tags, schedules and files it for you. Complete, delete, rename, list and due queries work the same way — in the quick-add bar, over the agent API, or from a Telegram bot.',
     points: [
-      "Natural-language commands: add, tag, schedule, share, assign",
-      "Describe a filter and let the agent assemble it",
+      "Natural-language: add, complete, delete, rename, tag, schedule, share",
+      "Whole-list / whole-tag ops and “what's due tomorrow?” queries",
       "Telegram bot with per-user account linking",
       "Basic LLM included on hosted (fair-use), or bring your own key anytime",
     ],
@@ -136,12 +137,12 @@ const SPOTLIGHTS: {
   },
   {
     icon: FileText,
-    title: "Notes, comments and files on every task",
-    body: "Full Markdown notes, threaded comments with @mentions and inline images, and attachments on both tasks and comments — unlimited locally, up to 25 MB per file across sync.",
+    title: "First-class notes, comments and files",
+    body: "Notes are their own item type — nest them like tasks, convert either way without losing data, and edit with a rich Markdown editor. Tasks still carry GFM notes too, plus threaded comments with @mentions and attachments.",
     points: [
-      "GitHub-flavoured Markdown task notes",
-      "Comment threads with @mentions",
-      "Inline images and file attachments",
+      "Dedicated notes with TipTap editing, images and zip export",
+      "Convert task ↔ note without losing data",
+      "Comment threads with @mentions and file attachments",
       "Multiple assignees, shared per task or whole project",
     ],
     shot: "/shots/detail.png",
@@ -186,8 +187,8 @@ const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
       "Debounced saves + immediate flush on tab close",
       "Full export / import, including attachment blobs",
       "Settings & view sync across your devices",
-      "Purge old completed tasks in bulk",
-      "Copy any subtree as a Markdown checklist",
+      "Reset local data, merge/replace on sign-in, erase on sign-out",
+      "Purge old completed tasks; copy any subtree as Markdown",
     ],
   },
   {
@@ -217,9 +218,9 @@ const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
     items: [
       "Simple / Standard / Advanced presets, or fully custom",
       "Show or hide features per device",
-      "Light & dark themes with accent colors",
+      "Themes: Light, Dark, ePaper, Gruvbox, Ayu, Nord, Catppuccin",
+      "Light & dark modes with accent colors",
       "Swipe and pane gestures on mobile",
-      "Task-detail pane adapts to the features you use",
     ],
   },
 ];
@@ -363,9 +364,9 @@ export function LandingView() {
           Carbon
         </h1>
         <p className="mt-4 text-lg text-text-muted">
-          A fast, offline-first task manager with serious GTD, built-in time
-          tracking, natural-language capture and location-aware reminders. Open
-          source, free to use, and yours to sync or self-host.
+          A fast, offline-first task manager with serious GTD, first-class notes,
+          built-in time tracking, natural-language capture and location-aware
+          reminders. Open source, free to use, and yours to sync or self-host.
         </p>
         <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <button
@@ -489,14 +490,17 @@ export function LandingView() {
           </ul>
         </div>
         <div className="rounded-xl border border-border bg-surface p-6">
-          <h3 className="font-semibold">Hosted sync</h3>
+          <h3 className="font-semibold">Hosted sync — cost recovery</h3>
           <p className="mt-1 text-sm text-text-muted">
-            Don't want to run a server? Start with a 30-day trial, then pick a
-            plan. Cancel anytime — export and use locally, you will lose
-            nothing.
+            Don't want to run a server? Use ours. Carbon itself is free and fully
+            open — nothing is paywalled. The amount below only helps cover the
+            cost of keeping this shared host running (a fraction of typical task-app
+            subscriptions). We're including 30 days free while we have the spare
+            resources — cancel anytime and export to keep using locally.
           </p>
           <ul className="mt-4 space-y-2 text-sm">
             {[
+              "Same full app as self-host — no premium tiers",
               "Managed sync across all your devices",
               "Included LLM for natural-language capture & Telegram — no API key needed",
               "Push reminders on every signed-in device",
@@ -527,11 +531,14 @@ export function LandingView() {
               </div>
             ))}
           </div>
+          <p className="mt-2 text-center text-xs text-text-muted">
+            Contribution toward hosting — not a product subscription
+          </p>
           <button
             onClick={() => navigate("/signup")}
-            className="mt-4 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white"
+            className="mt-3 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white"
           >
-            Start free trial
+            Create a workspace
           </button>
           <p className="mt-3 text-xs text-text-faint">
             Included AI runs a basic model (currently GPT-OSS-20B, may change)
@@ -572,8 +579,37 @@ export function LandingView() {
         </p>
       </section>
 
+      {/* Call to contributors */}
+      <section
+        id="contributors"
+        className="mx-auto mt-20 max-w-2xl scroll-mt-8 rounded-xl border border-border bg-surface p-6 sm:p-8"
+      >
+        <HeartHandshake className="mb-3 text-accent" size={24} />
+        <h2 className="text-xl font-semibold sm:text-2xl">
+          Call to contributors
+        </h2>
+        <p className="mt-3 text-text-muted">
+          We need someone to help us build and sign macOS and iOS apps. If you
+          are willing to help out, please{" "}
+          <a
+            href="mailto:email@emmertex.com?subject=Carbon%20macOS%20%2F%20iOS%20help"
+            className="text-accent underline underline-offset-4 hover:text-text"
+          >
+            get in touch
+          </a>
+          . If enough people support, and want these platforms supported, to
+          cover Apple&apos;s costs, we will do it. Donations are welcome!
+        </p>
+      </section>
+
       {/* Footer */}
-      <footer className="mt-20 border-t border-border pt-8 text-center text-sm text-text-muted">
+      <footer className="mt-20 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-t border-border pt-8 text-center text-sm text-text-muted">
+        <a
+          href="#contributors"
+          className="underline underline-offset-4 hover:text-text"
+        >
+          Call to contributors
+        </a>
         <button
           onClick={() => navigate("/privacy")}
           className="underline underline-offset-4 hover:text-text"

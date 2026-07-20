@@ -14,8 +14,10 @@ import {
 } from '@carbon/core';
 import { notifyTask } from './push';
 import { alreadySent, markSent } from './reminders-sent';
+import { ensureMfaTables, validateMfaChallenge } from './mfa';
+import { stampedClientIp } from './client-ip';
 
-export type AuthMethod = 'basic' | 'token' | 'session' | 'open';
+export type AuthMethod = 'basic' | 'token' | 'session' | 'open' | 'mfa_challenge';
 export const SCOPES = ['tasks:read', 'tasks:write', 'inbox:write'] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -25,6 +27,20 @@ export interface AuthVars {
   role: 'admin' | 'member';
   scopes: string[];
   authMethod: AuthMethod;
+  /** Set when authMethod === 'mfa_challenge'. */
+  mfaChallengeId?: string;
+  mfaChallengePurpose?: 'enroll' | 'login';
+}
+
+export interface BasicAuthOptions {
+  /** Allow open/no-auth when the tenant has zero users. Opt-in; production sets via ALLOW_OPEN_MODE. */
+  allowOpen?: boolean;
+  /**
+   * Paths (Hono route path, e.g. `/login`) where Basic auth is accepted for humans.
+   * Everywhere else Basic is rejected so MFA cannot be bypassed.
+   * Default: `['/login']`. Pass `null` to allow Basic on every path (tests only).
+   */
+  basicPaths?: string[] | null;
 }
 
 export function sha256Hex(s: string): string {
@@ -46,15 +62,63 @@ const SCRYPT_KEYLEN = 32;
 const DUMMY_HASH = `scrypt$${'0'.repeat(32)}$${'0'.repeat(64)}`;
 
 // ----- basic-auth brute-force throttle (API-1) ------------------------------
-// Sliding-window cap on failed Basic-auth attempts, isolated per tenant DB and
-// keyed within that tenant by lowercased username — IP isn't a reliable key here
-// (XFF handling lives elsewhere).
-// Unknown usernames are keyed and counted the same as wrong-password failures
-// (see basicAuth below) so this map can't be used to enumerate valid accounts.
+// Sliding-window caps on failed Basic-auth attempts:
+//   • per tenant DB + lowercased username (enumeration-safe: unknown names count too)
+//   • per client IP (cross-tenant; skipped when IP is 'unknown')
+//   • optional global process-wide budget
 export const LOGIN_FAIL_WINDOW_MS = 15 * 60_000; // 15 minutes
 export const LOGIN_FAIL_MAX = 10; // max failed attempts per username per window
+export const LOGIN_FAIL_IP_MAX = Math.max(
+  LOGIN_FAIL_MAX,
+  Number(process.env.LOGIN_FAIL_IP_MAX) || 30,
+);
+export const LOGIN_FAIL_GLOBAL_MAX = Math.max(
+  LOGIN_FAIL_IP_MAX,
+  Number(process.env.LOGIN_FAIL_GLOBAL_MAX) || 200,
+);
+
 type LoginFailBuckets = Map<string, number[]>;
+
+/** Reusable sliding-window failure budget (host-admin auth, etc.). */
+export function createFailThrottle(
+  windowMs = LOGIN_FAIL_WINDOW_MS,
+  max = LOGIN_FAIL_MAX,
+): {
+  allowed(key: string): boolean;
+  record(key: string): void;
+  clear(key: string): void;
+} {
+  const buckets: LoginFailBuckets = new Map();
+  const prune = (now: number) => {
+    const win = now - windowMs;
+    for (const [k, v] of buckets) {
+      const fresh = v.filter((t) => t > win);
+      if (fresh.length) buckets.set(k, fresh);
+      else buckets.delete(k);
+    }
+  };
+  return {
+    allowed(key: string): boolean {
+      const now = Date.now();
+      prune(now);
+      return (buckets.get(key) ?? []).length < max;
+    },
+    record(key: string): void {
+      const now = Date.now();
+      prune(now);
+      const hits = buckets.get(key) ?? [];
+      hits.push(now);
+      buckets.set(key, hits);
+    },
+    clear(key: string): void {
+      buckets.delete(key);
+    },
+  };
+}
+
 const loginFailHitsByDb = new WeakMap<Db, LoginFailBuckets>();
+const loginFailByIp = createFailThrottle(LOGIN_FAIL_WINDOW_MS, LOGIN_FAIL_IP_MAX);
+let globalLoginFails: number[] = [];
 
 function loginFailBuckets(db: Db): LoginFailBuckets {
   let buckets = loginFailHitsByDb.get(db);
@@ -74,6 +138,20 @@ function pruneLoginFailHits(buckets: LoginFailBuckets, now: number): void {
   }
 }
 
+function globalLoginAllowed(): boolean {
+  const now = Date.now();
+  const win = now - LOGIN_FAIL_WINDOW_MS;
+  globalLoginFails = globalLoginFails.filter((t) => t > win);
+  return globalLoginFails.length < LOGIN_FAIL_GLOBAL_MAX;
+}
+
+function recordGlobalLoginFailure(): void {
+  const now = Date.now();
+  const win = now - LOGIN_FAIL_WINDOW_MS;
+  globalLoginFails = globalLoginFails.filter((t) => t > win);
+  globalLoginFails.push(now);
+}
+
 /** True if `key` (lowercased username) is still under the tenant's failed-attempt cap. */
 function loginAllowed(db: Db, key: string): boolean {
   const now = Date.now();
@@ -83,19 +161,30 @@ function loginAllowed(db: Db, key: string): boolean {
   return hits.length < LOGIN_FAIL_MAX;
 }
 
+/** Username + IP + global budgets must all allow the attempt. */
+function loginAttemptAllowed(db: Db, usernameKey: string, ip: string): boolean {
+  if (!globalLoginAllowed()) return false;
+  if (!loginAllowed(db, usernameKey)) return false;
+  if (ip !== 'unknown' && !loginFailByIp.allowed(ip)) return false;
+  return true;
+}
+
 /** Record a failed basic-auth attempt against `key` (lowercased username) in one tenant. */
-function recordLoginFailure(db: Db, key: string): void {
+function recordLoginFailure(db: Db, key: string, ip = 'unknown'): void {
   const now = Date.now();
   const buckets = loginFailBuckets(db);
   pruneLoginFailHits(buckets, now);
   const hits = buckets.get(key) ?? [];
   hits.push(now);
   buckets.set(key, hits);
+  recordGlobalLoginFailure();
+  if (ip !== 'unknown') loginFailByIp.record(ip);
 }
 
 /** Clear failure history for `key` on successful auth in one tenant. */
-function clearLoginFailures(db: Db, key: string): void {
+function clearLoginFailures(db: Db, key: string, ip = 'unknown'): void {
   loginFailHitsByDb.get(db)?.delete(key);
+  if (ip !== 'unknown') loginFailByIp.clear(ip);
 }
 
 export function hashPassword(password: string): string {
@@ -167,6 +256,7 @@ export function ensureServerTables(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_hash ON sessions(token_hash);
   `);
+  ensureMfaTables(db);
   // Additive: horizontal accuracy (metres) for the latest GPS fix, when HA reports
   // it. Idempotent ALTER for DBs created before this column existed.
   const gpsCols = db.all<{ name: string }>(`PRAGMA table_info(gps_history)`);
@@ -247,6 +337,15 @@ function validateSession(db: Db, secret: string): { userId: string } | null {
 /** Revoke a session by its plaintext token (logout). No-op if unknown. */
 export function revokeSession(db: Db, secret: string): void {
   db.run('DELETE FROM sessions WHERE token_hash = ?', [sha256Hex(secret)]);
+}
+
+/** Revoke every session for a user (sign out everywhere). Returns count deleted. */
+export function revokeAllSessions(db: Db, userId: string): number {
+  const n =
+    db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?`, [userId])?.n ??
+    0;
+  db.run(`DELETE FROM sessions WHERE user_id = ?`, [userId]);
+  return n;
 }
 
 // ----- API tokens (for HA / integrations / Hermes) --------------------------
@@ -596,15 +695,29 @@ export function bootstrapUsers(db: Db, env: string | undefined): void {
 }
 
 /**
- * Basic-auth against the DB. If there are no users at all, run open (single-user
- * first run) as a synthetic local admin. Sets userId/username/role on the context.
+ * Auth against the DB. Open mode (no users → synthetic `local` admin) is opt-in
+ * via `allowOpen` / `ALLOW_OPEN_MODE=1` — default deny. Humans authenticate via
+ * session (or Basic on allowlisted paths like `/login`); integrations use scoped
+ * API tokens; MFA challenge bearers (`mfac_…`) authenticate only the challenge
+ * endpoints.
  */
 export function basicAuth(
   db: Db,
-  allowOpen = true,
+  allowOpenOrOpts: boolean | BasicAuthOptions = false,
 ): MiddlewareHandler<{ Variables: AuthVars }> {
+  const opts: BasicAuthOptions =
+    typeof allowOpenOrOpts === 'boolean'
+      ? { allowOpen: allowOpenOrOpts, basicPaths: ['/login'] }
+      : {
+          allowOpen: allowOpenOrOpts.allowOpen ?? false,
+          basicPaths:
+            allowOpenOrOpts.basicPaths === undefined ? ['/login'] : allowOpenOrOpts.basicPaths,
+        };
+  const allowBasicEverywhere = opts.basicPaths === null;
+  const basicPathSet = new Set(opts.basicPaths ?? []);
+
   return async (c, next) => {
-    if (allowOpen && userCount(db) === 0) {
+    if (opts.allowOpen && userCount(db) === 0) {
       c.set('userId', 'local');
       c.set('username', 'local');
       c.set('role', 'admin');
@@ -613,11 +726,35 @@ export function basicAuth(
       return next();
     }
     const header = c.req.header('Authorization');
+    // Hono may expose `/login` or `/api/login` depending on mount; match either.
+    const path = c.req.path;
+    const basicAllowed =
+      allowBasicEverywhere ||
+      [...basicPathSet].some((p) => path === p || path.endsWith(p));
 
-    // Bearer token. A session token is a full human identity (sign-in from a
-    // browser/device); an api_token is a scoped integration. Try session first.
+    // Bearer token. Session = full human identity; api_token = scoped integration;
+    // mfac_ = short-lived MFA challenge (enroll / login verify only).
     if (header?.startsWith('Bearer ')) {
       const secret = header.slice(7).trim();
+      if (secret.startsWith('mfac_')) {
+        // Challenge tokens are only valid on /mfa/* — never sync/admin/etc.
+        if (!path.includes('/mfa/')) {
+          return c.json({ error: 'invalid token' }, 401);
+        }
+        const challenge = validateMfaChallenge(db, secret);
+        const user = challenge ? getUser(db, challenge.userId) : undefined;
+        if (challenge && user) {
+          c.set('userId', user.id);
+          c.set('username', user.username);
+          c.set('role', user.role);
+          c.set('scopes', []);
+          c.set('authMethod', 'mfa_challenge');
+          c.set('mfaChallengeId', challenge.id);
+          c.set('mfaChallengePurpose', challenge.purpose);
+          return next();
+        }
+        return c.json({ error: 'invalid challenge' }, 401);
+      }
       const session = validateSession(db, secret);
       const sessionUser = session ? getUser(db, session.userId) : undefined;
       if (session && sessionUser) {
@@ -641,17 +778,22 @@ export function basicAuth(
       return c.json({ error: 'invalid token' }, 401);
     }
 
-    // Basic auth (human users). Full scopes.
+    // Basic auth — password exchange for login / MFA start only. Reject elsewhere
+    // so a password alone cannot reach sync/admin APIs and bypass 2FA.
     const creds = decodeBasic(header);
     if (creds) {
+      if (!basicAllowed) {
+        return c.json({ error: 'session required' }, 401);
+      }
       const loginKey = creds.username.toLowerCase();
-      if (!loginAllowed(db, loginKey)) {
+      const ip = stampedClientIp(c);
+      if (!loginAttemptAllowed(db, loginKey, ip)) {
         return c.json({ error: 'too many attempts, try later' }, 429);
       }
       const user = getUserByUsername(db, creds.username);
       const hash = user ? getPasswordHash(db, user.id) : undefined;
       if (user && hash && verifyPassword(hash, creds.password)) {
-        clearLoginFailures(db, loginKey);
+        clearLoginFailures(db, loginKey, ip);
         c.set('userId', user.id);
         c.set('username', user.username);
         c.set('role', user.role);
@@ -664,7 +806,7 @@ export function basicAuth(
       // password against the same username-derived key (A9 continued) so the
       // throttle map itself can't be used to probe which usernames exist.
       if (!user) verifyPassword(DUMMY_HASH, creds.password);
-      recordLoginFailure(db, loginKey);
+      recordLoginFailure(db, loginKey, ip);
     }
     // Note: deliberately NO WWW-Authenticate header — that would make the browser
     // pop its native Basic-auth login dialog. Carbon handles sign-in in-app.
@@ -672,17 +814,37 @@ export function basicAuth(
   };
 }
 
-/** Admin guard — humans only (tokens never get admin powers). */
+/** Admin guard — humans only (tokens / MFA challenges never get admin powers). */
 export const requireAdmin: MiddlewareHandler<{ Variables: AuthVars }> = async (c, next) => {
-  if (c.get('authMethod') === 'token' || c.get('role') !== 'admin') {
+  const method = c.get('authMethod');
+  if (method === 'token' || method === 'mfa_challenge' || c.get('role') !== 'admin') {
     return c.json({ error: 'forbidden' }, 403);
   }
   return next();
 };
 
-/** Scope guard — human (basic/open) sessions pass; tokens must hold the scope. */
+/** Require a completed human session (not Basic, challenge, or API token). */
+export const requireSession: MiddlewareHandler<{ Variables: AuthVars }> = async (c, next) => {
+  if (c.get('authMethod') !== 'session' && c.get('authMethod') !== 'open') {
+    return c.json({ error: 'session required' }, 401);
+  }
+  return next();
+};
+
+/** Require a valid MFA challenge bearer. */
+export const requireMfaChallenge: MiddlewareHandler<{ Variables: AuthVars }> = async (c, next) => {
+  if (c.get('authMethod') !== 'mfa_challenge') {
+    return c.json({ error: 'challenge required' }, 401);
+  }
+  return next();
+};
+
+/** Scope guard — session/open/basic pass; tokens must hold the scope; challenges never. */
 export function requireScope(scope: Scope): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
+    if (c.get('authMethod') === 'mfa_challenge') {
+      return c.json({ error: 'forbidden' }, 403);
+    }
     if (c.get('authMethod') !== 'token') return next();
     const scopes = c.get('scopes') ?? [];
     if (scopes.includes(scope)) return next();

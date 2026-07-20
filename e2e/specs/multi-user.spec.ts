@@ -13,11 +13,11 @@ test.describe('Tier 7 — multi-user sharing', () => {
   test('task shared with a second user syncs both ways', async ({ page, browser }) => {
     test.setTimeout(180_000);
     const { username, password } = e2eCredentials();
-    const { basic } = await login(serverUrl(), username, password);
+    const { token: adminToken } = await login(serverUrl(), username, password);
     const bob = `bob${Date.now()}`;
     const bobPass = 'bob-pass';
     // Bob must exist before alice's first sync so he lands in her roster.
-    await createUser(basic, bob, bobPass);
+    await createUser(adminToken, bob, bobPass);
 
     await signInWithApi(page, serverUrl(), username, password);
     await gotoFlushed(page, '/all');
@@ -65,10 +65,10 @@ test.describe('Tier 7 — multi-user sharing', () => {
   test('assigning a user auto-shares the task', async ({ page, browser }) => {
     test.setTimeout(180_000);
     const { username, password } = e2eCredentials();
-    const { basic } = await login(serverUrl(), username, password);
+    const { token: adminToken } = await login(serverUrl(), username, password);
     const bob = `bob${Date.now()}`;
     const bobPass = 'bob-pass';
-    await createUser(basic, bob, bobPass);
+    await createUser(adminToken, bob, bobPass);
 
     await signInWithApi(page, serverUrl(), username, password);
     await gotoFlushed(page, '/all');

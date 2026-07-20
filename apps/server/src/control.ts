@@ -1,10 +1,20 @@
 import { randomUUID, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { type Db, createUser, getUserByUsername } from '@carbon/core';
 import { openDb } from './sqlite';
-import { hashPassword, verifyPassword, setPassword, sha256Hex } from './auth';
+import {
+  hashPassword,
+  verifyPassword,
+  setPassword,
+  sha256Hex,
+  createFailThrottle,
+  LOGIN_FAIL_WINDOW_MS,
+  LOGIN_FAIL_MAX,
+  LOGIN_FAIL_IP_MAX,
+} from './auth';
+import { setVerifiedEmail } from './mfa';
 import { initTenantDb, RESERVED_SUBDOMAINS, type TenantLocation } from './tenant';
 import { setNlSettings } from './agents';
 import { getHostLmConfig, HOST_LM_AGENT_ID } from './host-lm';
@@ -193,21 +203,45 @@ function decodeBasic(header: string | undefined): { username: string; password: 
   }
 }
 
+// Host-admin Basic-auth brute-force throttle (same window/caps as tenant login).
+const hostAdminFailByUser = createFailThrottle(LOGIN_FAIL_WINDOW_MS, LOGIN_FAIL_MAX);
+const hostAdminFailByIp = createFailThrottle(LOGIN_FAIL_WINDOW_MS, LOGIN_FAIL_IP_MAX);
+
+export interface HostAdminAuthOptions {
+  /** Resolve client IP for per-IP lockout (from trusted clientIp helper). */
+  clientIp?: (c: Context) => string;
+}
+
 /** Basic-auth guard for /host/* admin routes against the host_admins table. */
-export function hostAdminAuth(db: Db): MiddlewareHandler<{ Variables: HostVars }> {
+export function hostAdminAuth(
+  db: Db,
+  opts: HostAdminAuthOptions = {},
+): MiddlewareHandler<{ Variables: HostVars }> {
   return async (c, next) => {
     const creds = decodeBasic(c.req.header('Authorization'));
     if (creds) {
+      const userKey = creds.username.toLowerCase();
+      const ip = opts.clientIp?.(c) ?? 'unknown';
+      if (
+        !hostAdminFailByUser.allowed(userKey) ||
+        (ip !== 'unknown' && !hostAdminFailByIp.allowed(ip))
+      ) {
+        return c.json({ error: 'too many attempts, try later' }, 429);
+      }
       const row = db.get<{ password_hash: string }>(
         'SELECT password_hash FROM host_admins WHERE username = ?',
         [creds.username],
       );
       if (row && verifyPassword(row.password_hash, creds.password)) {
+        hostAdminFailByUser.clear(userKey);
+        if (ip !== 'unknown') hostAdminFailByIp.clear(ip);
         c.set('hostAdmin', creds.username);
         return next();
       }
       // Constant-ish work on a missing admin so timing doesn't leak valid usernames.
       if (!row) verifyPassword(DUMMY_HOST_HASH, creds.password);
+      hostAdminFailByUser.record(userKey);
+      if (ip !== 'unknown') hostAdminFailByIp.record(ip);
     }
     return c.json({ error: 'unauthorized' }, 401);
   };
@@ -426,6 +460,15 @@ export function provisionTenant(db: Db, tenantsDir: string, input: ProvisionInpu
       role: 'admin',
     });
     setPassword(ctx.db, user.id, passwordHash);
+    // Signup OTC already proved this address — count it as the email MFA factor so
+    // the admin only needs a new-device challenge (or can add TOTP as backup).
+    if (input.adminEmail) {
+      try {
+        setVerifiedEmail(ctx.db, user.id, input.adminEmail);
+      } catch {
+        /* invalid email at provision time — skip; admin can enroll later */
+      }
+    }
     // Pre-enable NL commands with the host-shared model when the host operator opted new
     // accounts into that by default.
     if (hostLmAvailable && hostLmCfg?.enabledByDefault) {
@@ -534,10 +577,12 @@ export function verifyPendingSignup(
     'SELECT * FROM pending_signups WHERE email = ? ORDER BY created_at DESC LIMIT 1',
     [email.trim().toLowerCase()],
   );
-  if (!row) return { ok: false, error: 'code expired or not found' };
+  // Stable error for every failure mode so callers can't probe whether a pending
+  // signup exists for an email (or whether the code expired vs was wrong).
+  if (!row) return { ok: false, error: 'invalid_code' };
   if (Date.now() > Date.parse(row.expires_at)) {
     db.run('DELETE FROM pending_signups WHERE id = ?', [row.id]);
-    return { ok: false, error: 'code expired or not found' };
+    return { ok: false, error: 'invalid_code' };
   }
   const expected = Buffer.from(row.code_hash, 'hex');
   const actual = Buffer.from(sha256Hex(String(code ?? '')), 'hex');
@@ -549,7 +594,7 @@ export function verifyPendingSignup(
     } else {
       db.run('UPDATE pending_signups SET attempts = ? WHERE id = ?', [attempts, row.id]);
     }
-    return { ok: false, error: 'invalid code' };
+    return { ok: false, error: 'invalid_code' };
   }
   return { ok: true, pending: row };
 }
@@ -623,10 +668,10 @@ export function verifyPendingDelete(
   code: string,
 ): { ok: true; token: string } | { ok: false; error: string } {
   const row = db.get<PendingDeleteRow>('SELECT * FROM pending_deletes WHERE tenant_id = ?', [tenantId]);
-  if (!row) return { ok: false, error: 'code expired or not found' };
+  if (!row) return { ok: false, error: 'invalid_code' };
   if (Date.now() > Date.parse(row.expires_at)) {
     db.run('DELETE FROM pending_deletes WHERE id = ?', [row.id]);
-    return { ok: false, error: 'code expired or not found' };
+    return { ok: false, error: 'invalid_code' };
   }
   const expected = Buffer.from(row.code_hash, 'hex');
   const actual = Buffer.from(sha256Hex(String(code ?? '')), 'hex');
@@ -635,7 +680,7 @@ export function verifyPendingDelete(
     const attempts = row.attempts + 1;
     if (attempts >= OTC_MAX_ATTEMPTS) db.run('DELETE FROM pending_deletes WHERE id = ?', [row.id]);
     else db.run('UPDATE pending_deletes SET attempts = ? WHERE id = ?', [attempts, row.id]);
-    return { ok: false, error: 'invalid code' };
+    return { ok: false, error: 'invalid_code' };
   }
   const token = `carbondel_${randomBytes(24).toString('hex')}`;
   const tokenExpiry = new Date(Date.now() + DELETE_TOKEN_TTL_MIN * 60_000).toISOString();

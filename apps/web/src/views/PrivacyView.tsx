@@ -24,7 +24,7 @@ export function PrivacyView() {
             Privacy Policy
           </h1>
           <p className="text-text-faint">
-            App: Carbon (<code>com.emmertex.carbon</code>) · Last updated 30 June 2026
+            App: Carbon (<code>com.emmertex.carbon</code>) · Last updated 17 July 2026
           </p>
         </header>
 
@@ -39,9 +39,10 @@ export function PrivacyView() {
 
         <Section title="What we collect">
           <p>
-            <strong className="text-text">Nothing.</strong> The developer runs no
-            analytics, advertising, or tracking in the app. We do not see your
-            tasks, notes, files, or usage.
+            <strong className="text-text">Nothing beyond what's described below.</strong>{" "}
+            The developer runs no analytics, advertising, or tracking in the app. We do
+            not see your tasks, notes, files, or usage unless you choose a Carbon-hosted
+            sync server (see below).
           </p>
         </Section>
 

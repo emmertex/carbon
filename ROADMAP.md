@@ -6,7 +6,10 @@ UX first, then the multi-user foundation, then circle back for the remaining UX.
 sync protocol never needs a retrofit.
 
 All phases below have shipped; see [`docs/features.md`](docs/features.md) for the full,
-up-to-date feature inventory.
+up-to-date feature inventory. Notable additions after the original Phase A–F plan include
+first-class **Notes**, deep **time-tracking** editing (merge/split/segments, time notes),
+opt-in **GPS tracks** on sessions, sync recovery (reset local / merge-replace / erase on
+sign-out), and **federation** L2/L3 (off by default).
 
 ## Phases
 

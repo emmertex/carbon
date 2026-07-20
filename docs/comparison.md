@@ -33,7 +33,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | **End-to-end / zero-knowledge sync** | ✗ (TLS in transit; trusted sync server model; deliberate trade-off for server-side integrations and sharing)            | ✗                                              | ✓ **zero-knowledge** encrypted                         | ✗                           |
 | Data export                          | **Full local export/import** of entire DB + attachment blobs; **copy any project/task subtree as a Markdown checklist** | JSON/CSV, Sync API                             | Backups, TaskPaper, archive                            | Limited / none              |
 | Account required                     | None (local-only) or account on a sync server                                                                           | Todoist account                                | Omni account for sync                                  | Microsoft account mandatory |
-| Clients                              | Web/PWA **installable**, Win, **Linux**, Android (macOS and iOS planned)                                                | Web, Win, Mac, iOS, Android, watch, extensions | Mac, iPad, iPhone, Watch, web — **no Android/Windows** | Win, Mac, web, iOS, Android |
+| Clients                              | Web/PWA **installable**, Win, **Linux**, **macOS**, Android (iOS planned)                                           | Web, Win, Mac, iOS, Android, watch, extensions | Mac, iPad, iPhone, Watch, web — **no Android/Windows** | Win, Mac, web, iOS, Android |
 
 ## 2. Task structure & hierarchy
 
@@ -97,13 +97,14 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 
 ## 6. Notes, comments, attachments
 
-| Specific                | Carbon                                  | Todoist          | OmniFocus   | MS To Do               |
-| ----------------------- | --------------------------------------- | ---------------- | ----------- | ---------------------- |
-| Task notes              | ✓ **Markdown**                          | ✓ **Markdown**   | ✓ rich text | ✓ plain                |
-| Comments thread         | ✓ Markdown + `@mentions`                | ✓ (Pro for more) | ✗           | ✗                      |
-| Attachments on tasks    | ✓ Unlimited local (<25MB per file sync) | ✓ (Pro larger)   | ✓           | ✓ via OneDrive (≤25MB) |
-| Attachments on comments | ✓ (incl. inline images)                 | ✓                | ✗           | ✗                      |
-| Markdown rendering      | ✓ (GFM)                                 | Partial          | ✗           | ✗                      |
+| Specific                | Carbon                                                                  | Todoist          | OmniFocus   | MS To Do               |
+| ----------------------- | ----------------------------------------------------------------------- | ---------------- | ----------- | ---------------------- |
+| Task notes              | ✓ **Markdown**                                                          | ✓ **Markdown**   | ✓ rich text | ✓ plain                |
+| **First-class notes**   | ✓ dedicated `note` items, TipTap editor, **convert task ↔ note**, zip export | ✗ (tasks only) | ✗           | ✗                      |
+| Comments thread         | ✓ Markdown + `@mentions`                                                | ✓ (Pro for more) | ✗           | ✗                      |
+| Attachments on tasks    | ✓ Unlimited local (<25MB per file sync)                                 | ✓ (Pro larger)   | ✓           | ✓ via OneDrive (≤25MB) |
+| Attachments on comments | ✓ (incl. inline images)                                                 | ✓                | ✗           | ✗                      |
+| Markdown rendering      | ✓ (GFM)                                                                 | Partial          | ✗           | ✗                      |
 
 ## 7. Reminders & location
 
@@ -117,19 +118,20 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 
 ## 8. Time tracking & review
 
-| Specific                               | Carbon                                                                                                                                      | Todoist | OmniFocus          | MS To Do |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------ | -------- |
-| Built-in **time tracking** (timers)    | ✓ **project sessions + task segments + pauses**, per-user, with a Time-Tracked view (list/timeline), retroactive editing, and CSV reporting | ✗       | ✗ (estimates only) | ✗        |
-| **Estimated duration**                 | ✓                                                                                                                                           | ✗       | ✓                  | ✗        |
-| **Review mode** (per-project interval) | ✓                                                                                                                                           | ✗       | ✓                  | ✗        |
-| Productivity stats / karma             | ✗ (not in current build)                                                                                                                    | ✓ Karma | ✗                  | ✗        |
+| Specific                               | Carbon                                                                                                                                                                                              | Todoist | OmniFocus          | MS To Do |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------ | -------- |
+| Built-in **time tracking** (timers)    | ✓ **project sessions + task segments + pauses**, per-user; Time view (list/timeline/chart); **merge/split/segment edit**; **time notes**; CSV reporting                                              | ✗       | ✗ (estimates only) | ✗        |
+| **GPS tracks on sessions**             | ✓ opt-in; background on Android via foreground service; track blob + summary on a time note                                                                                                         | ✗       | ✗                  | ✗        |
+| **Estimated duration**                 | ✓                                                                                                                                                                                                   | ✗       | ✓                  | ✗        |
+| **Review mode** (per-project interval) | ✓                                                                                                                                                                                                   | ✗       | ✓                  | ✗        |
+| Productivity stats / karma             | ✗ (not in current build)                                                                                                                                                                            | ✓ Karma | ✗                  | ✗        |
 
 ## 9. Capture & input
 
 | Specific                      | Carbon                                                                 | Todoist                         | OmniFocus     | MS To Do          |
 | ----------------------------- | ---------------------------------------------------------------------- | ------------------------------- | ------------- | ----------------- |
 | Quick-add inline tokens       | ✓ `#tag` `@user` `!priority` w/ autocomplete; full NLP via sync server | ✓ **full NLP**                  | ✓ (dates)     | Basic             |
-| Natural-language **commands** | ✓ LLM-backed command flow (sync server)                                | ✓ "AI Assistant" (Pro, limited) | ✗             | ✗                 |
+| Natural-language **commands** | ✓ LLM-backed: add/complete/delete/rename/tag/schedule/share, list & due queries (sync server) | ✓ "AI Assistant" (Pro, limited) | ✗             | ✗                 |
 | Natural-language **dates**    | ✓ via LLM command flow (sync server)                                   | ✓                               | ✓             | ✓ partial         |
 | Email-to-task                 | ✗ (not in current build)                                               | ✓                               | ✓ (Mail drop) | ✓ (flagged email) |
 
@@ -176,7 +178,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific                                  | Carbon                                                     | Todoist                       | OmniFocus                           | MS To Do                 |
 | ----------------------------------------- | ---------------------------------------------------------- | ----------------------------- | ----------------------------------- | ------------------------ |
 | Track record / maturity                   | Newer, actively developed, **Fully OSS**                   | Established, large team       | **Mature, GTD Gold Standard**       | Microsoft-backed         |
-| Native apps                               | Web, PWA, **Linux**, Win, Android (macOS and iOS planned)  | ✓ Web, Win, Mac, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
+| Native apps                               | Web, PWA, **Linux**, Win, **macOS**, Android (iOS planned) | ✓ Web, Win, Mac, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
 | Apple Watch / wearable                    | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
 | Home-screen **widgets**                   | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
 | **Gemini / Siri / Shortcuts / voice**     | ✗ (not in current build)                                   | ✓                             | ✓ deep                              | ✓ (Cortana/Copilot)      |
@@ -201,7 +203,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 
 | Specific           | Carbon                                | Todoist                            | OmniFocus                  | MS To Do  |
 | ------------------ | ------------------------------------- | ---------------------------------- | -------------------------- | --------- |
-| Cost               | **Free / self-hosted / paid-hosting** | Free + Pro + Business              | Paid (one-time/sub)        | **Free**  |
+| Cost               | **Free / self-hosted**; optional hosted sync priced for **cost recovery** (not a premium tier) | Free + Pro + Business              | Paid (one-time/sub)        | **Free**  |
 | Paywalled features | **None**                              | Reminders/filters/comments/uploads | Custom perspectives, Focus | **None**  |
 | Vendor lock-in     | **None**, Fully OSS, Markdown Export  | Cloud                              | Omni ecosystem             | Microsoft |
 
@@ -240,9 +242,12 @@ Carbon's strongest differentiators, based on what is implemented in this reposit
 
 - **Ownership-first architecture:** offline-first local database, self-hostable sync, full export/import, open source.
 - **GTD-heavy model without lock-in:** deep hierarchy, defer + due + reminders, recurrence, review workflows, dependencies.
-- **Built-in execution tooling:** time tracking, estimates, daily planning budget, and review surfaces in one product.
+- **Built-in execution tooling:** deep time tracking (merge/split/segment edit, time notes,
+  optional GPS tracks), estimates, daily planning budget, and review surfaces in one product.
 - **Unusually strong time-accountability story:** true task-level tracking designed for practical
   timesheet and invoicing workflows, not just personal pomodoro-style timers.
+- **First-class notes:** dedicated note items alongside tasks, convertible either way, with
+  rich Markdown editing and zip export.
 - **Automation-first integration posture:** scoped REST API, `/api/agent/*`, Telegram bot path, Home Assistant, CalDAV.
 - **Configurable complexity:** Simple/Standard/Advanced presets plus per-feature/per-device visibility.
 - **Security stance is explicit, not accidental:** Carbon favors a trusted self-host/server model

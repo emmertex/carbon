@@ -21,6 +21,7 @@ export async function adminCreateUser(input: {
   password: string;
   displayName?: string;
   role?: 'admin' | 'member';
+  email?: string;
 }): Promise<void> {
   const res = await fetch(url('/api/admin/users'), {
     method: 'POST',
@@ -40,7 +41,12 @@ export async function adminCreateUser(input: {
 
 export async function adminUpdateUser(
   id: string,
-  patch: { role?: 'admin' | 'member'; password?: string; displayName?: string },
+  patch: {
+    role?: 'admin' | 'member';
+    password?: string;
+    displayName?: string;
+    email?: string | null;
+  },
 ): Promise<void> {
   const res = await fetch(url(`/api/admin/users/${id}`), {
     method: 'PATCH',
@@ -48,6 +54,32 @@ export async function adminUpdateUser(
     body: JSON.stringify(patch),
   });
   if (!res.ok) throw new Error(await errMsg(res, 'update failed'));
+}
+
+/** One-use recovery code for a locked-out user (shown once). */
+export async function adminIssueRecoveryCode(id: string): Promise<string> {
+  const res = await fetch(url(`/api/admin/users/${id}/recovery-code`), {
+    method: 'POST',
+    headers: authHeaders(getServerConfig()),
+  });
+  if (!res.ok) throw new Error(await errMsg(res, 'could not issue recovery code'));
+  return ((await res.json()) as { code: string }).code;
+}
+
+export async function adminResetMfa(id: string): Promise<void> {
+  const res = await fetch(url(`/api/admin/users/${id}/reset-mfa`), {
+    method: 'POST',
+    headers: authHeaders(getServerConfig()),
+  });
+  if (!res.ok) throw new Error(await errMsg(res, 'reset mfa failed'));
+}
+
+export async function adminResetTrust(id: string): Promise<void> {
+  const res = await fetch(url(`/api/admin/users/${id}/reset-trust`), {
+    method: 'POST',
+    headers: authHeaders(getServerConfig()),
+  });
+  if (!res.ok) throw new Error(await errMsg(res, 'reset trust failed'));
 }
 
 export async function adminDeleteUser(id: string): Promise<void> {

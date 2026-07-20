@@ -31,13 +31,17 @@ works fully offline, local-only, with no account.
 - **Copy any task/project subtree as a Markdown checklist** for pasting into chats or notes.
 - Multi-device task sync **(sync server)**, with monotonic cursors and authorization-scoped
   backfill.
+- **Sync recovery** — live sync errors in Settings → Sync; **Reset local data** (wipe this
+  device and re-download); **Merge** or **Replace** when signing in over existing local data;
+  keep or **erase** local data on sign-out.
 - **Settings & view sync (sync server)** — UI preferences, per-view filters and saved
   perspectives follow you across devices (LWW, scoped to your account); on by default, pulled
   on first sign-in, and toggleable per device.
 
 ## Task structure & hierarchy
 
-- Projects, tasks and folders — and **any item can act as a container** (unlimited nesting).
+- Projects, tasks, folders and **notes** — and **any item can act as a container**
+  (unlimited nesting).
 - Sequential / parallel / single-action container types with a **"next action" availability**
   model.
 - Drag to reorder and drag to re-nest (change parent).
@@ -93,7 +97,8 @@ works fully offline, local-only, with no account.
 - The **task detail pane adapts** to your choices — sections default expanded/collapsed to
   match (Location with Nearby, Dependencies + defer-until with GTD Tools, Time tracking when
   enabled), with **Record time** always at the top. Presentation only; nothing is disabled.
-- Appearance: light/dark mode, multiple themes, accent colors.
+- Appearance: light/dark mode, themes (**Light** / **Dark**, **ePaper**, **Gruvbox**, **Ayu**,
+  **Nord**, **Catppuccin** — each with light and dark variants where applicable), and accent colors.
 - Gestures & mobile: swipe-left action, pane gestures, right-edge action, count scope,
   per-row icon visibility.
 
@@ -112,12 +117,21 @@ works fully offline, local-only, with no account.
 - **Multiple assignees** per task; auto-share on assign.
 - Per-user read/write permissions.
 - "Shared with me" surface.
+- **Federation** (off by default) — share a project subtree with another workspace on the
+  same host (L2) or a different Carbon server (L3). See [federation](federation.md).
 
 ## Notes, comments & attachments
 
-- **Markdown** task notes (GFM).
+- **First-class notes** (`type: note`) — dedicated items nestable like tasks, designed for
+  writing rather than doing. They skip auto-complete when a parent task is completed, stay
+  out of Today/CalDAV action surfaces, and convert either way (**task ↔ note**) without
+  losing data.
+- Rich note editor (TipTap) with Markdown, inline images, autosave and conflict handling;
+  **zip export** of all notes (Markdown + images) from Data backup.
+- **Markdown** notes on tasks too (GFM).
 - Comment threads with `@mentions` and inline images.
 - Attachments on tasks and comments (local unlimited; ≤25 MB per file across sync).
+- Optional per-item **`metadata`** JSON (API + sync; readable in the side panel when set).
 
 ## Reminders & location
 
@@ -130,8 +144,16 @@ works fully offline, local-only, with no account.
 
 ## Time tracking & review
 
-- Built-in time tracking: per-user project sessions + task segments + pauses, retroactive
-  editing, and CSV reporting via the **Time** view.
+- Built-in time tracking: per-user project sessions + task segments + pauses, CSV reporting
+  via the **Time** view (List / Timeline / Chart).
+- **Retroactive editing** — merge accidental restart gaps, merge with a previous block,
+  trim or split untracked gaps, edit segment start/length (numeric fields or drag handles),
+  remove segments, and add a task into any gap.
+- **Time notes** — pin a timestamped note from the timer bar (or agent API) into the active
+  block; deleting offers *from block only* or *delete note*.
+- Opt-in **GPS tracks** while a timer runs (Settings → Reminders & location): denoised point
+  stream attached as a JSON blob on a time note. **Android** continues in the background via
+  a foreground-service notification; web/desktop record while the app is open.
 - Estimated duration per task, feeding the Plan budget.
 - Per-project review intervals.
 
@@ -139,8 +161,9 @@ works fully offline, local-only, with no account.
 
 - Quick-add bar with inline tokens: `#tag`, `@user`, `!priority`, with autocomplete.
 - **Natural-language commands (sync server)** — keyword-triggered in the add box, run as a
-  server-side LLM tool loop (add/complete/tag/schedule/share/assign/timers/geofence/nearby),
-  with per-command token tracking.
+  server-side LLM tool loop (add/complete/delete/rename/tag/schedule/share/assign/timers/
+  geofence/nearby, whole-list and whole-tag ops, due/overdue queries), with per-command
+  token tracking.
 - **Desktop quick-add** — global hotkey (`Ctrl/⌘+Shift+A`) + system-tray spotlight on Linux,
   Windows and macOS.
 

@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test --experimental-test-coverage \"src/**/*.test.ts\"",
     "add-user": "tsx scripts/add-user.ts",
+    "mfa-admin": "tsx scripts/mfa-admin.ts",
     "backup": "tsx scripts/backup-dbs.ts"
   },
   "dependencies": {
@@ -17,6 +18,7 @@
     "@hono/node-server": "^2.0.8",
     "hono": "^4.12.27",
     "nodemailer": "^9.0.3",
+    "otpauth": "^9.5.1",
     "undici": "^8.7.0",
     "web-push": "^3.6.7"
   },

@@ -11,8 +11,9 @@ server whenever it's reachable. No SaaS, no accounts you don't control.
 packages/core   Pure TypeScript: data model, SQL schema + migrations, the op-log CRDT
                 (per-field last-write-wins), and the repository/query API. Shared by web + server.
 apps/web        Vite + React PWA. SQLite (sql.js/WASM) in the browser, persisted to IndexedDB.
-                Installable, works offline.
-apps/server     Hono + better-sqlite3. Sync endpoint + (later) REST API. Serves the web build.
+                Installable, works offline. Also wrapped as Tauri desktop + Capacitor Android.
+apps/server     Hono + better-sqlite3. Sync endpoint, REST + agent APIs, CalDAV, push, bots.
+                Serves the web build.
 ```
 
 Both sides speak the same op-log: every change is an op carrying only the fields it touched
@@ -42,10 +43,19 @@ The container serves the web app and the API on port `3069`. Data lives in `./da
 Leave `AUTH_USERS` empty for an open, single-user LAN instance.
 
 Passwords set via the API/admin UI use salted scrypt; `AUTH_USERS` (`user:sha256hex`) still
-works for bootstrap. Optional env knobs: `BLOB_MAX_MB` (attachment size cap, default 25),
+works for bootstrap. Sync accounts require **2FA** (email and/or authenticator); new devices
+must verify once and then stay trusted until reset. If an admin is locked out:
+
+```bash
+npm run mfa-admin -w @carbon/server -- issue-session default alice
+npm run mfa-admin -w @carbon/server -- issue-recovery default alice
+npm run mfa-admin -w @carbon/server -- reset-mfa default alice
+```
+
+Optional env knobs: `BLOB_MAX_MB` (attachment size cap, default 25),
 `SIGNUP_GLOBAL_HOUR` (multi-tenant signup ceiling), and `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`
 (allow LAN/private agent endpoints when running multi-tenant — on by default for
-single-tenant self-host).
+single-tenant self-host). SMTP (`SMTP_*`) is used for email 2FA codes.
 
 Run the test suite with `npm test` (no extra deps — uses Node's built-in test runner).
 
@@ -122,7 +132,9 @@ Two kinds:
 
 ## Status
 
-Shipped: offline core (capture, projects, Today/Inbox/Flagged/Review, tags,
-due/defer/flag/priority, recurrence, drag-reorder, light/dark, sync), multi-user sync
-server, the token-scoped REST API, push reminders & location, AI agents, CalDAV, and a
-Telegram bot. See [`docs/features.md`](docs/features.md) for the full list.
+Shipped: offline core (capture, projects, notes, Today/Inbox/Flagged/Review, tags,
+due/defer/flag/priority, recurrence, drag-reorder, themes, sync), multi-user sync
+server with optional federation, deep time tracking (merge/split/segment edit, time notes,
+optional GPS tracks), the token-scoped REST + agent APIs, push reminders & location,
+AI agents / NL commands, CalDAV, Home Assistant, and a Telegram bot. See
+[`docs/features.md`](docs/features.md) for the full list.

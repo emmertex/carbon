@@ -236,7 +236,17 @@ export function authHeaders(cfg: ServerConfig): Record<string, string> {
 // ----- theme ----------------------------------------------------------------
 
 /** A concrete palette applied via `data-theme`. */
-export type Theme = 'light' | 'dark' | 'epaper' | 'gruvbox' | 'gruvboxlight' | 'ayu';
+export type Theme =
+  | 'light'
+  | 'dark'
+  | 'epaper'
+  | 'gruvbox'
+  | 'gruvboxlight'
+  | 'ayu'
+  | 'nord'
+  | 'nordlight'
+  | 'catppuccin'
+  | 'catppuccinlight';
 /** How the active palette is chosen. The light/dark *roles* are user-assignable. */
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type Accent =
@@ -260,11 +270,15 @@ export const LIGHT_THEMES: { id: Theme; label: string }[] = [
   { id: 'light', label: 'Light' },
   { id: 'epaper', label: 'ePaper' },
   { id: 'gruvboxlight', label: 'Gruvbox Light' },
+  { id: 'nordlight', label: 'Nord Light' },
+  { id: 'catppuccinlight', label: 'Catppuccin Light' },
 ];
 export const DARK_THEMES: { id: Theme; label: string }[] = [
   { id: 'dark', label: 'Dark' },
   { id: 'gruvbox', label: 'Gruvbox' },
   { id: 'ayu', label: 'Ayu Dark' },
+  { id: 'nord', label: 'Nord' },
+  { id: 'catppuccin', label: 'Catppuccin' },
 ];
 export const THEME_MODES: { id: ThemeMode; label: string }[] = [
   { id: 'system', label: 'System' },
@@ -285,9 +299,13 @@ export const ACCENTS: { id: Accent; color: string }[] = [
 ];
 
 const isLight = (t: string | null): t is Theme =>
-  t === 'light' || t === 'epaper' || t === 'gruvboxlight';
+  t === 'light' ||
+  t === 'epaper' ||
+  t === 'gruvboxlight' ||
+  t === 'nordlight' ||
+  t === 'catppuccinlight';
 const isDarkTheme = (t: string | null): t is Theme =>
-  t === 'dark' || t === 'gruvbox' || t === 'ayu';
+  t === 'dark' || t === 'gruvbox' || t === 'ayu' || t === 'nord' || t === 'catppuccin';
 
 export function getThemeMode(): ThemeMode {
   const m = localStorage.getItem(MODE_KEY);

@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname, resolve, join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
+import { bodyLimit } from 'hono/body-limit';
+import { clientIp, CARBON_REAL_IP_HEADER } from './client-ip';
 import {
   migrate,
   ensureDeviceId,
@@ -46,6 +48,8 @@ import {
   bootstrapUsers,
   basicAuth,
   requireAdmin,
+  requireSession as requireHumanSession,
+  requireMfaChallenge,
   requireScope,
   publicUser,
   setPassword,
@@ -55,6 +59,7 @@ import {
   revokeToken,
   createSession,
   revokeSession,
+  revokeAllSessions,
   getHaPerson,
   setHaPerson,
   resolveUserByHaPerson,
@@ -69,6 +74,33 @@ import {
   startGpsScheduler,
   type AuthVars,
 } from './auth';
+import {
+  getMfaStatus,
+  mfaReady,
+  isTrustedDevice,
+  trustDevice,
+  touchTrustedDevice,
+  listTrustedDevices,
+  revokeTrustedDevice,
+  revokeAllTrustedDevices,
+  createMfaChallenge,
+  sendMfaEmailCode,
+  MfaEmailSendLimitError,
+  verifyMfaEmailCode,
+  startTotpEnroll,
+  confirmTotpEnroll,
+  verifyTotpCode,
+  setUserEmail,
+  setVerifiedEmail,
+  isValidEmail,
+  issueRecoveryCodes,
+  consumeRecoveryCode,
+  countUnusedRecoveryCodes,
+  resetMfa,
+  consumeMfaChallenge,
+  bumpChallengeAttempts,
+  validateMfaChallenge,
+} from './mfa';
 import {
   saveSubscription,
   removeSubscription,
@@ -263,6 +295,28 @@ type Env = { Variables: AuthVars };
 // Max attachment blob size. Override with BLOB_MAX_MB. Default 25 MB.
 const MAX_BLOB_BYTES = Math.max(1, Number(process.env.BLOB_MAX_MB) || 25) * 1024 * 1024;
 
+// JSON/text body cap for public unauth surfaces (signup, webhooks, federation JSON).
+// Blobs keep MAX_BLOB_BYTES separately.
+const JSON_BODY_LIMIT = Math.max(64, Number(process.env.JSON_BODY_LIMIT_KB) || 1024) * 1024;
+const jsonBodyLimit = bodyLimit({
+  maxSize: JSON_BODY_LIMIT,
+  onError: (c) => c.json({ error: 'body too large' }, 413),
+});
+const blobBodyLimit = bodyLimit({
+  maxSize: MAX_BLOB_BYTES,
+  onError: (c) => c.json({ error: 'blob too large' }, 413),
+});
+
+/** Open mode (zero users → synthetic local admin) is opt-in; default deny. */
+const ALLOW_OPEN_MODE = process.env.ALLOW_OPEN_MODE === '1';
+
+function mfaEmailSendError(c: Context, e: unknown): Response | null {
+  if (e instanceof MfaEmailSendLimitError) {
+    return c.json({ error: e.code }, 429);
+  }
+  return null;
+}
+
 // Default per-workspace blob storage cap (override with BLOB_QUOTA_MB, default 500 MB).
 // Host admins can override it per workspace; a tenant's null column uses this default.
 const BLOB_QUOTA_DEFAULT_BYTES = Math.max(0, Number(process.env.BLOB_QUOTA_MB) || 500) * 1024 * 1024;
@@ -354,10 +408,15 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     ctx.id === 'default' ? true : !!getTenantById(controlDb, ctx.id)?.host_lm_available;
 
   const api = new Hono<Env>();
-  // In multi-tenant mode never fall back to open/no-auth: a provisioned tenant
-  // always has an admin, and "open mode" if the last user were deleted would expose
-  // the whole workspace to anyone on the subdomain (A2).
-  api.use('*', basicAuth(db, !BASE_DOMAIN));
+  // Open mode is opt-in (ALLOW_OPEN_MODE=1) and never available under BASE_DOMAIN:
+  // a provisioned tenant always has an admin, and open mode if the last user were
+  // deleted would expose the whole workspace to anyone on the subdomain (A2).
+  // Basic auth is only accepted on /login — all other human access needs a session
+  // minted after MFA (or an API token for integrations).
+  api.use('*', basicAuth(db, {
+    allowOpen: !BASE_DOMAIN && ALLOW_OPEN_MODE,
+    basicPaths: ['/login'],
+  }));
 
   api.get('/me', (c) => {
     const id = c.get('userId');
@@ -375,30 +434,310 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
           plan_startup_min: null,
           plan_default_estimate_min: null,
         };
+    const mfa = id === 'local' ? null : getMfaStatus(db, id);
     return c.json({
       ...base,
       open: id === 'local', // server has no accounts → running open (no login)
       ha_person: id === 'local' ? null : getHaPerson(db, id),
       vapid: vapidPublicKey,
+      mfa,
     });
   });
 
-  // Exchange a password (sent once via Basic auth) for an opaque, revocable
-  // session token. The client stores the token instead of the password.
-  api.post('/login', (c) => {
+  /** Finish login: mint session + trust device. */
+  function completeLogin(
+    userId: string,
+    deviceId: string | undefined,
+    deviceName: string | undefined,
+  ): { token: string; user: ReturnType<typeof publicUser> } {
+    const user = getUser(db, userId)!;
+    if (deviceId) trustDevice(db, userId, deviceId, deviceName);
+    return { token: createSession(db, userId), user: publicUser(user) };
+  }
+
+  // Password (Basic) → session if device trusted / MFA ready path; else challenge.
+  api.post('/login', async (c) => {
     const method = c.get('authMethod');
     if (method === 'open') return c.json({ open: true });
     if (method !== 'basic') return c.json({ error: 'password auth required' }, 400);
     const id = c.get('userId');
-    const user = getUser(db, id);
-    if (!user) return c.json({ error: 'unauthorized' }, 401);
-    return c.json({ token: createSession(db, id), user: publicUser(user) });
+    if (!getUser(db, id)) return c.json({ error: 'unauthorized' }, 401);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      device_id?: string;
+      device_name?: string;
+    };
+    const deviceId = body.device_id?.trim() || '';
+    const deviceName = body.device_name?.trim() || undefined;
+
+    if (!mfaReady(db, id)) {
+      const challenge = createMfaChallenge(db, id, 'enroll');
+      // Omit profile until MFA/enroll finishes — password-OK alone must not disclose it.
+      return c.json({ status: 'needs_enrollment', challenge });
+    }
+    if (deviceId && isTrustedDevice(db, id, deviceId)) {
+      touchTrustedDevice(db, id, deviceId);
+      return c.json(completeLogin(id, deviceId, deviceName));
+    }
+    const challenge = createMfaChallenge(db, id, 'login');
+    const factors = getMfaStatus(db, id).factors;
+    return c.json({ status: 'needs_2fa', challenge, factors });
+  });
+
+  // ----- MFA: enroll (challenge bearer) ------------------------------------
+
+  api.post('/mfa/enroll/email/start', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'enroll') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string };
+    const email = body.email?.trim() || '';
+    if (!isValidEmail(email)) return c.json({ error: 'valid email required' }, 400);
+    const challengeId = c.get('mfaChallengeId')!;
+    try {
+      await sendMfaEmailCode(db, challengeId, email);
+    } catch (e) {
+      const limited = mfaEmailSendError(c, e);
+      if (limited) return limited;
+      console.error('[carbon] mfa email send failed:', e);
+      return c.json({ error: 'email_send_failed' }, 500);
+    }
+    return c.json({ ok: true });
+  });
+
+  api.post('/mfa/enroll/email/confirm', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'enroll') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+    if (!body.code) return c.json({ error: 'code required' }, 400);
+    const challengeId = c.get('mfaChallengeId')!;
+    const result = verifyMfaEmailCode(db, challengeId, body.code);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    setVerifiedEmail(db, c.get('userId'), result.email);
+    return c.json({ ok: true, mfa: getMfaStatus(db, c.get('userId')) });
+  });
+
+  api.post('/mfa/enroll/totp/start', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'enroll') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const username = c.get('username');
+    const label = ctx.subdomain ? `${username}@${ctx.subdomain}` : username;
+    const { secret, uri } = startTotpEnroll(db, c.get('userId'), label);
+    return c.json({ secret, uri });
+  });
+
+  api.post('/mfa/enroll/totp/confirm', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'enroll') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+    if (!body.code) return c.json({ error: 'code required' }, 400);
+    if (!confirmTotpEnroll(db, c.get('userId'), body.code)) {
+      return c.json({ error: 'bad_code' }, 400);
+    }
+    return c.json({ ok: true, mfa: getMfaStatus(db, c.get('userId')) });
+  });
+
+  api.post('/mfa/enroll/finish', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'enroll') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const userId = c.get('userId');
+    if (!mfaReady(db, userId)) {
+      return c.json({ error: 'enroll at least one factor' }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      device_id?: string;
+      device_name?: string;
+      issue_recovery_codes?: boolean;
+    };
+    const deviceId = body.device_id?.trim();
+    if (!deviceId) return c.json({ error: 'device_id required' }, 400);
+    consumeMfaChallenge(db, c.get('mfaChallengeId')!);
+    const result = completeLogin(userId, deviceId, body.device_name);
+    const recovery_codes =
+      body.issue_recovery_codes !== false ? issueRecoveryCodes(db, userId, 'self') : undefined;
+    return c.json({ ...result, recovery_codes });
+  });
+
+  // ----- MFA: login challenge ----------------------------------------------
+
+  api.post('/mfa/login/email/send', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'login') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const status = getMfaStatus(db, c.get('userId'));
+    if (!status.email_verified || !status.email) {
+      return c.json({ error: 'email not enrolled' }, 400);
+    }
+    try {
+      await sendMfaEmailCode(db, c.get('mfaChallengeId')!, status.email);
+    } catch (e) {
+      const limited = mfaEmailSendError(c, e);
+      if (limited) return limited;
+      console.error('[carbon] mfa login email send failed:', e);
+      return c.json({ error: 'email_send_failed' }, 500);
+    }
+    // Mask for the UI (show last domain-ish hint without full address).
+    const at = status.email.indexOf('@');
+    const hint =
+      at > 1
+        ? `${status.email[0]}•••${status.email.slice(at)}`
+        : '•••';
+    return c.json({ ok: true, email_hint: hint });
+  });
+
+  api.post('/mfa/login/verify', requireMfaChallenge, async (c) => {
+    if (c.get('mfaChallengePurpose') !== 'login') {
+      return c.json({ error: 'wrong challenge purpose' }, 400);
+    }
+    const userId = c.get('userId');
+    const challengeId = c.get('mfaChallengeId')!;
+    const body = (await c.req.json().catch(() => ({}))) as {
+      device_id?: string;
+      device_name?: string;
+      totp?: string;
+      email_code?: string;
+      recovery_code?: string;
+    };
+    const deviceId = body.device_id?.trim();
+    if (!deviceId) return c.json({ error: 'device_id required' }, 400);
+
+    let ok = false;
+    if (body.totp) {
+      ok = verifyTotpCode(db, userId, body.totp);
+    } else if (body.email_code) {
+      const result = verifyMfaEmailCode(db, challengeId, body.email_code);
+      ok = result.ok;
+    } else if (body.recovery_code) {
+      ok = consumeRecoveryCode(db, userId, body.recovery_code);
+    } else {
+      return c.json({ error: 'totp, email_code, or recovery_code required' }, 400);
+    }
+    if (!ok) {
+      bumpChallengeAttempts(db, challengeId);
+      return c.json({ error: 'bad_code' }, 400);
+    }
+    consumeMfaChallenge(db, challengeId);
+    return c.json(completeLogin(userId, deviceId, body.device_name));
+  });
+
+  // ----- MFA: session-authenticated settings --------------------------------
+
+  api.get('/mfa/status', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ open: true });
+    return c.json({
+      ...getMfaStatus(db, id),
+      recovery_codes_remaining: countUnusedRecoveryCodes(db, id),
+      devices: listTrustedDevices(db, id),
+    });
+  });
+
+  api.get('/mfa/devices', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ devices: [] });
+    return c.json({ devices: listTrustedDevices(db, id) });
+  });
+
+  api.delete('/mfa/devices/:deviceId', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const deviceId = decodeURIComponent(c.req.param('deviceId'));
+    if (!revokeTrustedDevice(db, id, deviceId)) return c.json({ error: 'not found' }, 404);
+    return c.json({ ok: true });
+  });
+
+  api.post('/mfa/devices/reset', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const n = revokeAllTrustedDevices(db, id);
+    return c.json({ ok: true, revoked: n });
+  });
+
+  api.post('/mfa/recovery-codes', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    if (!mfaReady(db, id)) return c.json({ error: 'enroll mfa first' }, 400);
+    const codes = issueRecoveryCodes(db, id, 'self');
+    return c.json({ codes });
+  });
+
+  // Add a second factor while already signed in (session).
+  api.post('/mfa/settings/email/start', requireHumanSession, async (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string };
+    if (!isValidEmail(body.email ?? '')) return c.json({ error: 'valid email required' }, 400);
+    const challenge = createMfaChallenge(db, id, 'enroll');
+    const ch = validateMfaChallenge(db, challenge)!;
+    try {
+      await sendMfaEmailCode(db, ch.id, body.email!);
+    } catch (e) {
+      const limited = mfaEmailSendError(c, e);
+      if (limited) return limited;
+      console.error('[carbon] mfa settings email send failed:', e);
+      return c.json({ error: 'email_send_failed' }, 500);
+    }
+    return c.json({ challenge });
+  });
+
+  api.post('/mfa/settings/email/confirm', requireHumanSession, async (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { challenge?: string; code?: string };
+    if (!body.challenge || !body.code) return c.json({ error: 'challenge and code required' }, 400);
+    const ch = validateMfaChallenge(db, body.challenge);
+    if (!ch || ch.userId !== id || ch.purpose !== 'enroll') {
+      return c.json({ error: 'invalid challenge' }, 400);
+    }
+    const result = verifyMfaEmailCode(db, ch.id, body.code);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    setVerifiedEmail(db, id, result.email);
+    consumeMfaChallenge(db, ch.id);
+    return c.json({ ok: true, mfa: getMfaStatus(db, id) });
+  });
+
+  api.post('/mfa/settings/totp/start', requireHumanSession, (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const username = c.get('username');
+    const label = ctx.subdomain ? `${username}@${ctx.subdomain}` : username;
+    return c.json(startTotpEnroll(db, id, label));
+  });
+
+  api.post('/mfa/settings/totp/confirm', requireHumanSession, async (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+    if (!body.code) return c.json({ error: 'code required' }, 400);
+    if (!confirmTotpEnroll(db, id, body.code)) return c.json({ error: 'bad_code' }, 400);
+    return c.json({ ok: true, mfa: getMfaStatus(db, id) });
+  });
+
+  api.post('/mfa/sessions/revoke-all', requireHumanSession, async (c) => {
+    const id = c.get('userId');
+    if (id === 'local') return c.json({ error: 'no account' }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      device_id?: string;
+      device_name?: string;
+    };
+    revokeAllSessions(db, id);
+    revokeAllTrustedDevices(db, id);
+    const deviceId = body.device_id?.trim();
+    if (deviceId) trustDevice(db, id, deviceId, body.device_name);
+    const token = createSession(db, id);
+    return c.json({ ok: true, token });
   });
 
   // Revoke the current session token (sign out). Idempotent.
   api.post('/logout', (c) => {
     const header = c.req.header('Authorization');
-    if (header?.startsWith('Bearer ')) revokeSession(db, header.slice(7).trim());
+    if (header?.startsWith('Bearer ')) {
+      const secret = header.slice(7).trim();
+      if (!secret.startsWith('mfac_')) revokeSession(db, secret);
+    }
     return c.json({ ok: true });
   });
 
@@ -441,6 +780,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       displayName?: string;
       role?: UserRole;
       isBot?: boolean;
+      email?: string | null;
     };
     if (!body.username || !body.password) {
       return c.json({ error: 'username and password required' }, 400);
@@ -460,6 +800,9 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
         }
       }
     }
+    if (body.email && !isValidEmail(body.email)) {
+      return c.json({ error: 'invalid email' }, 400);
+    }
     const user = createUser(db, {
       username: body.username,
       displayName: body.displayName ?? body.username,
@@ -467,7 +810,8 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       isBot,
     });
     setPassword(db, user.id, hashPassword(body.password));
-    return c.json(publicUser(user), 201);
+    if (body.email) setUserEmail(db, user.id, body.email);
+    return c.json({ ...publicUser(user), email: body.email ?? null, mfa: getMfaStatus(db, user.id) }, 201);
   });
 
   api.patch('/admin/users/:id', requireAdmin, async (c) => {
@@ -478,6 +822,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       role?: UserRole;
       password?: string;
       ha_person?: string | null;
+      email?: string | null;
     };
     updateUser(db, id, {
       ...(body.displayName !== undefined ? { display_name: body.displayName } : {}),
@@ -488,7 +833,46 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     // per-user PATCH /api/me only sets the caller's own mapping). This lets one
     // admin token wire up household members' geofence/GPS reminders.
     if ('ha_person' in body) setHaPerson(db, id, body.ha_person ?? null);
-    return c.json({ ...publicUser(getUser(db, id)!), ha_person: getHaPerson(db, id) });
+    if ('email' in body) {
+      try {
+        setUserEmail(db, id, body.email ?? null);
+      } catch {
+        return c.json({ error: 'invalid email' }, 400);
+      }
+    }
+    const mfa = getMfaStatus(db, id);
+    return c.json({
+      ...publicUser(getUser(db, id)!),
+      ha_person: getHaPerson(db, id),
+      email: mfa.email,
+      mfa,
+    });
+  });
+
+  /** Issue a single one-use recovery code for a locked-out user (shown once). */
+  api.post('/admin/users/:id/recovery-code', requireAdmin, (c) => {
+    const id = c.req.param('id');
+    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+    const codes = issueRecoveryCodes(db, id, 'admin');
+    return c.json({ code: codes[0] });
+  });
+
+  /** Clear MFA + trusts so the user must re-enroll on next login. */
+  api.post('/admin/users/:id/reset-mfa', requireAdmin, (c) => {
+    const id = c.req.param('id');
+    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+    resetMfa(db, id);
+    revokeAllSessions(db, id);
+    return c.json({ ok: true });
+  });
+
+  /** Revoke device trust only (user keeps enrolled factors). */
+  api.post('/admin/users/:id/reset-trust', requireAdmin, (c) => {
+    const id = c.req.param('id');
+    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+    const n = revokeAllTrustedDevices(db, id);
+    revokeAllSessions(db, id);
+    return c.json({ ok: true, revoked: n });
   });
 
   api.delete('/admin/users/:id', requireAdmin, (c) => {
@@ -1692,10 +2076,15 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       resolveFederationMode(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
     deliverToPeer,
     blobStore,
-    sessionAuth: basicAuth(db, !BASE_DOMAIN),
+    sessionAuth: basicAuth(db, { allowOpen: !BASE_DOMAIN && ALLOW_OPEN_MODE }),
   });
 
   const tenantApp = new Hono<Env>();
+  // Public federation surfaces: JSON capped small; blob transfer keeps MAX_BLOB_BYTES.
+  tenantApp.use('/api/federation/*', async (c, next) => {
+    if (c.req.path.includes('/blob')) return blobBodyLimit(c, next);
+    return jsonBodyLimit(c, next);
+  });
   tenantApp.route('/api', api);
   tenantApp.route('/api/federation', fedApi);
   // Catch-all for anything a tenant handler throws without its own try/catch: log the
@@ -1865,6 +2254,17 @@ console.log(
   `[carbon] default db=${DB_PATH} users=${listUsers(defaultCtx.db).length} ` +
     `tenants=${listTenants(controlDb).length} base=${BASE_DOMAIN ?? '(single-tenant)'}`,
 );
+if (!BASE_DOMAIN && ALLOW_OPEN_MODE && listUsers(defaultCtx.db).length === 0) {
+  console.warn(
+    '[carbon] WARNING: ALLOW_OPEN_MODE=1 and no users — the API is unauthenticated. ' +
+      'Unset ALLOW_OPEN_MODE (or create an account) before exposing this host.',
+  );
+} else if (!BASE_DOMAIN && !ALLOW_OPEN_MODE && listUsers(defaultCtx.db).length === 0) {
+  console.warn(
+    '[carbon] no users and open mode disabled (default). Create an account with ' +
+      '`npm run add-user`, or set ALLOW_OPEN_MODE=1 only for a private LAN box.',
+  );
+}
 
 // BILL-4: with no Square config, billingProvider() falls back to 'simulate', where a
 // workspace admin can self-grant paid periods via /billing/simulate. That's intended for
@@ -1894,9 +2294,9 @@ app.onError((err, c) => {
   return c.json({ error: 'internal_error' }, 500);
 });
 
-// CORS: defaults to wildcard (auth is via the Authorization header, not cookies,
-// so there is no CSRF surface). Set CORS_ORIGINS to a comma-separated allowlist to
-// lock it down — native shells send these origins:
+// CORS: defaults to wildcard for local/dev (auth is via the Authorization header, not
+// cookies, so there is no CSRF surface). On a hosted multi-tenant deploy set
+// CORS_ORIGINS to a comma-separated allowlist — native shells send these origins:
 //   Tauri  → tauri://localhost (Linux/macOS), http://tauri.localhost (Windows)
 //   Capacitor Android → https://localhost
 //   dev → http://localhost:3042
@@ -1904,6 +2304,12 @@ const corsOrigins = (process.env.CORS_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+if (BASE_DOMAIN && !corsOrigins.length) {
+  console.warn(
+    '[carbon] WARNING: BASE_DOMAIN is set but CORS_ORIGINS is empty — CORS defaults to *. ' +
+      'Set CORS_ORIGINS to your apex / native-shell origins in production.',
+  );
+}
 const corsMw = cors({ origin: corsOrigins.length ? corsOrigins : '*' });
 app.use('/api/*', corsMw);
 app.use('/host/*', corsMw);
@@ -1911,10 +2317,10 @@ app.use('/host/*', corsMw);
 // Health is host-level; also used by the web client to (a) auto-discover its sync
 // server from window.location.origin and (b) learn whether this host is the apex
 // (landing page), a real tenant workspace, or an unknown subdomain.
+// Tradeoff: `locked` (+ `expiresAt` only while locked) stay unauthenticated so the SPA
+// can show RenewGate before sign-in. Unlocked workspaces do not disclose expiry.
 app.get('/api/health', (c) => {
   let role: 'single' | 'apex' | 'app' | 'tenant' | 'unknown' = 'single';
-  // Lock/expiry are surfaced (unauthenticated) so the SPA can render a renew gate for a
-  // locked workspace. Only these two fields are exposed here — never subscription/email.
   let locked = false;
   let expiresAt: string | null = null;
   if (BASE_DOMAIN) {
@@ -1928,8 +2334,8 @@ app.get('/api/health', (c) => {
       role = resolveTenantLocation(controlDb, label) ? 'tenant' : 'unknown';
       if (role === 'tenant') {
         const rec = getTenantBySubdomain(controlDb, label);
-        if (rec) {
-          locked = tenantLockState(rec) === 'locked';
+        if (rec && tenantLockState(rec) === 'locked') {
+          locked = true;
           expiresAt = rec.expires_at;
         }
       }
@@ -1943,7 +2349,8 @@ app.get('/api/health', (c) => {
     appHost: BASE_DOMAIN ? APP_HOST : null,
     role,
     locked,
-    expiresAt,
+    // Only when locked — avoids leaking subscription end dates on healthy workspaces.
+    ...(locked ? { expiresAt } : {}),
   });
 });
 
@@ -1952,10 +2359,10 @@ app.get('/api/health', (c) => {
 const tenantUrl = (subdomain: string) =>
   BASE_DOMAIN ? `https://${subdomain}.${BASE_DOMAIN}` : `(set BASE_DOMAIN) /${subdomain}`;
 
-// In-memory signup rate limit. Per-IP keys on clientIp() (the last, proxy-appended
-// X-Forwarded-For hop — the only non-spoofable one); the global cap is the backstop if
-// a caller still manages to vary their apparent IP. Stale buckets are pruned each call
-// so the map can't grow without bound (A6).
+// In-memory signup rate limit. Per-IP keys on clientIp() (TCP peer, or last XFF hop
+// only when TRUST_PROXY=1); the global cap is the backstop if a caller still manages
+// to vary their apparent IP. Stale buckets are pruned each call so the map can't grow
+// without bound (A6).
 const signupHits = new Map<string, number[]>();
 let globalSignups: number[] = [];
 const SIGNUP_PER_IP_HOUR = 5;
@@ -2011,18 +2418,8 @@ function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boole
   return true;
 }
 
-// Client IP for per-IP rate limits. X-Forwarded-For is a client-controllable list —
-// a caller can prepend arbitrary hops — so the FIRST hop is spoofable. Only the LAST
-// hop is trustworthy: it's the peer address our own nginx reverse proxy appends. Use
-// that (fallback 'unknown' when the header is absent). (A?/API-2)
-function clientIp(c: Context): string {
-  const xff = c.req.header('x-forwarded-for');
-  if (!xff) return 'unknown';
-  const hops = xff.split(',');
-  return hops[hops.length - 1].trim() || 'unknown';
-}
-
 const host = new Hono<{ Variables: HostVars }>();
+host.use('*', jsonBodyLimit);
 
 // ----- Square webhooks (public, HMAC-verified) ------------------------------
 // One global endpoint for all tenants; the tenant is resolved from the subscription
@@ -2283,7 +2680,7 @@ host.post('/delete/verify', async (c) => {
     return c.json({ error: 'workspace, email and code required' }, 400);
   }
   const rec = deletableTenant(b.workspace, b.email);
-  if (!rec) return c.json({ error: 'invalid code' }, 400);
+  if (!rec) return c.json({ error: 'invalid_code' }, 400);
   const result = verifyPendingDelete(controlDb, rec.id, String(b.code));
   if (!result.ok) return c.json({ error: result.error }, 400);
   return c.json({ token: result.token });
@@ -2319,8 +2716,8 @@ host.post('/delete/confirm', async (c) => {
   return c.json({ ok: true });
 });
 
-host.use('/tenants', hostAdminAuth(controlDb));
-host.use('/tenants/*', hostAdminAuth(controlDb));
+host.use('/tenants', hostAdminAuth(controlDb, { clientIp }));
+host.use('/tenants/*', hostAdminAuth(controlDb, { clientIp }));
 
 host.get('/tenants', (c) =>
   c.json({
@@ -2447,12 +2844,25 @@ app.route('/host', host);
 
 // ----- Telegram webhook (per-server, outside tenant dispatch) ----------------
 // Telegram POSTs updates here. The bot maps the chat → (workspace, user) via the control DB,
-// so this is a single server-level endpoint, not per-subdomain. Verify the secret token header
-// (only Telegram knows it) and always answer 200 fast — work happens in the handler.
+// so this is a single server-level endpoint, not per-subdomain. When the bot/webhook is
+// enabled the secret is mandatory (fail closed) and compared with timingSafeEqual.
+app.use('/telegram/webhook', jsonBodyLimit);
 app.post('/telegram/webhook', async (c) => {
+  const webhookEnabled = !!(TELEGRAM_BOT_TOKEN && TELEGRAM_WEBHOOK_URL);
+  if (webhookEnabled && !TELEGRAM_WEBHOOK_SECRET) {
+    console.error('[carbon] telegram webhook rejected: TELEGRAM_WEBHOOK_SECRET unset');
+    return c.json({ error: 'forbidden' }, 403);
+  }
   if (TELEGRAM_WEBHOOK_SECRET) {
-    const got = c.req.header('x-telegram-bot-api-secret-token');
-    if (got !== TELEGRAM_WEBHOOK_SECRET) return c.json({ error: 'forbidden' }, 403);
+    const got = c.req.header('x-telegram-bot-api-secret-token') ?? '';
+    const expected = Buffer.from(TELEGRAM_WEBHOOK_SECRET);
+    const actual = Buffer.from(got);
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+      return c.json({ error: 'forbidden' }, 403);
+    }
+  } else if (TELEGRAM_BOT_TOKEN) {
+    // Token set but no webhook URL/secret — do not accept unauthenticated posts.
+    return c.json({ error: 'forbidden' }, 403);
   }
   if (!telegramBot) return c.json({ ok: true }); // bot disabled / not ready yet — Telegram retries
   const update = await c.req.json().catch(() => null);
@@ -2483,7 +2893,10 @@ app.all('/api/*', async (c) => {
   }
   const tApp = registry.getApp(subdomain);
   if (!tApp) return c.json({ error: 'unknown workspace' }, 404);
-  return tApp.fetch(c.req.raw);
+  // Stamp a trusted client IP for tenant-side rate limits (overwrite any client value).
+  const headers = new Headers(c.req.raw.headers);
+  headers.set(CARBON_REAL_IP_HEADER, clientIp(c));
+  return tApp.fetch(new Request(c.req.raw, { headers }));
 });
 
 // ----- static SPA -----------------------------------------------------------

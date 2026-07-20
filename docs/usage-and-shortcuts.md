@@ -27,18 +27,33 @@ submits the task.
 When an admin has configured an LLM agent (**Settings → AI agents**) and enabled NL
 commands (**Settings → Natural-language commands**), the quick-add bar doubles as a
 command box. Start a line with a configured
-keyword (e.g. `add`) and write plainly:
+keyword (e.g. `add`, `remind`) and write plainly:
 
 - `add milk and eggs to shopping` → creates both tasks in the *shopping* list.
 - `remind me to get milk at Coles` → adds the task, tags it `coles`, and geofences the tag
   to the **nearest Coles** to your current location (no coordinates needed).
-- `tick off milk and bread` → marks those tasks done.
+- `I got the milk` / `tick off milk and bread` → marks those tasks done (past tense works).
+- `delete the milk task` → removes it (rather than faking completion).
+- `rename milk to oat milk` → renames in place.
+- `tick everything off my shopping list` / `untick my weekly items` → whole-list / whole-tag
+  complete or reopen.
+- `what's due tomorrow in work?` / `what's overdue?` → lists matching dated items.
 - `tag everything in shopping urgent` → bulk-tags the whole list.
 
 The server fuzzy-matches names to lists/tags/tasks, runs the agent's tool-loop in-process,
 and replies with exactly what changed. Token usage per command is tracked under
 **Settings → Natural-language commands**. The same capability is available to external bots
 (Telegram, Hermes, scripts) over the [agent API](carbon-agent-api.md).
+
+### Notes
+
+Notes are a first-class item type (alongside tasks and projects):
+
+- Create a note from the quick-add bar (note mode) or convert an existing **task ↔ note**
+  from the detail pane — conversion keeps title, body, tags and nesting.
+- Notes use a rich Markdown editor with inline images; they don't auto-complete when a
+  parent task is done, and they stay out of Today / CalDAV action surfaces.
+- **Data backup → Export notes (zip)** dumps every note as Markdown plus images.
 
 ### Desktop quick-add
 
@@ -148,6 +163,10 @@ Configured in **Settings → Gestures & mobile**:
 - **Plan** — today's planning surface: pull tasks in, see a time **budget** (startup minutes
   + per-task estimates) vs the day.
 - **Time** — logged time: List / Timeline / Chart, grouped by project or day with subtotals.
+  Expand a block to merge with the previous block, trim or split untracked gaps, edit
+  segment start/length (fields or drag handles), remove a segment, or add a task into a gap.
+  While tracking, the timer bar can add a **time note** or show a satellite indicator when
+  **Record GPS while time-tracking** is on (Settings → Reminders & location).
 - **Tags** — browse by tag/context.
 - **Focus mode** — the eye toggle beside the flag drills into a task as a container (only it
   + descendants) with a breadcrumb bar; exit returns you to where you were. Works from any
@@ -210,20 +229,30 @@ perspectives — **sync across your devices** (see below). Turn this off per dev
 
 ## Settings tour (quick map)
 
-Appearance (mode/theme/accent) · **Features & UI complexity** (presets + per-feature, per-device
-toggles + settings sync) · Gestures & mobile · Planning budget / Profile (signed in) · Sync server
-(URL + sign-in) · Subscription (admin) · Data backup (full export/import, purge completed tasks) ·
-Reminders & location (push / foreground geofence) · This device (location sources) ·
-Home Assistant (person link) · API tokens (admin) · AI agents (admin, incl. token usage) ·
-Natural-language commands (admin, incl. token usage) · Users (admin) · About (version) ·
-Install app (browser only; links to the app stores).
+Appearance (mode/theme/accent — including Nord and Catppuccin) · **Features & UI complexity**
+(presets + per-feature, per-device toggles + settings sync) · Gestures & mobile · Planning budget /
+Profile (signed in) · Sync server (URL + sign-in, live sync state, **Reset local data**) ·
+Subscription (admin) · Data backup (full export/import, purge completed tasks, notes zip export) ·
+Reminders & location (push / foreground geofence / **Record GPS while time-tracking**) · This
+device (location sources) · Home Assistant (person link) · API tokens (admin) · AI agents (admin,
+incl. token usage) · Natural-language commands (admin, incl. token usage) · Users (admin) · About
+(version) · Install app (browser only; links to the app stores).
 
 ## Offline & sync
 
 Carbon is **offline-first** — the whole database lives in your browser and every change is
 applied locally first, then synced when a server is reachable. You can use it with **no
 server** at all (local-only). To sync across devices, point it at a Carbon server in
-**Settings → Sync server** and sign in. The sync indicator shows idle/syncing/error state.
+**Settings → Sync server** and sign in. The Sync panel shows live state, the last successful
+sync, and any error message (not just the cloud-icon tooltip).
+
+**Recovery options:**
+
+- **Reset local data** — erase this device's database and re-download from the server (when the
+  local copy is corrupt or missing projects).
+- **Sign-in Merge vs Replace** — if the device already has local tasks, choose Merge (combine
+  with the account) or Replace (discard local and pull fresh).
+- **Sign-out** — keep the local copy for offline use, or erase it on shared devices.
 
 Alongside your tasks, Carbon also syncs your **UI settings, saved views, per-view filters and
 perspectives** (last-writer-wins, scoped to your account). It's on by default and pulled when

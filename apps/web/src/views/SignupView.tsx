@@ -90,8 +90,10 @@ export function SignupView() {
             {done.url}
           </a>
           <p className="mb-4 text-sm text-text-muted">
-            Sign in there with <strong>{username}</strong> and the password you chose. You have a
-            30-day trial to explore everything.
+            Sign in there with <strong>{username}</strong> and the password you chose. The first
+            30 days are included free while we have the spare resources — cancel anytime.
+            After that, renewing only helps cover the cost of running this host. Carbon stays
+            free to self-host with no paywalled features.
           </p>
           <a
             href={done.url}
@@ -151,7 +153,9 @@ export function SignupView() {
       <h1 className="mb-1 text-xl font-semibold">Create a Carbon workspace</h1>
       <p className="mb-6 text-sm text-text-muted">
         A private, synced space for you and your team. You'll be the admin and can invite others
-        afterwards. Starts with a 30-day trial.
+        afterwards. We're including 30 days free while we have the spare resources — cancel
+        anytime. After that, a small contribution helps cover hosting (same full app either way;
+        nothing is paywalled).
       </p>
       <form onSubmit={startSignup} className="space-y-4">
         <label className="block">

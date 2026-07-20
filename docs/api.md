@@ -17,17 +17,32 @@ recipes see [`home-assistant.md`](home-assistant.md).
 
 ## Authentication
 
-Two mechanisms, both on every `/api/*` route:
+| Method             | Header                                     | Who                | Scopes             |
+| ------------------ | ------------------------------------------ | ------------------ | ------------------ |
+| **Session Bearer** | `Authorization: Bearer carbons_xxx`        | signed-in humans   | all scopes         |
+| **API token**      | `Authorization: Bearer carbon_xxx`         | integrations, bots | the token's scopes |
+| **Basic auth**     | `Authorization: Basic base64(user:pass)`   | **`POST /api/login` only** | starts MFA / session |
 
-| Method           | Header                                   | Who                | Scopes             |
-| ---------------- | ---------------------------------------- | ------------------ | ------------------ |
-| **Bearer token** | `Authorization: Bearer carbon_xxx`       | integrations, bots | the token's scopes |
-| **Basic auth**   | `Authorization: Basic base64(user:pass)` | human users        | all scopes         |
+Human API access uses a **session token** minted after password + 2FA (or a trusted
+device). Basic auth is **not** accepted on sync/admin/task routes — that would bypass
+2FA. Create integration tokens in **Settings → API tokens** (admin only). A token
+**acts as its owning user** and is limited to its scopes.
 
-Create tokens in **Settings → API tokens** (admin only). A token **acts as its owning
-user** and is limited to its scopes. If the server has no accounts it runs in **open mode**
-(synthetic `local` admin, all scopes) — fine for a private LAN box, never for anything
-internet-facing.
+**Open mode** (zero users → synthetic `local` admin, no credentials) is **off by
+default**. Set `ALLOW_OPEN_MODE=1` only for a private LAN / first-run box — never on
+anything internet-facing. It is ignored when `BASE_DOMAIN` is set.
+
+### Sign-in + 2FA
+
+1. `POST /api/login` with Basic + JSON `{ device_id, device_name? }`.
+2. Response is one of:
+   - `{ token, user }` — device already trusted (or open mode `{ open: true }` when enabled)
+   - `{ status: "needs_enrollment", challenge }` — set up email and/or authenticator
+   - `{ status: "needs_2fa", challenge, factors }` — verify with TOTP, email OTC, or recovery code
+     (`factors` are booleans only; the profile is omitted until MFA completes)
+3. Challenge endpoints under `/api/mfa/*` use `Authorization: Bearer mfac_…`.
+4. Successful enroll/verify returns a `carbons_…` session and trusts `device_id` forever
+   until the user, a tenant admin, or `npm run mfa-admin` resets trust.
 
 ### Scopes
 
@@ -36,10 +51,11 @@ internet-facing.
 - `inbox:write` — create new tasks (drop into inbox). The narrowest useful scope for a
   one-way "capture" integration like an HA automation.
 
-Admin-only routes (`/api/admin/*`) reject tokens entirely — they require basic auth by a
-tenant `admin` user (`requireAdmin`). `/host/tenants/*` is separate: it's the host operator's
-control plane, gated by its own `host_admins` basic-auth table, not a tenant admin account.
-`/host/signup/*` and `/host/delete/*` are public (rate-limited, email + one-time code).
+Admin-only routes (`/api/admin/*`) reject API tokens — they require a human **session**
+from a tenant `admin` (`requireAdmin`). `/host/tenants/*` is separate: it's the host
+operator's control plane, gated by its own `host_admins` basic-auth table, not a tenant
+admin account. `/host/signup/*` and `/host/delete/*` are public (rate-limited, email +
+one-time code).
 
 ## Task endpoints
 
@@ -165,8 +181,10 @@ if omitted, the token's owning user is used. See [`home-assistant.md`](home-assi
 
 ## Health & host role
 
-`GET /api/health` returns `{ status, version, role, locked, expiresAt, ... }` where `role` ∈
+`GET /api/health` returns `{ status, version, role, locked, ... }` where `role` ∈
 `single | apex | app | tenant | unknown` (drives multi-tenant client routing). No auth.
+`expiresAt` is included **only when `locked` is true** (SPA RenewGate); unlocked workspaces
+do not disclose subscription end dates.
 
 ## Admin & host-control (basic auth, admin only)
 
@@ -188,5 +206,8 @@ if omitted, the token's owning user is used. See [`home-assistant.md`](home-assi
   read/write items shared with them per the CRDT. Keep `tasks:write` tokens off untrusted
   automations, and prefer the narrowest scope an integration needs (`inbox:write` for
   capture-only).
+- **CORS** defaults to `*` (local/dev). On a hosted `BASE_DOMAIN` deploy set `CORS_ORIGINS`
+  to your apex and native-shell origins. Behind a reverse proxy set `TRUST_PROXY=1` so
+  per-IP rate limits use the address the proxy appends, not a client-spoofable XFF chain.
 - For how tenant data is isolated, encrypted in transit, and kept on-device in local-only
   mode, see [`data-security.md`](data-security.md).

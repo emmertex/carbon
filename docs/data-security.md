@@ -70,13 +70,25 @@ server is carried over **TLS / HTTPS**.
 - A hosted workspace **requires sign-in**. Unauthenticated requests to a workspace are
   rejected and redirected to the sign-in gate.
 - **Your password is never stored on your device.** When you sign in, your username and
-  password are exchanged **once** for an opaque, server-issued **session token**. The client
-  stores only that token; the password is never written to local storage.
+  password are exchanged **once** (then completed with 2FA when required) for an opaque,
+  server-issued **session token**. The client stores only that token; the password is never
+  written to local storage.
+- **Two-factor authentication is mandatory** for sync accounts (not local-only; open mode is
+  opt-in via `ALLOW_OPEN_MODE=1` and disabled by default). Users enroll an **email** one-time
+  code and/or an **authenticator app** (TOTP, with QR + manual secret). Either factor unlocks
+  a **new device**; they are backups of each other, not stacked. One-use recovery codes cover
+  lockout.
+- **Trusted devices are remembered indefinitely** after a successful 2FA (or enrollment) on
+  that device. Trust can be reset by the user (Settings → Security), a workspace admin, or
+  the server console (`npm run mfa-admin`). Every new device must pass 2FA again.
+- **Password alone cannot call the API.** Basic auth is limited to `POST /api/login`; sync
+  and admin routes require a session (or a scoped integration token).
 - **Sessions are revocable and expiring.** Session tokens are random, stored only as a hash on
   the server, slide forward on use, and expire after a period of inactivity. Signing out
   revokes the token immediately, server-side.
 - **Passwords are hashed.** Account passwords are stored using salted **scrypt** hashing — the
-  server never keeps your plaintext password.
+  server never keeps your plaintext password. TOTP secrets live in the server-only `user_auth`
+  table (same trust boundary as the database file).
 
 ### Authorization (who can see and do what)
 
@@ -122,9 +134,13 @@ server because nothing is on a server.
 Your data is yours, in a portable form, at all times.
 
 - **Full export.** **Settings → Data backup** exports your *entire* database plus all
-  attachment blobs as a single file — every task, note, comment, tag, and file.
+  attachment blobs as a single file — every task, note, comment, tag, and file. Notes can
+  also be exported as a Markdown + images zip.
 - **Full import / merge.** The same file can be imported back. Import is a non-destructive
   merge, so you can move between devices or servers without losing or duplicating data.
+- **Sync recovery.** **Reset local data** re-downloads from the server when a device copy is
+  corrupt; sign-in offers **Merge** or **Replace** over existing local data; sign-out can
+  **erase** the local copy on shared devices.
 - **No lock-in.** Self-hosting and local-only mode mean you are never dependent on a vendor to
   retain access to your own information.
 
@@ -273,8 +289,11 @@ If you run your own Carbon server:
 
 - [ ] Serve **only over HTTPS** (TLS at your reverse proxy) whenever it's reachable beyond
       `localhost`.
-- [ ] Require login — set up user accounts rather than running open mode on anything
-      internet-facing.
+- [ ] Require login — create user accounts (`npm run add-user`). Do **not** set
+      `ALLOW_OPEN_MODE=1` on anything internet-facing (open mode is off by default).
+- [ ] Behind a reverse proxy, set `TRUST_PROXY=1` so per-IP rate limits use the real client
+      address; set `CORS_ORIGINS` on hosted (`BASE_DOMAIN`) deploys instead of default `*`.
+- [ ] If using the Telegram bot webhook, set `TELEGRAM_WEBHOOK_SECRET` (required).
 - [ ] Give integrations the **narrowest token scope** they need (`inbox:write` for capture).
 - [ ] Keep `tasks:write` and admin tokens off automations you don't fully control.
 - [ ] Back up the database and attachment storage; protect those backups — see Section 8 for

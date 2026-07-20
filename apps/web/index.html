@@ -13,8 +13,24 @@
         try {
           var ls = localStorage;
           var legacy = ls.getItem('carbon.theme'); // pre-roles single-theme setups
-          var isLight = function (v) { return v === 'light' || v === 'epaper'; };
-          var isDark = function (v) { return v === 'dark' || v === 'gruvbox'; };
+          var isLight = function (v) {
+            return (
+              v === 'light' ||
+              v === 'epaper' ||
+              v === 'gruvboxlight' ||
+              v === 'nordlight' ||
+              v === 'catppuccinlight'
+            );
+          };
+          var isDark = function (v) {
+            return (
+              v === 'dark' ||
+              v === 'gruvbox' ||
+              v === 'ayu' ||
+              v === 'nord' ||
+              v === 'catppuccin'
+            );
+          };
           var mode = ls.getItem('carbon.themeMode');
           if (mode !== 'system' && mode !== 'light' && mode !== 'dark') {
             mode = isLight(legacy) ? 'light' : isDark(legacy) ? 'dark' : 'system';

@@ -1,11 +1,31 @@
+import { Secret, TOTP } from 'otpauth';
+
 const DEFAULT_BASE = 'http://localhost:3069';
+/** Stable device id so e2e logins stay trusted after the first MFA enrollment. */
+const E2E_DEVICE_ID = 'e2e-runner';
+/** TOTP secrets from enrollments in this process (for needs_2fa on a new device id). */
+const totpSecrets = new Map<string, string>();
 
 export interface LoginResult {
   token: string;
+  /** @deprecated Prefer `token` — Basic can no longer call admin/API routes. */
   basic: string;
   user: { id: string; username: string };
 }
 
+function totpNow(secretBase32: string): string {
+  return new TOTP({
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: Secret.fromBase32(secretBase32),
+  }).generate();
+}
+
+/**
+ * Password login with MFA: enrolls TOTP on first use, then trusts `e2e-runner`
+ * so later calls in the same workspace skip the challenge.
+ */
 export async function login(
   baseUrl = DEFAULT_BASE,
   username: string,
@@ -14,11 +34,84 @@ export async function login(
   const basic = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
   const res = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
-    headers: { Authorization: basic },
+    headers: { Authorization: basic, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: E2E_DEVICE_ID, device_name: 'E2E' }),
   });
   if (!res.ok) throw new Error(`login failed: ${res.status} ${await res.text()}`);
-  const body = (await res.json()) as { token: string; user: { id: string; username: string } };
-  return { token: body.token, basic, user: body.user };
+  const body = (await res.json()) as {
+    token?: string;
+    open?: boolean;
+    status?: string;
+    challenge?: string;
+    user?: { id: string; username: string };
+  };
+
+  if (body.open) {
+    throw new Error('login: server is in open mode (no users)');
+  }
+  if (body.token && body.user) {
+    return { token: body.token, basic, user: body.user };
+  }
+
+  if (body.status === 'needs_enrollment' && body.challenge) {
+    const start = await fetch(`${baseUrl}/api/mfa/enroll/totp/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${body.challenge}` },
+    });
+    if (!start.ok) throw new Error(`mfa enroll start failed: ${start.status}`);
+    const { secret } = (await start.json()) as { secret: string };
+    totpSecrets.set(username, secret);
+    const confirm = await fetch(`${baseUrl}/api/mfa/enroll/totp/confirm`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${body.challenge}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ code: totpNow(secret) }),
+    });
+    if (!confirm.ok) throw new Error(`mfa enroll confirm failed: ${confirm.status}`);
+    const finish = await fetch(`${baseUrl}/api/mfa/enroll/finish`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${body.challenge}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        device_id: E2E_DEVICE_ID,
+        device_name: 'E2E',
+        issue_recovery_codes: false,
+      }),
+    });
+    if (!finish.ok) throw new Error(`mfa enroll finish failed: ${finish.status}`);
+    const done = (await finish.json()) as { token: string; user: { id: string; username: string } };
+    return { token: done.token, basic, user: done.user };
+  }
+
+  if (body.status === 'needs_2fa' && body.challenge) {
+    const secret = totpSecrets.get(username);
+    if (!secret) {
+      throw new Error(
+        `login needs_2fa for ${username} but no TOTP secret in this process — re-run after enroll or reset MFA`,
+      );
+    }
+    const verify = await fetch(`${baseUrl}/api/mfa/login/verify`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${body.challenge}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        device_id: E2E_DEVICE_ID,
+        device_name: 'E2E',
+        totp: totpNow(secret),
+      }),
+    });
+    if (!verify.ok) throw new Error(`mfa verify failed: ${verify.status}`);
+    const done = (await verify.json()) as { token: string; user: { id: string; username: string } };
+    return { token: done.token, basic, user: done.user };
+  }
+
+  throw new Error(`login unexpected response: ${JSON.stringify(body)}`);
 }
 
 export async function health(baseUrl = DEFAULT_BASE): Promise<{ ok: boolean }> {
@@ -104,7 +197,7 @@ export async function agentLists(
 }
 
 export async function createUser(
-  basic: string,
+  sessionToken: string,
   username: string,
   password: string,
   role: 'member' | 'admin' = 'member',
@@ -113,7 +206,7 @@ export async function createUser(
   const res = await fetch(`${baseUrl}/api/admin/users`, {
     method: 'POST',
     headers: {
-      Authorization: basic,
+      Authorization: `Bearer ${sessionToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ username, password, role }),
@@ -123,7 +216,7 @@ export async function createUser(
 }
 
 export async function createApiToken(
-  basic: string,
+  sessionToken: string,
   name: string,
   scopes: string[],
   baseUrl = DEFAULT_BASE,
@@ -131,7 +224,7 @@ export async function createApiToken(
   const res = await fetch(`${baseUrl}/api/admin/tokens`, {
     method: 'POST',
     headers: {
-      Authorization: basic,
+      Authorization: `Bearer ${sessionToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ name, scopes }),

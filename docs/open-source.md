@@ -23,8 +23,12 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 - [Tailwind CSS](https://tailwindcss.com/) — utility-first styling.
 - [tailwind-merge](https://github.com/dcastil/tailwind-merge) — conflict-free Tailwind class merging.
 - [clsx](https://github.com/lukeed/clsx) — conditional className builder.
+- [TipTap](https://tiptap.dev/) (`@tiptap/core`, `@tiptap/react`, `@tiptap/starter-kit`,
+  `@tiptap/extension-image`, `@tiptap/extension-placeholder`, `@tiptap/pm`, `tiptap-markdown`) —
+  rich note editor.
 - [react-markdown](https://github.com/remarkjs/react-markdown) — Markdown rendering.
 - [remark-gfm](https://github.com/remarkjs/remark-gfm) — GitHub-flavored Markdown support.
+- [fflate](https://github.com/101arrowz/fflate) — zip export of notes.
 
 ### Interaction & data
 - [dnd kit](https://dndkit.com/) (`@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/modifiers`,
@@ -38,6 +42,8 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 - [Workbox](https://developer.chrome.com/docs/workbox) (`workbox-precaching`) — service-worker precaching.
 - [Capacitor](https://capacitorjs.com/) (`@capacitor/core`, `@capacitor/device`, `@capacitor/geolocation`,
   `@capacitor/local-notifications`, `@capacitor/push-notifications`) — native runtime for the mobile app.
+- [@capgo/background-geolocation](https://github.com/Cap-go/capacitor-background-geolocation) —
+  Android foreground-service GPS tracks while a timer runs.
 - [Tauri](https://tauri.app/) (`@tauri-apps/api`, `@tauri-apps/plugin-notification`,
   `@tauri-apps/plugin-process`, `@tauri-apps/plugin-updater`) — native runtime for the desktop app.
 
@@ -74,6 +80,8 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 - [Capacitor](https://capacitorjs.com/) (`@capacitor/android`, `@capacitor/core`,
   `@capacitor/cli`, `@capacitor/geolocation`, `@capacitor/local-notifications`,
   `@capacitor/push-notifications`) — Android app shell and native plugins.
+- [@capgo/background-geolocation](https://github.com/Cap-go/capacitor-background-geolocation) —
+  background GPS while time-tracking (foreground service).
 
 ## Repo-wide build & dev tooling
 

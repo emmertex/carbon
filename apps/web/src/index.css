@@ -149,6 +149,86 @@
   --prio-3-fill: #ff8a8a;
 }
 
+/* Nord (Polar Night). Cool arctic blue-grey — contrast to warm Gruvbox/Ayu. */
+[data-theme="nord"] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --surface: #3b4252;
+  --surface-2: #434c5e;
+  --border: #4c566a;
+  --border-strong: #616e88;
+  --text: #eceff4;
+  --text-muted: #d8dee9;
+  --text-faint: #7b88a1;
+  --danger: #bf616a;
+  --warning: #ebcb8b;
+  --success: #a3be8c;
+
+  --prio-0-ring: #404040;
+  --prio-0-fill: #a0a0a0;
+  --prio-1-ring: #0060ff;
+  --prio-1-fill: #70b0ff;
+  --prio-2-ring: #ffd000;
+  --prio-2-fill: #ffd070;
+  --prio-3-ring: #ff0000;
+  --prio-3-fill: #ff8a8a;
+}
+
+/* Nord Light (Snow Storm). */
+[data-theme="nordlight"] {
+  --bg: #eceff4;
+  --surface: #ffffff;
+  --surface-2: #e5e9f0;
+  --border: #d8dee9;
+  --border-strong: #c0c8d4;
+  --text: #2e3440;
+  --text-muted: #4c566a;
+  --text-faint: #616e88;
+  --danger: #bf616a;
+  --warning: #d08770;
+  --success: #a3be8c;
+}
+
+/* Catppuccin Mocha. Soft pastel mauve dark. */
+[data-theme="catppuccin"] {
+  color-scheme: dark;
+  --bg: #181825;
+  --surface: #1e1e2e;
+  --surface-2: #313244;
+  --border: #45475a;
+  --border-strong: #585b70;
+  --text: #cdd6f4;
+  --text-muted: #a6adc8;
+  --text-faint: #6c7086;
+  --danger: #f38ba8;
+  --warning: #f9e2af;
+  --success: #a6e3a1;
+
+  --prio-0-ring: #404040;
+  --prio-0-fill: #a0a0a0;
+  --prio-1-ring: #0060ff;
+  --prio-1-fill: #70b0ff;
+  --prio-2-ring: #ffd000;
+  --prio-2-fill: #ffd070;
+  --prio-3-ring: #ff0000;
+  --prio-3-fill: #ff8a8a;
+}
+
+/* Catppuccin Latte. Soft cool cream light. */
+[data-theme="catppuccinlight"] {
+  --bg: #eff1f5;
+  --surface: #ffffff;
+  --surface-2: #e6e9ef;
+  --border: #ccd0da;
+  --border-strong: #bcc0cc;
+  --text: #4c4f69;
+  --text-muted: #6c6f85;
+  --text-faint: #9ca0b0;
+  --danger: #d20f39;
+  --warning: #df8e1d;
+  --success: #40a02b;
+}
+
 /* Accents (override --accent only; hover/soft derive). After themes so they win.
    Light accents (amber/green/orange) carry near-black --accent-fg for legible button
    text; the rest keep the default white. */

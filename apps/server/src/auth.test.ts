@@ -12,9 +12,13 @@ import {
   publicUser,
   requireAdmin,
   setPassword,
+  basicAuth,
   LOGIN_FAIL_MAX,
+  LOGIN_FAIL_IP_MAX,
   LOGIN_FAIL_WINDOW_MS,
+  type AuthVars,
 } from './auth';
+import { CARBON_REAL_IP_HEADER } from './client-ip';
 import {
   createUser,
   getUser,
@@ -24,6 +28,7 @@ import {
   softDeleteUser,
 } from '@carbon/core';
 import { makeTestDb, makeHono, appFetch } from './test-app';
+import { Hono } from 'hono';
 
 // ─── pure crypto functions ───────────────────────────────────────────────────
 
@@ -159,12 +164,24 @@ describe('GET /me', () => {
     assert.equal(res.status, 401);
   });
 
-  test('returns current user with valid Basic auth', async () => {
+  test('returns current user with valid Basic auth (test harness allows Basic)', async () => {
     const { app, admin } = buildApp();
     const res = await appFetch(app, '/me', { headers: { Authorization: admin.basic } });
     assert.equal(res.status, 200);
-    const body = await res.json() as { username: string };
+    const body = (await res.json()) as { username: string };
     assert.equal(body.username, 'admin');
+  });
+
+  test('production posture: Basic on /me is rejected when basicPaths is /login only', async () => {
+    const { db, addUser } = makeTestDb();
+    const admin = addUser('admin2', 'pass', 'admin');
+    const app = new Hono<{ Variables: AuthVars }>();
+    app.use('*', basicAuth(db, { allowOpen: false, basicPaths: ['/login'] }));
+    app.get('/me', (c) => c.json({ username: c.get('username') }));
+    const res = await appFetch(app, '/me', { headers: { Authorization: admin.basic } });
+    assert.equal(res.status, 401);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /session required/);
   });
 
   test('returns current user with Bearer session token', async () => {
@@ -206,12 +223,12 @@ describe('basic-auth brute-force throttle', () => {
     const bad = 'Basic ' + Buffer.from('throttle-lockout:wrong').toString('base64');
 
     for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
-      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
       assert.equal(res.status, 401, `attempt ${i + 1} should be a plain 401`);
     }
     // The next attempt is throttled, even with the *correct* password now.
     const good = 'Basic ' + Buffer.from('throttle-lockout:correct-pw').toString('base64');
-    const res = await appFetch(app, '/me', { headers: { Authorization: good } });
+    const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: good } });
     assert.equal(res.status, 429);
     const body = await res.json() as { error: string };
     assert.match(body.error, /too many attempts/);
@@ -222,10 +239,10 @@ describe('basic-auth brute-force throttle', () => {
     const bad = 'Basic ' + Buffer.from('throttle-unknown-user:whatever').toString('base64');
 
     for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
-      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
       assert.equal(res.status, 401);
     }
-    const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+    const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
     assert.equal(res.status, 429);
   });
 
@@ -237,16 +254,24 @@ describe('basic-auth brute-force throttle', () => {
     const badA = 'Basic ' + Buffer.from('shared-throttle-name:wrong').toString('base64');
 
     for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
-      const res = await appFetch(tenantA.app, '/me', { headers: { Authorization: badA } });
+      const res = await appFetch(tenantA.app, '/login', {
+        method: 'POST',
+        headers: { Authorization: badA },
+      });
       assert.equal(res.status, 401);
     }
     assert.equal(
-      (await appFetch(tenantA.app, '/me', { headers: { Authorization: badA } })).status,
+      (
+        await appFetch(tenantA.app, '/login', { method: 'POST', headers: { Authorization: badA } })
+      ).status,
       429,
       'tenant A should now be locked out',
     );
 
-    const res = await appFetch(tenantB.app, '/me', { headers: { Authorization: bUser.basic } });
+    const res = await appFetch(tenantB.app, '/login', {
+      method: 'POST',
+      headers: { Authorization: bUser.basic },
+    });
     assert.equal(res.status, 200, 'tenant B should not inherit tenant A failures');
   });
 
@@ -256,19 +281,25 @@ describe('basic-auth brute-force throttle', () => {
     const bad = 'Basic ' + Buffer.from('throttle-reset:wrong').toString('base64');
 
     for (let i = 0; i < LOGIN_FAIL_MAX - 1; i++) {
-      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
       assert.equal(res.status, 401);
     }
     // One failure short of the cap — a correct login should still succeed and clear it.
-    const okRes = await appFetch(app, '/me', { headers: { Authorization: user.basic } });
+    const okRes = await appFetch(app, '/login', {
+      method: 'POST',
+      headers: { Authorization: user.basic },
+    });
     assert.equal(okRes.status, 200);
 
     // Counter reset: another full run of failures is needed before lockout kicks in.
     for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
-      const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const res = await appFetch(app, '/login', { method: 'POST', headers: { Authorization: bad } });
       assert.equal(res.status, 401, `post-reset attempt ${i + 1} should not be throttled yet`);
     }
-    const lockedRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+    const lockedRes = await appFetch(app, '/login', {
+      method: 'POST',
+      headers: { Authorization: bad },
+    });
     assert.equal(lockedRes.status, 429);
   });
 
@@ -279,20 +310,68 @@ describe('basic-auth brute-force throttle', () => {
     t.mock.timers.enable({ apis: ['Date'] });
     try {
       for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
-        const res = await appFetch(app, '/me', { headers: { Authorization: bad } });
+        const res = await appFetch(app, '/login', {
+          method: 'POST',
+          headers: { Authorization: bad },
+        });
         assert.equal(res.status, 401);
       }
-      const lockedRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const lockedRes = await appFetch(app, '/login', {
+        method: 'POST',
+        headers: { Authorization: bad },
+      });
       assert.equal(lockedRes.status, 429);
 
       // Jump past the window — the oldest failures should have aged out.
       t.mock.timers.tick(LOGIN_FAIL_WINDOW_MS + 1_000);
 
-      const afterWindowRes = await appFetch(app, '/me', { headers: { Authorization: bad } });
+      const afterWindowRes = await appFetch(app, '/login', {
+        method: 'POST',
+        headers: { Authorization: bad },
+      });
       assert.equal(afterWindowRes.status, 401, 'throttle should have reset after the window');
     } finally {
       t.mock.timers.reset();
     }
+  });
+
+  test('per-IP budget locks out across different usernames', async () => {
+    const { app } = buildApp();
+    const ip = '203.0.113.77';
+    // Burn the IP budget with distinct unknown usernames (username buckets stay under cap).
+    for (let i = 0; i < LOGIN_FAIL_IP_MAX; i++) {
+      const bad =
+        'Basic ' + Buffer.from(`ip-throttle-user-${i}:wrong`).toString('base64');
+      const res = await appFetch(app, '/login', {
+        method: 'POST',
+        headers: { Authorization: bad, [CARBON_REAL_IP_HEADER]: ip },
+      });
+      assert.equal(res.status, 401, `attempt ${i + 1}`);
+    }
+    const next =
+      'Basic ' + Buffer.from('ip-throttle-fresh:wrong').toString('base64');
+    const res = await appFetch(app, '/login', {
+      method: 'POST',
+      headers: { Authorization: next, [CARBON_REAL_IP_HEADER]: ip },
+    });
+    assert.equal(res.status, 429);
+  });
+});
+
+describe('open mode default deny', () => {
+  test('empty tenant rejects unauthenticated requests unless allowOpen', async () => {
+    const { db } = makeTestDb();
+    const closed = new Hono<{ Variables: AuthVars }>();
+    closed.use('*', basicAuth(db)); // default allowOpen=false
+    closed.get('/me', (c) => c.json({ id: c.get('userId') }));
+    assert.equal((await appFetch(closed, '/me')).status, 401);
+
+    const open = new Hono<{ Variables: AuthVars }>();
+    open.use('*', basicAuth(db, { allowOpen: true, basicPaths: null }));
+    open.get('/me', (c) => c.json({ id: c.get('userId') }));
+    const res = await appFetch(open, '/me');
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { id: string }).id, 'local');
   });
 });
 
@@ -320,7 +399,10 @@ describe('POST /admin/users', () => {
     const { app, admin } = buildApp();
     const res = await appFetch(app, '/admin/users', {
       method: 'POST',
-      headers: { Authorization: admin.basic, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${admin.token}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ username: 'newbie', password: 'pw123' }),
     });
     assert.equal(res.status, 201);
@@ -332,7 +414,10 @@ describe('POST /admin/users', () => {
     const { app, member } = buildApp();
     const res = await appFetch(app, '/admin/users', {
       method: 'POST',
-      headers: { Authorization: member.basic, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${member.token}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ username: 'x', password: 'pw' }),
     });
     assert.equal(res.status, 403);
@@ -343,7 +428,10 @@ describe('POST /admin/users', () => {
     // admin already exists
     const res = await appFetch(app, '/admin/users', {
       method: 'POST',
-      headers: { Authorization: admin.basic, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${admin.token}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ username: 'admin', password: 'pw' }),
     });
     assert.equal(res.status, 409);

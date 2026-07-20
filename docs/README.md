@@ -10,9 +10,9 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 
 - [**Complete feature list**](features.md) — the full inventory of what Carbon does, grouped by
   area, marking what works offline vs what needs a sync server.
-- [**Usage & keyboard shortcuts**](usage-and-shortcuts.md) — quick capture, natural-language
+- [**Usage & keyboard shortcuts**](usage-and-shortcuts.md) — quick capture, notes, natural-language
   commands, advanced filters, customizing the UI, undo/redo, desktop quick-add, shortcuts,
-  gestures, views, offline & sync.
+  gestures, views, offline & sync recovery.
 - [**Carbon vs Todoist / OmniFocus / Microsoft To Do**](comparison.md) — honest feature-by-feature
   comparison, including where Carbon falls short.
 
@@ -20,6 +20,10 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
 
 - [**Data security**](data-security.md) — workspace isolation, TLS, authentication, local-only
   mode, data ownership, and the model's boundaries.
+- [**Federation & cross-workspace sharing**](federation.md) — L2/L3 federation (off by
+  default): share a project subtree with another workspace on the same host or a different
+  Carbon server.
+- [**Privacy policy**](privacy-policy.md) — what the app stores locally vs on a sync server.
 
 ### Apps & integrations
 

@@ -47,11 +47,11 @@ test.describe('Tier 5 — collaboration and server APIs', () => {
 
   test('admin can create a second user', async () => {
     const { username, password } = e2eCredentials();
-    const { basic } = await login(serverUrl(), username, password);
+    const { token } = await login(serverUrl(), username, password);
     const bob = `bob${Date.now()}`;
     const res = await fetch(`${serverUrl()}/api/admin/users`, {
       method: 'POST',
-      headers: { Authorization: basic, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: bob, password: 'bob-pass', role: 'member' }),
     });
     expect(res.status).toBe(201);

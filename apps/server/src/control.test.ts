@@ -8,6 +8,8 @@ import { test, describe, before, after } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { Hono } from 'hono';
 import {
   openControlDb,
   provisionTenant,
@@ -29,7 +31,9 @@ import {
   verifyPendingDelete,
   resolveDeleteToken,
   gcPendingDeletes,
+  hostAdminAuth,
 } from './control';
+import { hashPassword, LOGIN_FAIL_MAX } from './auth';
 import { resolveHostCeiling, type FederationMode } from './federation';
 
 let tenantsDir: string;
@@ -358,6 +362,14 @@ describe('pending signup flow', () => {
     });
     const result = verifyPendingSignup(db, 'carol@example.com', '000000');
     assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error, 'invalid_code');
+  });
+
+  test('verifyPendingSignup uses the same error when no pending row exists', () => {
+    const db = openControlDb(':memory:');
+    const result = verifyPendingSignup(db, 'nobody@example.com', '123456');
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error, 'invalid_code');
   });
 
   test('deletePendingSignup removes the row', () => {
@@ -463,5 +475,28 @@ describe('pending delete flow', () => {
     );
     gcPendingDeletes(db);
     assert.ok(!db.get('SELECT 1 FROM pending_deletes WHERE id = ?', ['gc-del']));
+  });
+});
+
+describe('hostAdminAuth brute-force throttle', () => {
+  test('locks out after LOGIN_FAIL_MAX failures (per username + IP)', async () => {
+    const db = openControlDb(':memory:');
+    db.run('INSERT INTO host_admins (id, username, password_hash) VALUES (?, ?, ?)', [
+      randomUUID(),
+      'ops',
+      hashPassword('correct-host-pw'),
+    ]);
+    const app = new Hono();
+    app.use('*', hostAdminAuth(db, { clientIp: () => '198.51.100.9' }));
+    app.get('/ok', (c) => c.json({ ok: true }));
+
+    const bad = 'Basic ' + Buffer.from('ops:wrong').toString('base64');
+    for (let i = 0; i < LOGIN_FAIL_MAX; i++) {
+      const res = await app.fetch(new Request('http://t/ok', { headers: { Authorization: bad } }));
+      assert.equal(res.status, 401, `attempt ${i + 1}`);
+    }
+    const good = 'Basic ' + Buffer.from('ops:correct-host-pw').toString('base64');
+    const locked = await app.fetch(new Request('http://t/ok', { headers: { Authorization: good } }));
+    assert.equal(locked.status, 429);
   });
 });

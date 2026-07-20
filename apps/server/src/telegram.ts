@@ -623,17 +623,25 @@ export async function startTelegramBot(opts: StartTelegramOpts): Promise<Telegra
     console.error('[carbon] telegram getMe failed (check TELEGRAM_BOT_TOKEN):', (e as Error).message);
   }
   if (opts.webhookUrl) {
-    const url = joinUrl(opts.webhookUrl, '/telegram/webhook');
-    try {
-      await tgSetWebhook(token, url, opts.webhookSecret);
-      console.log(`[carbon] telegram webhook registered -> ${url}`);
-    } catch (e) {
-      console.error('[carbon] telegram setWebhook failed:', (e as Error).message);
+    if (!opts.webhookSecret) {
+      console.error(
+        '[carbon] TELEGRAM_WEBHOOK_SECRET is required when TELEGRAM_WEBHOOK_URL is set — ' +
+          'refusing to register an unauthenticated webhook.',
+      );
+    } else {
+      const url = joinUrl(opts.webhookUrl, '/telegram/webhook');
+      try {
+        await tgSetWebhook(token, url, opts.webhookSecret);
+        console.log(`[carbon] telegram webhook registered -> ${url}`);
+      } catch (e) {
+        console.error('[carbon] telegram setWebhook failed:', (e as Error).message);
+      }
     }
   } else {
     console.warn(
       '[carbon] TELEGRAM_WEBHOOK_URL unset — webhook not auto-registered. ' +
-        'Set it, or call setWebhook manually pointing at <host>/telegram/webhook.',
+        'Set it (and TELEGRAM_WEBHOOK_SECRET), or call setWebhook manually pointing at ' +
+        '<host>/telegram/webhook.',
     );
   }
   const deps: TelegramDeps = {

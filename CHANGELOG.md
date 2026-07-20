@@ -6,6 +6,24 @@ GitHub Release body and the public mirror commit message — so keep each headin
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
 
+## v0.9.0
+**Mandatory Sync 2FA (email + authenticator backup)**
+- Sync accounts require two-factor authentication: enroll an **email** one-time code
+  and/or an **authenticator app** (TOTP with QR + manual secret / otpauth URI). Either
+  factor unlocks a new device — they are backups of each other, not stacked.
+- **Trusted devices** skip 2FA after the first successful verification and stay trusted
+  indefinitely until the user, a workspace admin, or the server console resets trust.
+- Sign-in flow prompts immediately for enrollment when 2FA is not set up (including
+  existing accounts on next login). New devices always challenge.
+- Settings → **Security**: manage factors, recovery codes, trusted devices, and
+  “sign out everywhere”. Admins can set a user’s email, issue a one-use recovery code,
+  or reset MFA / device trust.
+- Basic auth is limited to `POST /api/login` so a password alone cannot bypass 2FA;
+  humans use session tokens, integrations keep scoped `carbon_*` API tokens.
+- Hosted signup copies the verified contact email onto the admin as an enrolled factor.
+- Break-glass CLI: `npm run mfa-admin -w @carbon/server -- issue-session|issue-recovery|reset-mfa|reset-trust …`
+- Local-only and open mode (no users) are unchanged.
+
 ## v0.8.2
 **GPS tracks on time sessions (background on Android)**
 - Opt-in **Record GPS while time-tracking** (Settings → Reminders & location).
@@ -17,6 +35,9 @@ first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
   notification so tracks continue with the screen off. Web/desktop fall back to
   foreground watching only.
 - Timer bar shows a satellite indicator (and point count) while recording.
+- New appearance themes: **Nord** / **Nord Light** (cool arctic) and
+  **Catppuccin** / **Catppuccin Light** (soft pastel), alongside the existing
+  neutral, Gruvbox, Ayu, and ePaper palettes.
 
 ## v0.8.1
 **Time tracking API, time notes, and item metadata**

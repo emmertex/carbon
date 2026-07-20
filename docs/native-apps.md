@@ -73,10 +73,10 @@ window:
 
 ### Prerequisites
 
-- **JDK 17** (installed: `/usr/lib/jvm/java-17-openjdk`). Gradle must use 17, not the
-  system-default 26:
+- **JDK 21** (Capacitor 8 requires it). Point `JAVA_HOME` at a JDK 21 install — builds under
+  JDK 17 fail with "invalid source release: 21":
   ```fish
-  set -x JAVA_HOME /usr/lib/jvm/java-17-openjdk
+  set -x JAVA_HOME /usr/lib/jvm/java-21-openjdk
   ```
 - **Android SDK**. Install the command-line tools, then:
   ```fish
@@ -147,6 +147,9 @@ Native origins: Tauri = `tauri://localhost` (Linux/macOS) / `http://tauri.localh
   and an Apple Developer account to sign and distribute.
 - **Background push on Android** requires your own Firebase project and a server-side
   `FCM_SERVICE_ACCOUNT_FILE` (above). Without it, Web Push still works for browsers.
+- **GPS tracks while time-tracking** (Settings → Reminders & location) use
+  `@capgo/background-geolocation` on Android so recording continues with the screen off
+  (foreground-service notification). Web and desktop fall back to foreground watching only.
 - **Signed release builds** (Android keystore / `signingConfig`, Windows `.msi`, macOS
   `.dmg`) are produced per-maintainer for local builds; the commands above build
   unsigned/debug artifacts suitable for local install and testing. Tagged releases are

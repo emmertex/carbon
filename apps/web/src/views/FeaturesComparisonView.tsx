@@ -31,7 +31,8 @@ const GROUPS: Group[] = [
       },
       {
         feature: "Time tracking",
-        detail: "Track time against any task and project, with reports.",
+        detail:
+          "Project sessions, task segments, pauses, merge/split editing, time notes, CSV and optional GPS tracks.",
         local: true,
         server: true,
       },
@@ -49,8 +50,9 @@ const GROUPS: Group[] = [
         server: true,
       },
       {
-        feature: "Markdown notes",
-        detail: "GitHub-flavoured notes and checklists on any task.",
+        feature: "First-class notes",
+        detail:
+          "Dedicated note items with rich Markdown editing, convert task ↔ note, plus GFM notes on tasks.",
         local: true,
         server: true,
       },
@@ -166,10 +168,10 @@ const GROUPS: Group[] = [
       {
         feature: "Share across workspaces",
         detail:
-          "Share projects between workspaces today; federation between self-hosted servers is on the roadmap.",
+          "L2 federation between workspaces on the same host, and L3 between separate Carbon servers — off by default and operator-gated.",
         local: false,
         server: true,
-        why: "Cross-workspace sharing connects separate server-hosted workspaces, and federation will extend that to independently self-hosted servers. Neither has any meaning without a server hosting those workspaces.",
+        why: "Cross-workspace and cross-server federation are authorization and transport decisions made by the sync server. Neither has any meaning on a single local device.",
       },
     ],
   },

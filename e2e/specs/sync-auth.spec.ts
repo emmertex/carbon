@@ -51,11 +51,28 @@ test.describe('Tier 2 — sync and auth', () => {
 
   test('scoped API token can read tasks', async () => {
     const { username, password } = e2eCredentials();
-    const { basic, token: session } = await login(serverUrl(), username, password);
+    const { token: session } = await login(serverUrl(), username, password);
     const title = `E2E token ${Date.now()}`;
     await createTask(session, title);
-    const { token: apiToken } = await createApiToken(basic, 'e2e-read', ['tasks:read']);
+    const { token: apiToken } = await createApiToken(session, 'e2e-read', ['tasks:read']);
     const tasks = await listTasks(apiToken);
     expect(tasks.some((t) => t.title === title)).toBe(true);
+  });
+
+  test('MFA: login helper enrolls TOTP and trusted device skips challenge', async () => {
+    const { username, password } = e2eCredentials();
+    const first = await login(serverUrl(), username, password);
+    expect(first.token).toMatch(/^carbons_/);
+    const second = await login(serverUrl(), username, password);
+    expect(second.token).toMatch(/^carbons_/);
+    // Session Bearer reaches /api/me; Basic must not.
+    const me = await fetch(`${serverUrl()}/api/me`, {
+      headers: { Authorization: `Bearer ${second.token}` },
+    });
+    expect(me.status).toBe(200);
+    const basicDenied = await fetch(`${serverUrl()}/api/me`, {
+      headers: { Authorization: second.basic },
+    });
+    expect(basicDenied.status).toBe(401);
   });
 });

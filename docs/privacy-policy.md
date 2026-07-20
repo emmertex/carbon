@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **App:** Carbon (`com.emmertex.carbon`)
-**Last updated:** 30 June 2026
+**Last updated:** 17 July 2026
 
 Carbon is an offline-first task manager. This policy explains what the app does with your
 data. In short: **the developer does not collect, receive, or have access to your data.**
@@ -33,11 +33,10 @@ address is deleted with it. You can delete your account at
 **https://carbon.etx.sx/delete-account**.
 
 **Location.** Location sharing is optional and is a **sync-server-only** feature. If you enable
-it while using a sync server, your current location is pushed to the server and only your most
-recent fix per device is kept — **no location history is kept**. A device's location stops being
-shown (in the Nearby view, to reminders, etc.) once it goes 24 hours without an update, and the
-underlying record is permanently deleted by a periodic cleanup after 30 days with no further
-updates. Only you can see your location; other workspace members and administrators cannot.
+it while using a sync server, your current location is pushed to the server and retained only
+until it goes stale — **no location history is kept**, and all location data is deleted after
+24 hours with no updates. Only you can see your location; other workspace members and
+administrators cannot.
 
 To turn coordinates into place names (reverse geocoding) and to search for locations by name,
 the sync server queries **OpenStreetMap (Nominatim)**. These lookups are made **anonymously** —
@@ -50,11 +49,13 @@ needed for the lookup are sent. This also happens only when you use a sync serve
   app makes no network connections for your content.
 - **Notifications / exact alarms / run at startup** — to show task reminders on time, including
   after a reboot.
-- **Location (foreground only)** — used for location-based reminders while the app is open.
-  Matching against your tasks happens **on your device**. In local-only mode your location is
-  never transmitted. If you enable location sharing with a sync server, it is pushed there
-  under the limits described above. This permission is optional; reminders that don't use
-  location work without it.
+- **Location** — used for location-based reminders while the app is open, and (when enabled)
+  for GPS tracks attached to time-tracking sessions. On Android the track recorder may run as
+  a foreground service with a persistent notification while a timer is active. Matching against
+  your tasks happens on your device. In local-only mode your location is never transmitted; if
+  you enable location sharing with a sync server, the latest fix is pushed there under the
+  limits described above. Track blobs sync like other attachments when sync is on. This
+  permission is optional.
 - **Vibrate** — for reminder alerts.
 
 ## Push notifications

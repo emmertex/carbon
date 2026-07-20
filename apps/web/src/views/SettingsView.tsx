@@ -19,6 +19,7 @@ import { AppearanceSection } from '@/components/settings/AppearanceSection';
 import { FeaturesSection } from '@/components/settings/FeaturesSection';
 import { GesturesSection } from '@/components/settings/GesturesSection';
 import { SyncSection } from '@/components/settings/SyncSection';
+import { SecuritySection } from '@/components/settings/SecuritySection';
 import { FederationSection } from '@/components/settings/FederationSection';
 import { IntegrationsDocs } from '@/components/settings/IntegrationsDocs';
 import { AboutSection } from '@/components/settings/AboutSection';
@@ -78,6 +79,7 @@ export function SettingsView() {
     { id: 'planning', group: 'tasks', show: (c) => c.signedIn, render: () => <PlanningSettings /> },
     { id: 'profile', group: 'account', show: (c) => c.signedIn, render: () => <Profile /> },
     { id: 'sync', group: 'account', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },
+    { id: 'security', group: 'account', show: (c) => c.signedIn && c.hasServer, render: () => <SecuritySection /> },
     { id: 'subscription', group: 'account', show: (c) => c.isAdmin && c.hasServer, render: () => <Subscription /> },
     { id: 'federation', group: 'federation', show: (c) => c.signedIn && c.hasServer, render: () => <FederationSection /> },
     { id: 'data', group: 'account', show: () => true, render: () => <DataBackup /> },
