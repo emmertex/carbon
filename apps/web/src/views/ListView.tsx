@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { listTags, getProjects } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
-import { getCurrentUserId } from '@/lib/store';
+import { getCurrentUserId, useStore } from '@/lib/store';
 import { queryRoots } from '@/lib/listQuery';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
@@ -39,6 +39,7 @@ export function ListView({
   perspectiveId?: string;
 }) {
   const navigate = useNavigate();
+  const settingsRevision = useStore((s) => s.settingsRevision);
   const saved = perspectiveId ? getPerspective(perspectiveId) : undefined;
   const effectiveBase: Base = saved?.base ?? base;
   const heading = saved?.name ?? title;
@@ -47,9 +48,14 @@ export function ListView({
     () => saved?.prefs ?? getPrefs(base),
   );
   useEffect(() => {
-    setPrefs(saved?.prefs ?? getPrefs(base));
+    setPrefs(
+      perspectiveId
+        ? (getPerspective(perspectiveId)?.prefs ?? getPrefs(base))
+        : getPrefs(base),
+    );
+    // settingsRevision: re-read after inbound perspective/view-prefs sync.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, perspectiveId]);
+  }, [base, perspectiveId, settingsRevision]);
 
   function updatePrefs(p: ViewPrefs) {
     setPrefs(p);

@@ -4,6 +4,8 @@ import {
   subtaskProgress,
   updateItem,
   deleteItem,
+  restorableIds,
+  restoreItem,
   addToPlan,
   removeFromPlan,
   isInPlan,
@@ -131,11 +133,33 @@ export function togglePlan(item: Item): void {
 /** Soft-delete with an undo snackbar — left swipes are easy to trigger, so a
  *  delete must always be recoverable. Also joins the global undo stack (Ctrl+Z). */
 export function deleteTaskWithUndo(item: Item): void {
+  const { selectedId, select, showToast } = useStore.getState();
+  // Unmount the detail pane before the soft-delete bumps the query to null —
+  // otherwise TaskDetail can re-render on a deleted id (hooks crash / flash).
+  if (selectedId === item.id) select(null);
   recordFieldUndo([item.id], ['deleted'], 'Delete task', () =>
     mutate((db, dev) => deleteItem(db, dev, item.id)),
   );
-  useStore.getState().showToast({
+  showToast({
     message: 'Task deleted',
+    actionLabel: 'Undo',
+    onAction: () => undo(),
+  });
+}
+
+/** Undelete: clear the tombstone on an item and everything deleted with it — the
+ *  Recently Deleted view's one action, for when the undo snackbar is long gone.
+ *  Joins the undo stack too, so an accidental restore is one Ctrl+Z away. */
+export function restoreTask(item: Item): void {
+  const ids = restorableIds(getDb(), item.id);
+  if (ids.length === 0) return;
+  // `parent_id` rides along in the snapshot because a restore may reattach an
+  // orphan at the top level (see restoreItem) — undo has to put that back too.
+  recordFieldUndo(ids, ['deleted', 'parent_id'], 'Restore', () =>
+    mutate((db, dev) => restoreItem(db, dev, item.id)),
+  );
+  useStore.getState().showToast({
+    message: ids.length > 1 ? `Restored ${ids.length} items` : 'Restored',
     actionLabel: 'Undo',
     onAction: () => undo(),
   });

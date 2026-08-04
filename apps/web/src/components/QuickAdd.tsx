@@ -14,19 +14,26 @@ export function QuickAdd({
   placeholder = 'Add a task…  (#tag @user !priority)',
   onCreate,
   allowNote = false,
+  defaultKind = 'task',
   currentProjectId,
 }: {
   placeholder?: string;
   onCreate: (raw: string, type: 'task' | 'note') => void;
   /** Show a Task/Note toggle so the box can create a note instead (default off). */
   allowNote?: boolean;
+  /** Which side of that toggle starts selected — 'note' inside a notes project,
+   *  so adding to a notebook produces notes without a click every time. */
+  defaultKind?: 'task' | 'note';
   /** Project page context for NL commands; omitted for global/tag/desktop surfaces. */
   currentProjectId?: string | null;
 }) {
   const [value, setValue] = useState('');
   const [status, setStatus] = useState<Status>(null);
-  // Creation kind — defaults to task; only surfaced when `allowNote`.
-  const [kind, setKind] = useState<'task' | 'note'>('task');
+  // Creation kind — seeded from the container (see defaultKind); only surfaced
+  // when `allowNote`. Re-seeded when the container's default changes, e.g. moving
+  // between a normal project and a notes project.
+  const [kind, setKind] = useState<'task' | 'note'>(defaultKind);
+  useEffect(() => setKind(defaultKind), [defaultKind]);
   const inputRef = useRef<HTMLInputElement>(null);
   const suggest = useTokenSuggest({ value, setValue, inputRef });
 
@@ -36,6 +43,17 @@ export function QuickAdd({
   const nlKeywords = useStore((s) => s.nlKeywords);
   const nlFeature = useFeature('nlCommands');
   const commandMode = nlEnabled && nlFeature && firstWordIsCommand(value, nlKeywords);
+  const nlReady = nlEnabled && nlFeature;
+  // Hint the first few keywords so the add box advertises the assistant when it's on.
+  const nlHint =
+    nlReady && nlKeywords.length
+      ? ` · or ${nlKeywords.slice(0, 3).join('/')}…`
+      : '';
+  const effectivePlaceholder = placeholder.includes('#tag')
+    ? `${placeholder.replace(/\s*$/, '')}${nlHint}`
+    : nlReady
+      ? `${placeholder}${nlHint}`
+      : placeholder;
 
   // Focus when a global hotkey (`c` / `/`) requests the quick-add bar.
   const focusNonce = useStore((s) => s.quickAddFocusNonce);
@@ -130,7 +148,7 @@ export function QuickAdd({
               ? 'Ask the assistant…'
               : allowNote && kind === 'note'
                 ? 'Add a note…'
-                : placeholder
+                : effectivePlaceholder
           }
           className="min-w-0 flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-faint"
         />
@@ -159,6 +177,12 @@ export function QuickAdd({
           >
             dismiss
           </button>
+        </p>
+      )}
+      {!status && nlReady && !value && (
+        <p className="mt-1 px-1 text-[11px] text-text-faint">
+          Assistant on — start with {nlKeywords.slice(0, 3).join(', ')}
+          {nlKeywords.length > 3 ? '…' : ''}
         </p>
       )}
     </div>

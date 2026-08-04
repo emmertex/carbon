@@ -60,9 +60,10 @@ const MIN_REQUEST_INTERVAL_MS = 1100;
 const CACHE_TTL_MS = 5 * 60_000;
 
 // Concise tracing so a failing place search can be diagnosed from the server log:
-// which tier ran, the upstream HTTP status, and the hit count. On by default for
-// single-tenant self-host (mirrors CARBON_NL_DEBUG); set CARBON_GEO_DEBUG=0 to silence.
-const GEO_DEBUG = process.env.CARBON_GEO_DEBUG !== '0';
+// which tier ran, the upstream HTTP status, and the hit count. Off by default
+// (mirrors CARBON_NL_DEBUG); set CARBON_GEO_DEBUG=1 (or true) to enable.
+const GEO_DEBUG =
+  process.env.CARBON_GEO_DEBUG === '1' || process.env.CARBON_GEO_DEBUG === 'true';
 function geoDbg(msg: string): void {
   if (GEO_DEBUG) console.log(`[geo] ${msg}`);
 }

@@ -67,6 +67,7 @@ export function ContainerView() {
       // Container/list views include notes inline alongside tasks (they render
       // with a distinct icon and no checkbox). Projects/folders stay excluded.
       const tasks = desc.filter((c) => c.type === 'task' || c.type === 'note');
+      const noteCount = desc.filter((c) => c.type === 'note').length;
       // Only the flat view renders `rows`; in tree mode (default) TaskTree renders
       // and enriches its own rows, so skip a full-subtree enrich that's discarded.
       const rows = flatMode
@@ -81,7 +82,7 @@ export function ContainerView() {
       const containerIds = [
         ...new Set(desc.map((c) => c.parent_id).filter((p): p is string => !!p && p !== id)),
       ];
-      return { item, remaining, rows, tracking, containerIds };
+      return { item, remaining, noteCount, rows, tracking, containerIds };
     },
     [id, JSON.stringify(prefs), countScope],
     'container.data',
@@ -92,15 +93,19 @@ export function ContainerView() {
   if (!data) {
     return <div className="p-8 text-sm text-text-muted">Not found.</div>;
   }
-  const { item, remaining, rows, tracking, containerIds } = data;
+  const { item, remaining, noteCount, rows, tracking, containerIds } = data;
   const isProject = item.type === 'project';
+  // A notes container: adds default to notes rather than tasks. `createItem`
+  // enforces the same rule for every other add surface (outliner, sibling/subtask
+  // buttons); here it just picks the right side of the Task/Note toggle up front.
+  const isNotesProject = isProject && item.notes_project;
 
   function toggleTrack() {
     if (tracking) void trackingStopActive();
     else void trackingStartSession(id);
   }
 
-  function create(text: string, type: 'task' | 'note' = 'task') {
+  function create(text: string, type: 'task' | 'note' = isNotesProject ? 'note' : 'task') {
     mutate((db, dev) =>
       createFromQuickAdd(db, dev, text, { parentId: id, ownerId: getCurrentUserId(), type }),
     );
@@ -137,8 +142,17 @@ export function ContainerView() {
             {item.title || (isProject ? 'Untitled project' : 'Untitled')}
           </h1>
           <p className="mt-0.5 text-sm text-text-muted">
-            {remaining} {remaining === 1 ? 'task' : 'tasks'} left
-            {!isProject && ' · focused'}
+            {isNotesProject ? (
+              // A notebook has nothing "left" to do — count what's in it instead.
+              <>
+                {noteCount} {noteCount === 1 ? 'note' : 'notes'}
+              </>
+            ) : (
+              <>
+                {remaining} {remaining === 1 ? 'task' : 'tasks'} left
+                {!isProject && ' · focused'}
+              </>
+            )}
           </p>
           {item.note && <Markdown className="mt-2 text-text-muted">{item.note}</Markdown>}
         </div>
@@ -159,9 +173,16 @@ export function ContainerView() {
 
       <div className="mb-3">
         <QuickAdd
-          placeholder={isProject ? 'Add a task to this project…' : 'Add a sub-task…'}
+          placeholder={
+            isNotesProject
+              ? 'Add a note to this notebook…'
+              : isProject
+                ? 'Add a task to this project…'
+                : 'Add a sub-task…'
+          }
           onCreate={create}
           allowNote
+          defaultKind={isNotesProject ? 'note' : 'task'}
           currentProjectId={isProject ? id : null}
         />
       </div>

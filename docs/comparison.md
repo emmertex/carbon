@@ -33,7 +33,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | **End-to-end / zero-knowledge sync** | ✗ (TLS in transit; trusted sync server model; deliberate trade-off for server-side integrations and sharing)            | ✗                                              | ✓ **zero-knowledge** encrypted                         | ✗                           |
 | Data export                          | **Full local export/import** of entire DB + attachment blobs; **copy any project/task subtree as a Markdown checklist** | JSON/CSV, Sync API                             | Backups, TaskPaper, archive                            | Limited / none              |
 | Account required                     | None (local-only) or account on a sync server                                                                           | Todoist account                                | Omni account for sync                                  | Microsoft account mandatory |
-| Clients                              | Web/PWA **installable**, Win, **Linux**, **macOS**, Android (iOS planned)                                           | Web, Win, Mac, iOS, Android, watch, extensions | Mac, iPad, iPhone, Watch, web — **no Android/Windows** | Win, Mac, web, iOS, Android |
+| Clients                              | Web/PWA **installable**, Win, **Linux**, Android (macOS / iOS planned)                                              | Web, Win, Mac, iOS, Android, watch, extensions | Mac, iPad, iPhone, Watch, web — **no Android/Windows** | Win, Mac, web, iOS, Android |
 
 ## 2. Task structure & hierarchy
 
@@ -100,7 +100,8 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific                | Carbon                                                                  | Todoist          | OmniFocus   | MS To Do               |
 | ----------------------- | ----------------------------------------------------------------------- | ---------------- | ----------- | ---------------------- |
 | Task notes              | ✓ **Markdown**                                                          | ✓ **Markdown**   | ✓ rich text | ✓ plain                |
-| **First-class notes**   | ✓ dedicated `note` items, TipTap editor, **convert task ↔ note**, zip export | ✗ (tasks only) | ✗           | ✗                      |
+| **First-class notes**   | ✓ dedicated `note` items, TipTap editor, **notes projects**, card rows + thumbnails, **convert task ↔ note**, zip export | ✗ (tasks only) | ✗           | ✗                      |
+| **Recipe notes**        | ✓ scaled servings view, Optimise rewrite (sync server), import prompt, ingredient groups / method stages / Notes | ✗                | ✗           | ✗                      |
 | Comments thread         | ✓ Markdown + `@mentions`                                                | ✓ (Pro for more) | ✗           | ✗                      |
 | Attachments on tasks    | ✓ Unlimited local (<25MB per file sync)                                 | ✓ (Pro larger)   | ✓           | ✓ via OneDrive (≤25MB) |
 | Attachments on comments | ✓ (incl. inline images)                                                 | ✓                | ✗           | ✗                      |
@@ -145,6 +146,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Calendar / Forecast                         | ✓ **Forecast**                                         | ✓                    | ✓ **Forecast**             | "Planned" |
 | Forecast shows **external calendar events** | ✗ (CalDAV sync exists, but no in-app calendar overlay) | ✓ Partial (cal sync) | ✓ system calendar overlaid | ✗         |
 | **Nearby** (location-based task view)       | ✓                                                      | ✗                    | ✗                          | ✗         |
+| **Recently Deleted**                        | ✓ restore tombstones for 30 days (`g` `d`)             | Partial              | ✓                          | Partial   |
 | Smart lists                                 | ✓                                                      | ✓                    | ✓                          | ✓         |
 | Daily planner ("My Day")                    | ✓                                                      | Partial              | ✗                          | ✓         |
 
@@ -178,7 +180,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Specific                                  | Carbon                                                     | Todoist                       | OmniFocus                           | MS To Do                 |
 | ----------------------------------------- | ---------------------------------------------------------- | ----------------------------- | ----------------------------------- | ------------------------ |
 | Track record / maturity                   | Newer, actively developed, **Fully OSS**                   | Established, large team       | **Mature, GTD Gold Standard**       | Microsoft-backed         |
-| Native apps                               | Web, PWA, **Linux**, Win, **macOS**, Android (iOS planned) | ✓ Web, Win, Mac, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
+| Native apps                               | Web, PWA, **Linux**, Win, Android (macOS / iOS planned) | ✓ Web, Win, Mac, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
 | Apple Watch / wearable                    | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
 | Home-screen **widgets**                   | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
 | **Gemini / Siri / Shortcuts / voice**     | ✗ (not in current build)                                   | ✓                             | ✓ deep                              | ✓ (Cortana/Copilot)      |
@@ -247,11 +249,11 @@ Carbon's strongest differentiators, based on what is implemented in this reposit
 - **Unusually strong time-accountability story:** true task-level tracking designed for practical
   timesheet and invoicing workflows, not just personal pomodoro-style timers.
 - **First-class notes:** dedicated note items alongside tasks, convertible either way, with
-  rich Markdown editing and zip export.
+  notes projects, card rows + thumbnails, recipe mode, rich Markdown editing and zip export.
 - **Automation-first integration posture:** scoped REST API, `/api/agent/*`, Telegram bot path, Home Assistant, CalDAV.
 - **Configurable complexity:** Simple/Standard/Advanced presets plus per-feature/per-device visibility.
 - **Security stance is explicit, not accidental:** Carbon favors a trusted self-host/server model
-  for features like CalDAV, LLM tooling, and sharing/federation; if you require distrust-by-default
-  cryptography, this is the wrong architecture by design.
+  for features like CalDAV, LLM tooling, and sharing/federation, with mandatory sync 2FA; if you
+  require distrust-by-default cryptography, this is the wrong architecture by design.
 
 This section intentionally stays implementation-first: it describes what ships now, not roadmap promises.

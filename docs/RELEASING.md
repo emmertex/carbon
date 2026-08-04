@@ -8,7 +8,7 @@ How a version tag turns into published, auto-updating builds. See
 ```
 carbon_dev (private, branch master)          carbon (public, branch main)
 ─────────────────────────────────────        ──────────────────────────────
-git tag v0.6.0 && git push --tags
+git tag v1.0.0 && git push --tags
         │
         ▼
 .github/workflows/release-mirror.yml
@@ -54,7 +54,7 @@ source of truth — edit it directly in your local `carbon` (public mirror) chec
 ### Release notes (single-sourced from CHANGELOG.md)
 
 Add a section to [`CHANGELOG.md`](../CHANGELOG.md) whose heading's first token is the
-tag, e.g. `## v0.6.0 — 2026-08-01`. The pipeline uses it verbatim in two places:
+tag, e.g. `## v1.0.0 — 2026-07-26`. The pipeline uses it verbatim in two places:
 
 - the **mirror commit message** on `carbon` (extracted in `release-mirror.yml`), and
 - the **GitHub Release body** (extracted in `carbon`'s `release.yml` `prepare` job).
@@ -141,8 +141,8 @@ The private → public mirror push needs a token with write access to `carbon` o
 
 ```fish
 # bump version in the root package.json first, commit it on master, then:
-git tag v0.6.0
-git push origin v0.6.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 That's it — the mirror workflow picks up the tag, and `carbon`'s workflow does the rest.

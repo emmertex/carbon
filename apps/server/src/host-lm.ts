@@ -1,8 +1,10 @@
 /**
  * Host-shared LM model: a single OpenAI-compatible model the host operator configures once in
- * `.env` and offers to every workspace, for NL commands + Telegram only (never comment-reply /
- * task-assignment bots, and never the NL→filter builder — those still require a workspace's own
- * agent). Exposed to workspaces as a synthetic, read-only `agents` row (id = HOST_LM_AGENT_ID)
+ * `.env` and offers to every workspace, for NL commands + Telegram + recipe optimisation only
+ * (never comment-reply / task-assignment bots, and never the NL→filter builder — those still
+ * require a workspace's own agent). Recipe optimisation qualifies because its output is text
+ * the user reviews, never parsed or executed server-side.
+ * Exposed to workspaces as a synthetic, read-only `agents` row (id = HOST_LM_AGENT_ID)
  * that never actually lives in any tenant's `agents` table.
  */
 import type { Db } from '@carbon/core';

@@ -1,10 +1,92 @@
 # Changelog
 
 Release notes for Carbon. The release pipeline extracts the section whose heading
-starts with the pushed tag (e.g. `## v0.6.0`) and uses it verbatim as both the
+starts with the pushed tag (e.g. `## v1.0.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
+
+## v1.0.0
+**First stable release — notebooks, recipes, recovery, and polish**
+
+Folds what would have been v0.10.0 (never tagged) plus everything landed since then.
+
+### Notebooks & note rows
+- **Notes projects** — the Active / Done / Dropped / Note pill now offers **Notes** on a
+  project. A notes project keeps its children as notes: new items default to `note`
+  everywhere (quick add, outliner, sibling/subtask), and its editor shows only Colour
+  and Sharing. Switching back to Active restores the normal project controls; nothing
+  is cleared, and existing children keep whatever type they had.
+- **Note rows are cards** — every note row (in any project, not just a notes one) is
+  ~2.5× the height of a task row and shows three lines: its first image, the title,
+  and the first two lines of the body. A note with no image *and* no body falls back
+  to the plain task-row height rather than reserving three blank rows.
+- **Row thumbnails** — the first image in a note is downscaled to a small JPEG and
+  stored as its own blob, referenced from the new `items.thumb` field. Lists render
+  from that, never from the full-size original. Existing notes get one on the next
+  sync that can see their image. Thumbnail regeneration re-queues overlapping work
+  instead of dropping newer needs, and clears orphan thumbs when images are removed.
+- **Note expand UX** — opening a note fullscreen closes the detail pane with a clear
+  Return path; TipTap failures fall back to source mode instead of the app-wide reload
+  screen.
+
+### Blob cache policy
+- **Three fetch modes** (Settings → Sync server) — per device, choose how much is
+  pulled down ahead of time: **On Load** (nothing in advance), **Thumbnails** (the
+  default — note lists render complete and offline for kilobytes, full-size images
+  wait until opened), or **All** (a full offline copy). Anything not prefetched still
+  arrives on first display. The first two prune the cache to an MB budget,
+  least-recently-opened first.
+- **Clear cached files** frees space on demand, and now reports what it did. It never
+  drops a blob the server hasn't received yet (the device holds the only copy) and
+  keeps thumbnails under Thumbnails/All, where the next sync would just re-fetch
+  them — but under **On Load** it drops thumbnails too, so the button isn't a no-op
+  on a workspace whose cache is mostly previews.
+
+### Recipes
+- **Recipe notes** — flip a note to Recipe mode for a scaled read view: servings
+  pills, ingredients beside procedure, and an Optimise path that rewrites messy
+  Markdown into a parseable recipe (longer LLM timeout so local reasoning models
+  aren't cancelled mid-thought).
+- **Import prompt** — a copy-able browser-assistant prompt turns a recipe page into
+  Markdown that pastes straight in and scales cleanly (cup convention from Settings →
+  Recipes).
+- **Structured recipes** — ingredient groups (`###` under Ingredients), method stages
+  (`###` under Procedure), and a trailing **Notes** section stay out of the ingredient
+  parser so amounts in notes scale as prose without lighting the Optimise banner.
+- Long recipes no longer overlay the detail pane's later sections (Attachments, Tags,
+  Sharing).
+
+### Recovery & sharing
+- **Recently Deleted** — after the undo snackbar (or a reload), restore a deleted task
+  or a whole cascade from a sidebar view of the last 30 days (`g` `d`). Restores are
+  ordinary edits, so they sync and join the undo stack.
+- **Shared-item edits** — owners keep write access under shared projects, including
+  collaborator-created children and recurring spawns; complete/edit gaps in that path
+  are closed.
+- **Auth & federation hardening** — soft-delete and admin password reset revoke sessions
+  (and API tokens on delete); deleted users cannot authenticate; federation write-scope
+  no longer accepts reparenting out-of-scope items in; debug flags default off; safe
+  fetch blocks more IPv4-mapped forms.
+
+## v0.9.1
+**Bug fixes from Advanced-mode testing**
+- **Delete no longer crashes the app** — removing a task, subtask, or note via the
+  row menu (or detail Delete) used to throw React #300 and hit the error boundary
+  after a successful soft-delete. Selection clears and detail-pane hooks stay ordered.
+- **Notes editor focus** — clicking into a note’s body now reliably focuses TipTap /
+  source mode, so Enter no longer submits stray notes via the project QuickAdd.
+- **Escape cancels blank siblings** — Escape (and Enter on an empty pending row)
+  discards an in-progress Untitled sibling/subtask instead of saving it.
+- **Time totals match the report** — Task Detail no longer double-counts session +
+  task rows on inbox/orphan tasks; projects use pause-adjusted session time. Time
+  Tracked date defaults use the local calendar day (not UTC).
+- **Nearby without location** — shows an explanation and “Enable location” instead
+  of silently redirecting to Today.
+- **Perspective delete** — settings sync no longer bumps the item DB revision (which
+  wiped list caches and froze the UI for seconds while recounting every view).
+- Settings copy for **Assistant in add box** now describes keyword commands and
+  `#tag` / `@user` / `!priority` tokens rather than implying free-text NLP.
 
 ## v0.9.0
 **Mandatory Sync 2FA (email + authenticator backup)**

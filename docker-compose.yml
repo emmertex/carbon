@@ -24,4 +24,21 @@ services:
       - DATABASE_PATH=/app/data/carbon.db
       - PORT=3069
       - NODE_ENV=production
+    # Hardening. The image already drops to the unprivileged `node` user (uid
+    # 1000); these keep a compromised process from escalating or persisting:
+    #   read_only  — root fs is immutable, so the app can't rewrite its own
+    #                bundle. Only the ./data bind mount stays writable.
+    #   tmpfs      — /tmp is the one scratch path SQLite may need (temp b-trees,
+    #                VACUUM); noexec/nosuid so nothing can be staged and run.
+    #   cap_drop   — no capabilities at all; port 3069 is unprivileged.
+    #   no-new-privileges — setuid binaries can't raise privileges.
+    # If ./data was created by an older root-running container, chown it first:
+    #   sudo chown -R 1000:1000 ./data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped

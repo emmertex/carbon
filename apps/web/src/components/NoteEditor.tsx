@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { cn } from '@/lib/cn';
@@ -10,11 +10,47 @@ import { cn } from '@/lib/cn';
 // the Notes field to edit. That click-triggered `import()` is what makes Vite split
 // TiptapEditor.tsx (and its deps) into their own async chunk; see the Phase 2 build
 // verification in docs/internal/notes-plan.md.
+//
+// A failed chunk load (stale PWA cache on Android Chrome is the usual culprit) must
+// not take down the whole app via the top-level ErrorBoundary — fall back to source
+// mode instead (see EditorCrashBoundary below).
 const TiptapEditor = lazy(() =>
   import('./TiptapEditor').then((m) => ({ default: m.TiptapEditor })),
 );
 
 const AUTOSAVE_MS = 1500;
+
+/**
+ * Isolates TipTap render/chunk failures so they don't hit the app-wide reload
+ * screen. On error, call `onError` so the parent can switch to the plain Markdown
+ * textarea (which needs no async chunk).
+ */
+class EditorCrashBoundary extends Component<
+  { children: ReactNode; onError: () => void; resetKey: string },
+  { crashed: boolean }
+> {
+  state = { crashed: false };
+
+  static getDerivedStateFromError(): { crashed: boolean } {
+    return { crashed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[carbon] note editor crashed', error, info.componentStack);
+    this.props.onError();
+  }
+
+  componentDidUpdate(prev: Readonly<{ resetKey: string }>) {
+    if (prev.resetKey !== this.props.resetKey && this.state.crashed) {
+      this.setState({ crashed: false });
+    }
+  }
+
+  render() {
+    if (this.state.crashed) return null;
+    return this.props.children;
+  }
+}
 
 /**
  * Normalize a draft to the value it will surface as in `remoteNote` after a save.
@@ -75,7 +111,9 @@ export function NoteEditor({
   // 'rendered' is the existing Tiptap WYSIWYG; 'source' is a plain textarea over the
   // raw Markdown string. Sticky for the life of this editor instance (not reset on
   // open/close) — switching modes mid-edit is the whole point of the toggle.
+  // TipTap crashes (or a failed lazy chunk) force source so editing stays possible.
   const [mode, setMode] = useState<'rendered' | 'source'>('rendered');
+  const [editorEpoch, setEditorEpoch] = useState(0);
   // Bumped to push new content into the already-mounted Tiptap editor (e.g. "Use
   // theirs"); TiptapEditor only reads its initial `content` at mount, so this
   // version-counter is how the live document gets replaced.
@@ -96,6 +134,7 @@ export function NoteEditor({
   modeRef.current = mode;
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
+  const sourceTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Re-seed the draft from the outside whenever no editor is open (inline or
   // modal) — mirrors the existing TaskDetail reseed guard (never stomp a live edit).
@@ -150,6 +189,10 @@ export function NoteEditor({
     setDirty(false);
     setRemoteChanged(false);
     setEditing(true);
+    // Blur QuickAdd (or anything else) so Enter doesn't create stray project notes
+    // while TipTap/source textarea is still mounting through Suspense.
+    const ae = document.activeElement;
+    if (ae instanceof HTMLElement) ae.blur();
   }
 
   function scheduleAutosave() {
@@ -264,6 +307,15 @@ export function NoteEditor({
     }
   }, [expanded]);
 
+  // Source-mode textarea: React `autoFocus` is unreliable across Suspense/mode
+  // switches — focus explicitly once the textarea is mounted for editing.
+  useEffect(() => {
+    if (!editing && !expanded) return;
+    if (mode !== 'source') return;
+    if (!(autoFocus ?? true)) return;
+    sourceTextareaRef.current?.focus();
+  }, [editing, expanded, mode, autoFocus]);
+
   const editorBody = (fullscreen: boolean) => (
     <div className="flex h-full flex-col">
       {remoteChanged && (
@@ -318,6 +370,7 @@ export function NoteEditor({
       </div>
       {mode === 'source' ? (
         <textarea
+          ref={sourceTextareaRef}
           data-testid="note-source-textarea"
           value={draft}
           onChange={(e) => {
@@ -333,27 +386,36 @@ export function NoteEditor({
           )}
         />
       ) : (
-        <Suspense
-          fallback={
-            <div className={cn('animate-pulse text-xs text-text-faint', minHeightClassName)}>
-              Loading editor…
-            </div>
-          }
+        <EditorCrashBoundary
+          resetKey={`${editorEpoch}:${mode}`}
+          onError={() => {
+            // Keep the draft; plain textarea needs no TipTap chunk / ProseMirror.
+            setMode('source');
+            setEditorEpoch((n) => n + 1);
+          }}
         >
-          <TiptapEditor
-            initialValue={draft}
-            externalValue={externalValue}
-            externalVersion={externalVersion}
-            onDirty={handleDirty}
-            onBlur={fullscreen ? commit : handleBlur}
-            onReady={(readLatestDraft) => {
-              readLatestDraftRef.current = readLatestDraft;
-            }}
-            autoFocus={autoFocus ?? true}
-            placeholder={placeholder}
-            className={cn('flex-1 overflow-y-auto', !fullscreen && minHeightClassName)}
-          />
-        </Suspense>
+          <Suspense
+            fallback={
+              <div className={cn('animate-pulse text-xs text-text-faint', minHeightClassName)}>
+                Loading editor…
+              </div>
+            }
+          >
+            <TiptapEditor
+              initialValue={draft}
+              externalValue={externalValue}
+              externalVersion={externalVersion}
+              onDirty={handleDirty}
+              onBlur={fullscreen ? commit : handleBlur}
+              onReady={(readLatestDraft) => {
+                readLatestDraftRef.current = readLatestDraft;
+              }}
+              autoFocus={autoFocus ?? true}
+              placeholder={placeholder}
+              className={cn('flex-1 overflow-y-auto', !fullscreen && minHeightClassName)}
+            />
+          </Suspense>
+        </EditorCrashBoundary>
       )}
     </div>
   );

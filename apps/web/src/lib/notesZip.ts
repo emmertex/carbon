@@ -1,6 +1,7 @@
 import { zipSync, strToU8, type Zippable } from 'fflate';
-import { allItems, getItem, type Db, type Item } from '@carbon/core';
+import { allItems, getItem, collectBlobRefs, type Db, type Item } from '@carbon/core';
 import { noteToMd, noteSlug, exportNoteMd } from './notesMd';
+import { readNoteMeta } from './noteMeta';
 import { getBlob } from './blobs';
 
 // Zip export of every `type:'note'` item, laid out per the plan:
@@ -39,12 +40,11 @@ export interface NotesManifest {
  *  isn't silently dropped from the exported `assets/` folder. */
 const BLOB_REF = /\/api\/blobs\/([0-9a-fA-F]{64})/g;
 
-/** All distinct blob hashes referenced by a note body. */
+/** All distinct blob hashes referenced by a note body. Delegates to core so the
+ *  export, the row thumbnails, and the blob-cache prefetcher can never disagree
+ *  about what counts as a reference; `BLOB_REF` above must stay in step with it. */
 export function collectAssetHashes(body: string | null | undefined): string[] {
-  if (!body) return [];
-  const out = new Set<string>();
-  for (const m of body.matchAll(BLOB_REF)) out.add(m[1]!.toLowerCase());
-  return [...out];
+  return collectBlobRefs(body);
 }
 
 /** Rewrite `/api/blobs/{hash}` references to the relative path the matching asset
@@ -121,7 +121,7 @@ export async function buildNotesFiles(
   // from notes/.
   for (const n of notes) {
     const body = rewriteBlobRefs(n.note ?? '', (hash) => `../assets/${hash}`);
-    const md = noteToMd({ title: n.title, parent: n.parent_id, body });
+    const md = noteToMd({ title: n.title, parent: n.parent_id, body, meta: readNoteMeta(n) });
     files[`notes/${slugs.get(n.id)!}.md`] = strToU8(md);
   }
 
@@ -211,7 +211,12 @@ export async function exportSingleNote(
   // Image refs point at the sibling assets/ folder — the .md sits at the zip root
   // here, unlike the bulk export's notes/ subfolder.
   const body = rewriteBlobRefs(item.note ?? '', (hash) => `assets/${hash}`);
-  const md = noteToMd({ title: item.title, parent: item.parent_id, body });
+  const md = noteToMd({
+    title: item.title,
+    parent: item.parent_id,
+    body,
+    meta: readNoteMeta(item),
+  });
   const files: Record<string, Uint8Array> = { [`${slug}.md`]: strToU8(md) };
   const missingAssets: string[] = [];
   for (const h of hashes) {

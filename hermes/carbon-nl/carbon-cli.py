@@ -18,6 +18,12 @@ Examples:
   carbon-cli nearby --tag coles
   carbon-cli lists
   carbon-cli items --list shopping
+  carbon-cli items --list recipes --notes --detail
+  carbon-cli note add "Spare key" --body "Under the pot by the back door."
+  carbon-cli note add "Sourdough" --recipe --list recipes --body-file sourdough.md
+  carbon-cli note append "Sourdough" "Rest for 45 min"
+  carbon-cli note show "Sourdough"
+  carbon-cli note search "rental car"
   carbon-cli resolve list "shoping"
   carbon-cli tag-geo coles --lat -37.81 --lng 145.01 --radius 200 --label "Coles Camberwell"
   carbon-cli add "Take son to swimming" --due 2026-07-07T17:00 --remind 2026-07-07T16:00 --repeat weekly:tue
@@ -154,8 +160,13 @@ def cmd_lists(a):
     resp = _fail(_api("GET", "/api/agent/lists"))
     if _emit(resp, a.json):
         return
-    names = [x["name"] for x in resp.get("lists", [])]
+    lists = resp.get("lists", [])
+    # A notebook holds notes, not tasks — marking it here is what stops a caller reading it
+    # with the task default and concluding it is empty.
+    names = [x["name"] + (" 📓" if x.get("notes") else "") for x in lists]
     print("Lists: " + (", ".join(names) if names else "(none)"))
+    if any(x.get("notes") for x in lists):
+        print("(📓 = notebook: holds notes. Read with `items --list \"<name>\"`.)")
 
 
 def cmd_tags(a):
@@ -171,7 +182,13 @@ def cmd_tags(a):
 
 def cmd_items(a):
     status = "all" if a.all else a.status
-    resp = _fail(_api("GET", "/api/agent/items" + _qs(list=a.list, tag=a.tag, q=a.q, status=status)))
+    # No --notes/--everything means no `type` at all, so the server picks: notes inside a
+    # notebook, tasks anywhere else.
+    itype = "note" if a.notes else ("all" if a.everything else None)
+    resp = _fail(_api("GET", "/api/agent/items" + _qs(
+        list=a.list, tag=a.tag, q=a.q, status=status, type=itype,
+        detail="1" if a.detail else None,
+    )))
     if _emit(resp, a.json):
         return
     items = resp.get("items", [])
@@ -179,11 +196,19 @@ def cmd_items(a):
     if not items:
         print(f"Nothing{where}.")
         return
-    print(f"Tasks{where}:")
+    kind = "Notes" if all(it.get("type") == "note" for it in items) and a.detail else "Items"
+    print(f"{kind}{where}:")
     for it in items:
         tags = (" [" + ", ".join(it.get("tags", [])) + "]") if it.get("tags") else ""
         mark = "✓ " if it.get("done") else "- "
-        print(f"  {mark}{it['title']}{tags}")
+        kindmark = " (recipe)" if it.get("note_mode") == "recipe" else ""
+        print(f"  {mark}{it['title']}{kindmark}{tags}")
+        body = it.get("note")
+        if a.detail and body:
+            for line in body.splitlines():
+                print(f"      {line}")
+            if it.get("note_truncated"):
+                print("      … (cut short — read this one with `note show \"<title>\"`)")
 
 
 def cmd_add(a):
@@ -252,6 +277,86 @@ def cmd_tag(a):
         print(f"Removed " + ", ".join(removed) + f" from {n} task{'' if n == 1 else 's'}")
 
 
+def _note_body(a):
+    """--body, or --body-file (use '-' for stdin) for anything multi-line, e.g. a recipe."""
+    if a.body_file:
+        if a.body_file == "-":
+            return sys.stdin.read()
+        with open(a.body_file) as fh:
+            return fh.read()
+    return a.body
+
+
+def cmd_note_add(a):
+    body = _note_body(a)
+    task = {"title": a.title}
+    # note_mode implies a note server-side; type:"note" is only needed without it — and is
+    # deliberately omitted inside a notebook, where the list already makes new items notes.
+    if a.recipe:
+        task["note_mode"] = "recipe"
+    else:
+        task["type"] = "note"
+    if body:
+        task["note"] = body
+    payload = {"tasks": [task], "list": a.list, "create_list_if_missing": not a.no_create}
+    resp = _fail(_api("POST", "/api/agent/tasks/batch", {k: v for k, v in payload.items() if v is not None}))
+    if _emit(resp, a.json):
+        return
+    created = resp.get("created", [])
+    if not created:
+        print("Nothing was created.")
+        return
+    lst = resp.get("list") or {}
+    where = f' in "{lst["name"]}"' if lst else ""
+    noun = "Recipe" if created[0].get("note_mode") == "recipe" else "Note"
+    print(f"{noun} saved{where}: {created[0]['title']}")
+
+
+def cmd_note_append(a):
+    """Append a line, keeping the existing body — never read-then-replace, which loses
+    whatever you didn't read back."""
+    resp = _fail(_api("POST", "/api/agent/tasks/update", {
+        "updates": [{"query": a.title, "list": a.list, "patch": {"note_append": a.text}}],
+    }))
+    if _emit(resp, a.json):
+        return
+    matched = resp.get("matched", [])
+    if matched:
+        print(f"Added to \"{matched[0]['title']}\": {a.text}")
+    else:
+        print(f"Couldn't find a note called '{a.title}'.")
+
+
+def cmd_note_show(a):
+    resp = _fail(_api("GET", "/api/agent/items" + _qs(
+        q=a.title, list=a.list, type="note", detail="1", full="1", limit=1, status="all",
+    )))
+    if _emit(resp, a.json):
+        return
+    items = resp.get("items", [])
+    if not items:
+        print(f"Couldn't find a note called '{a.title}'.")
+        return
+    it = items[0]
+    kind = " (recipe)" if it.get("note_mode") == "recipe" else ""
+    print(f"{it['title']}{kind}:")
+    print(it.get("note") or "(empty)")
+
+
+def cmd_note_search(a):
+    resp = _fail(_api("GET", "/api/agent/notes/search" + _qs(q=a.q, list=a.list, tag=a.tag, type=a.type)))
+    if _emit(resp, a.json):
+        return
+    matches = resp.get("matches", [])
+    if not matches:
+        print(f"No notes mention '{a.q}'.")
+        return
+    print(f"Notes mentioning '{a.q}':")
+    for m in matches:
+        kind = " (recipe)" if m.get("note_mode") == "recipe" else ""
+        print(f"  - {m['title']}{kind}: {m['snippet']}")
+
+
 def cmd_nearby(a):
     resp = _fail(_api("GET", "/api/agent/nearby" + _qs(tag=a.tag, zone=a.zone, lat=a.lat, lng=a.lng)))
     if _emit(resp, a.json):
@@ -275,7 +380,9 @@ def cmd_resolve(a):
         return
     top = cands[0]
     conf = "confident" if best and best.get("confident") else "unsure — ask the user"
-    print(f"Best {a.kind} for '{a.q}': {top['name']} ({conf})")
+    # kind:"task" matches notes too, so say which one won — only a task can be checked off.
+    what = f" [{top['type']}]" if top.get("type") and a.kind in ("task", "note") else ""
+    print(f"Best {a.kind} for '{a.q}': {top['name']}{what} ({conf})")
     if len(cands) > 1:
         print("Other: " + ", ".join(c["name"] for c in cands[1:]))
 
@@ -378,12 +485,15 @@ def build_parser():
     sp = sub.add_parser("tags", help="show tags (📍 = has a location)")
     sp.set_defaults(func=cmd_tags)
 
-    sp = sub.add_parser("items", help="show tasks in a list / with a tag")
+    sp = sub.add_parser("items", help="show tasks (or notes) in a list / with a tag")
     sp.add_argument("--list")
     sp.add_argument("--tag")
     sp.add_argument("--q")
     sp.add_argument("--status", default="active", choices=["active", "done", "all"])
     sp.add_argument("--all", action="store_true", help="include completed (same as --status all)")
+    sp.add_argument("--notes", action="store_true", help="notes only (a notebook lists notes anyway)")
+    sp.add_argument("--everything", action="store_true", help="tasks and notes together")
+    sp.add_argument("--detail", action="store_true", help="include note bodies, dates and flags")
     sp.set_defaults(func=cmd_items)
 
     sp = sub.add_parser("add", help="add one or more tasks to a list")
@@ -412,6 +522,36 @@ def build_parser():
     sp.add_argument("--remove", action="append", help="tag to remove (repeatable)")
     sp.set_defaults(func=cmd_tag)
 
+    sp = sub.add_parser("note", help="write, append to, read or search notes and recipes")
+    nsub = sp.add_subparsers(dest="note_cmd", required=True)
+
+    np_ = nsub.add_parser("add", help="write a new note (or recipe)")
+    np_.add_argument("title")
+    np_.add_argument("--body", help="the note body")
+    np_.add_argument("--body-file", dest="body_file", help="read the body from a file ('-' = stdin)")
+    np_.add_argument("--recipe", action="store_true", help="save it as a recipe (recipe editor)")
+    np_.add_argument("--list", help="notebook/list to file it under")
+    np_.add_argument("--no-create", action="store_true", help="don't auto-create a missing list")
+    np_.set_defaults(func=cmd_note_add)
+
+    np_ = nsub.add_parser("append", help="add a line to an existing note, keeping the rest")
+    np_.add_argument("title", help="note name (fuzzy)")
+    np_.add_argument("text")
+    np_.add_argument("--list")
+    np_.set_defaults(func=cmd_note_append)
+
+    np_ = nsub.add_parser("show", help="print one note in full")
+    np_.add_argument("title", help="note name (fuzzy)")
+    np_.add_argument("--list")
+    np_.set_defaults(func=cmd_note_show)
+
+    np_ = nsub.add_parser("search", help="search inside note bodies, not just titles")
+    np_.add_argument("q")
+    np_.add_argument("--list")
+    np_.add_argument("--tag")
+    np_.add_argument("--type", choices=["note", "task", "all"], default="note")
+    np_.set_defaults(func=cmd_note_search)
+
     sp = sub.add_parser("nearby", help="tasks at a place (by tag/zone/coords)")
     sp.add_argument("--tag")
     sp.add_argument("--zone")
@@ -419,8 +559,8 @@ def build_parser():
     sp.add_argument("--lng", type=float)
     sp.set_defaults(func=cmd_nearby)
 
-    sp = sub.add_parser("resolve", help="check how a name resolves (list|tag|task)")
-    sp.add_argument("kind", choices=["list", "tag", "task"])
+    sp = sub.add_parser("resolve", help="check how a name resolves (list|tag|task|note)")
+    sp.add_argument("kind", choices=["list", "tag", "task", "note"])
     sp.add_argument("q")
     sp.set_defaults(func=cmd_resolve)
 

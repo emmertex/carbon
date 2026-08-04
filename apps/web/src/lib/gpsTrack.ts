@@ -19,6 +19,7 @@ import {
 } from '@carbon/core';
 import { getDb } from './db';
 import { mutate } from './mutate';
+import { readNoteMeta } from './noteMeta';
 import { storeFile } from './blobs';
 import { isCapacitor } from './platform';
 import { watchPosition, type PositionWatch, type GeoPoint } from './location';
@@ -384,7 +385,15 @@ async function flushBufferAsNote(state: BufferState): Promise<boolean> {
       hash,
       createdBy: uid,
     });
-    updateItem(db, dev, noteId, { metadata: summaryJson });
+    // `metadata` is a single whole-value LWW field that other features write too
+    // (per-note recipe settings), so re-read and merge — a blind overwrite here
+    // destroys every key this module doesn't own. The summary stays at the TOP
+    // LEVEL rather than moving under a `gps` key: its field names collide with
+    // nothing, already-stored tracks keep parsing with no migration or fallback
+    // reader, and TaskDetail's MetadataPeek shows the shape it always has.
+    const existing = getItem(db, noteId);
+    const merged = { ...readNoteMeta({ metadata: existing?.metadata ?? null }), ...summary };
+    updateItem(db, dev, noteId, { metadata: JSON.stringify(merged) });
   });
 
   return true;

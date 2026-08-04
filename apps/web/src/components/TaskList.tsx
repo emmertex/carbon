@@ -15,6 +15,7 @@ import { useStore } from '@/lib/store';
 import { mutate } from '@/lib/mutate';
 import { TaskRow, type TaskRowData } from './TaskRow';
 import { SwipeableRow } from './SwipeableRow';
+import { SelectedAddTaskButtons } from './AddTaskButtons';
 
 /** The revealed subtasks of `parentId`, indented one level deeper. Recurses so a
  *  subtask's own subtasks reveal in turn. Children are only queried while the
@@ -71,6 +72,7 @@ function NestedRow({
           onToggleCollapse={data.hasChildren ? () => toggleExpanded(data.item.id) : undefined}
         />
       </SwipeableRow>
+      <SelectedAddTaskButtons itemId={data.item.id} depth={depth} />
       {expanded && data.hasChildren && (
         <SubtaskRows parentId={data.item.id} depth={depth + 1} showProject={showProject} />
       )}
@@ -102,6 +104,7 @@ function TopRow({
           onToggleCollapse={reveal ? () => toggleExpanded(data.item.id) : undefined}
         />
       </SwipeableRow>
+      <SelectedAddTaskButtons itemId={data.item.id} depth={0} />
       {reveal && expanded && (
         <SubtaskRows parentId={data.item.id} depth={1} showProject={showProject} />
       )}
@@ -142,6 +145,7 @@ function SortableRow({
           onToggleCollapse={reveal ? () => toggleExpanded(data.item.id) : undefined}
         />
       </SwipeableRow>
+      <SelectedAddTaskButtons itemId={data.item.id} depth={0} />
       {reveal && expanded && (
         <SubtaskRows parentId={data.item.id} depth={1} showProject={showProject} />
       )}

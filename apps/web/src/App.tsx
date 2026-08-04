@@ -17,16 +17,19 @@ import { TimerBar } from '@/components/TimerBar';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ListView } from '@/views/ListView';
 import { ContainerView } from '@/views/ContainerView';
+import { NoteView } from '@/views/NoteView';
 import { ForecastView } from '@/views/ForecastView';
 import { NearbyView } from '@/views/NearbyView';
 import { PlanView } from '@/views/PlanView';
 import { ReviewView } from '@/views/ReviewView';
 import { TimeTrackedView } from '@/views/TimeTrackedView';
 import { TagsView } from '@/views/TagsView';
+import { TrashView } from '@/views/TrashView';
 import { SignupView } from '@/views/SignupView';
 import { DeleteAccountView } from '@/views/DeleteAccountView';
 import { SignInGate } from '@/components/SignInGate';
 import { RenewGate } from '@/components/RenewGate';
+import { SyncEpochGate } from '@/components/SyncEpochGate';
 import { ComplexityPicker } from '@/components/onboarding/ComplexityPicker';
 import { SyncIntro } from '@/components/onboarding/SyncIntro';
 
@@ -97,6 +100,7 @@ function AppInner() {
   const baseDomain = useStore((s) => s.baseDomain);
   const localOnly = useStore((s) => s.localOnly);
   const workspaceLocked = useStore((s) => s.workspaceLocked);
+  const syncEpochMismatch = useStore((s) => s.syncEpochMismatch);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
   const closeDetail = useStore((s) => s.closeDetail);
@@ -116,7 +120,8 @@ function AppInner() {
   // click project B, and A's detail stays). The selection is kept only when it
   // matches the destination container route, so creating a project and landing on
   // it with its detail open still works; likewise the Tags panel survives while
-  // navigating between tag routes.
+  // navigating between tag routes. /note counts too — the note page opens its own
+  // detail from the title, and clearing here would dismiss it on arrival.
   const prevPath = useRef(location.pathname);
   useEffect(() => {
     if (location.pathname === prevPath.current) return;
@@ -125,15 +130,17 @@ function AppInner() {
     // Keep a selection that matches the destination container/tag route; clear it
     // otherwise (so opening item A's detail then navigating away dismisses it).
     // Tag ids contain ':' and spaces, so decode the path segment before comparing.
-    const rawRouteId = location.pathname.match(/^\/(?:project|focus|tag)\/(.+)$/)?.[1] ?? null;
+    const rawRouteId = location.pathname.match(/^\/(?:project|focus|tag|note)\/(.+)$/)?.[1] ?? null;
     const routeId = rawRouteId ? decodeURIComponent(rawRouteId) : null;
     if (s.selectedId && s.selectedId !== routeId) s.select(null);
   }, [location.pathname]);
 
   // Window-level `.md` drag-drop → import as a note. Dropped onto a project/focus
-  // container, the note is created under it; anywhere else it lands top-level. We
-  // skip handling when another drop target already handled the event (or when the
-  // pointer is over an editable control) so in-editor drops never get hijacked.
+  // container or a note page, the note is created under it (a note can hold
+  // children, so a drop there means "file it under this one"); anywhere else it
+  // lands top-level. We skip handling when another drop target already handled the
+  // event (or when the pointer is over an editable control) so in-editor drops
+  // never get hijacked.
   useEffect(() => {
     function onDragOver(e: DragEvent) {
       if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
@@ -164,7 +171,7 @@ function AppInner() {
         }
         return;
       }
-      const m = window.location.pathname.match(/^\/(?:project|focus)\/(.+)$/);
+      const m = window.location.pathname.match(/^\/(?:project|focus|note)\/(.+)$/);
       const parentId = m ? decodeURIComponent(m[1]!) : null;
       let last: string | null = null;
       let imported = 0;
@@ -225,8 +232,8 @@ function AppInner() {
     if (action === 'today') return navigate('/today');
     if (action === 'inbox') return navigate('/inbox');
     if (action === 'plan') return navigate('/plan');
-    // projectRoot: climb to the top-level project of the current container.
-    const m = location.pathname.match(/^\/(?:project|focus)\/(.+)$/);
+    // projectRoot: climb to the top-level project of the current container (or note).
+    const m = location.pathname.match(/^\/(?:project|focus|note)\/(.+)$/);
     if (!m) return navigate('/today');
     let cur = getItem(getDb(), m[1]!);
     while (cur?.parent_id) {
@@ -294,6 +301,10 @@ function AppInner() {
   // open-mode setups only reach this via the explicit button.
   const signedIn = !!currentUser && !currentUser.open;
   if (loginOpen || (authRequired && !signedIn)) return <SignInGate />;
+
+  // Sync epoch gate: server rebuilt its op log; incremental sync is blocked until
+  // the user wipes+re-pulls, goes offline, or (after downloading) recovers.
+  if (syncEpochMismatch && signedIn) return <SyncEpochGate />;
 
   // Renew gate: the workspace's subscription has lapsed (soft lock). Shown only on a
   // real signed-in workspace — local-only/open setups have no subscription to lapse.
@@ -386,6 +397,8 @@ function AppInner() {
                 <Route path="/time" element={<TimeTrackedView />} />
                 <Route path="/project/:id" element={<ContainerView />} />
                 <Route path="/focus/:id" element={<ContainerView />} />
+                <Route path="/note/:id" element={<NoteView />} />
+                <Route path="/trash" element={<TrashView />} />
                 <Route path="/tags" element={<TagsView />} />
                 <Route path="/tag/:id" element={<TagsView />} />
                 <Route path="/settings" element={<SettingsView />} />

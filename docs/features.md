@@ -12,8 +12,8 @@ works fully offline, local-only, with no account.
 - Self-hosted, fully local, or hosted cloud sync — your choice.
 - Offline-first: the entire database lives in the browser (WASM SQLite) and every change is
   applied locally first.
-- One codebase shipped as a **PWA** (installable) and wrapped natively for **Linux, Windows,
-  macOS** (Tauri) and **Android** (Capacitor); iOS planned.
+- One codebase shipped as a **PWA** (installable) and wrapped natively for **Linux, Windows**
+  (Tauri) and **Android** (Capacitor); macOS and iOS planned (help wanted).
 - Install prompt appears only in a browser (hidden in native apps and installed PWAs), with
   links to the app stores, website and GitHub.
 - Fully open source — no lock-in, no paywalled features.
@@ -34,6 +34,9 @@ works fully offline, local-only, with no account.
 - **Sync recovery** — live sync errors in Settings → Sync; **Reset local data** (wipe this
   device and re-download); **Merge** or **Replace** when signing in over existing local data;
   keep or **erase** local data on sign-out.
+- **Sync epoch mismatch (sync server)** — if an operator rebuilds the server's op log
+  (history compaction), clients are notified: download a local backup, clear cache and
+  re-download, or log out and keep working offline on the old local copy.
 - **Settings & view sync (sync server)** — UI preferences, per-view filters and saved
   perspectives follow you across devices (LWW, scoped to your account); on by default, pulled
   on first sign-in, and toggleable per device.
@@ -108,6 +111,11 @@ works fully offline, local-only, with no account.
   buttons) covering complete/reopen, flag, priority, add-to-Plan and delete. Undos apply as
   normal edits, so they sync.
 - Delete with an inline **Undo** snackbar (shares the same stack).
+- **Recently Deleted** — a sidebar view (shown whenever it has something in it) listing the
+  last 30 days of deletes, newest first, so a delete is recoverable long after the snackbar
+  and across reloads. One entry per delete: restoring a project or a task with sub-tasks
+  brings the whole subtree back where it was. Restores are ordinary edits, so they sync — and
+  they're undoable too.
 - Inline title editing with rapid-entry (Enter creates the next sibling).
 
 ## Collaboration & multi-user (sync server)
@@ -126,11 +134,29 @@ works fully offline, local-only, with no account.
   writing rather than doing. They skip auto-complete when a parent task is completed, stay
   out of Today/CalDAV action surfaces, and convert either way (**task ↔ note**) without
   losing data.
+- **Notes projects** — flip a project to **Notes** and it becomes a notebook: new items
+  in it default to notes, and its editor keeps only Colour and Sharing. Reversible; no
+  data is cleared either way.
+- **Note rows** are ~2.5× a task row and read as cards — the note's first image, its
+  title, and the first two lines of the body. Rows render a small generated
+  **thumbnail**, never the full-size image. An empty note (no image, no text) stays a
+  plain task-height row.
 - Rich note editor (TipTap) with Markdown, inline images, autosave and conflict handling;
   **zip export** of all notes (Markdown + images) from Data backup.
+- **Recipe notes** — flip a note to **Recipe** mode for a scaled read view (servings
+  pills, ingredients beside procedure). Settings → Recipes picks the cup/spoon
+  convention. **Optimise** rewrites messy Markdown into a parseable recipe via the
+  LLM agent **(sync server)**; a copy-able browser-assistant prompt imports a recipe
+  from a web page into Markdown that pastes straight in. Ingredient groups, method
+  stages and a trailing Notes section are preserved and scale as prose.
 - **Markdown** notes on tasks too (GFM).
 - Comment threads with `@mentions` and inline images.
 - Attachments on tasks and comments (local unlimited; ≤25 MB per file across sync).
+- **Blob cache policy** **(sync server)** — per device, choose what syncs ahead of
+  time: *On Load* (nothing), *Thumbnails* (default — lists render offline for
+  kilobytes), or *All* (full offline copy). Anything not prefetched arrives on first
+  display. The first two prune to an MB budget, least-recently-opened first; a manual
+  **Clear cached files** never drops blobs the server hasn't received yet.
 - Optional per-item **`metadata`** JSON (API + sync; readable in the side panel when set).
 
 ## Reminders & location
@@ -164,8 +190,8 @@ works fully offline, local-only, with no account.
   server-side LLM tool loop (add/complete/delete/rename/tag/schedule/share/assign/timers/
   geofence/nearby, whole-list and whole-tag ops, due/overdue queries), with per-command
   token tracking.
-- **Desktop quick-add** — global hotkey (`Ctrl/⌘+Shift+A`) + system-tray spotlight on Linux,
-  Windows and macOS.
+- **Desktop quick-add** — global hotkey (`Ctrl/⌘+Shift+A`) + system-tray spotlight on Linux
+  and Windows.
 
 ## AI & agents (sync server)
 
@@ -203,5 +229,9 @@ works fully offline, local-only, with no account.
 - Local-only mode keeps everything on the device — nothing leaves until you configure a sync
   server.
 - TLS in transit; workspace isolation and session-token auth on the server.
+- **Mandatory sync 2FA (sync server)** — enroll email one-time codes and/or an authenticator
+  app; either factor unlocks a new device. Trusted devices skip 2FA until reset. Humans use
+  session tokens after password + 2FA; integrations keep scoped `carbon_*` API tokens.
+- Soft-delete and admin password reset revoke sessions (and API tokens on delete).
 - No account required for local use; full data export at any time. See
   [data security](data-security.md).

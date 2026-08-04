@@ -11,14 +11,18 @@ import { perf } from './perf';
  *
  * `label` is purely for perf instrumentation (e.g. 'create', 'complete') so the
  * benchmark can tell mutation kinds apart; it has no runtime effect when perf is
- * disabled.
+ * disabled — except `'setting'`, which skips the item `dbRevision` bump because
+ * settings writes don't change the item graph (bumping would wipe `queryRoots`
+ * caches and freeze the sidebar recounting every perspective).
  */
 export function mutate<T>(fn: (db: Db, deviceId: string) => T, label = 'mutate'): T {
   const db = getDb();
   const dev = getDeviceId();
   const result = perf.time('mutation', label, () => fn(db, dev));
   schedulePersist();
-  perf.time('mutation', 'notify', () => useStore.getState().bump());
+  if (label !== 'setting') {
+    perf.time('mutation', 'notify', () => useStore.getState().bump());
+  }
   scheduleSync();
   return result;
 }

@@ -52,7 +52,21 @@ const GROUPS: Group[] = [
       {
         feature: "First-class notes",
         detail:
-          "Dedicated note items with rich Markdown editing, convert task ↔ note, plus GFM notes on tasks.",
+          "Dedicated note items with rich Markdown editing, notes projects, card rows + thumbnails, convert task ↔ note, plus GFM notes on tasks.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Recipe notes",
+        detail:
+          "Scaled servings view offline; Optimise rewrite (sync server) and a copy-able import prompt for messy web recipes.",
+        local: true,
+        server: true,
+      },
+      {
+        feature: "Recently Deleted",
+        detail:
+          "Restore a deleted task or whole cascade for 30 days after the undo snackbar.",
         local: true,
         server: true,
       },
@@ -64,7 +78,7 @@ const GROUPS: Group[] = [
       },
       {
         feature: "Desktop quick-add",
-        detail: "Global hotkey and tray spotlight capture on Linux, Windows and Mac.",
+        detail: "Global hotkey and tray spotlight capture on Linux and Windows.",
         local: true,
         server: true,
       },
@@ -126,18 +140,20 @@ const GROUPS: Group[] = [
         why: "Each device keeps its own local database. A sync server is the relay that moves changes between them — without one there is nothing to sync to.",
       },
       {
-        feature: "Accounts & sign-in",
-        detail: "Hosted or self-hosted workspaces addressed by their own subdomain.",
-        local: false,
-        server: true,
-        why: "Accounts, sessions and workspace addressing all live on the server. Local-only mode has no account by design — your data simply stays on the device.",
-      },
-      {
         feature: "Attachments across devices",
-        detail: "Files you attach are available on every signed-in device.",
+        detail:
+          "Files you attach are available on every signed-in device. Per-device blob cache: On Load / Thumbnails / All.",
         local: false,
         server: true,
         why: "Local-only attachments live in that device's storage. Sharing them across devices needs the server's content-addressed, access-checked blob storage.",
+      },
+      {
+        feature: "Accounts, sign-in & 2FA",
+        detail:
+          "Hosted or self-hosted workspaces with mandatory email and/or authenticator 2FA and trusted devices.",
+        local: false,
+        server: true,
+        why: "Accounts, sessions, 2FA and workspace addressing all live on the server. Local-only mode has no account by design — your data simply stays on the device.",
       },
       {
         feature: "Push notifications across devices",

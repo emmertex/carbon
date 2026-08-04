@@ -61,7 +61,8 @@ export function FeaturesSection() {
         <SegmentedControl
           value={complexity}
           onChange={choosePreset}
-          segmentClassName="px-2.5"
+          block
+          segmentClassName="px-2"
           options={PRESETS.map((p) => ({ value: p.id, label: p.label }))}
         />
       </div>

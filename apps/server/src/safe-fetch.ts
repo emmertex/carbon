@@ -27,6 +27,24 @@ function nat64EmbeddedIPv4(rest: string): string | null {
   return null;
 }
 
+/** Extract the IPv4 address embedded in an IPv4-mapped IPv6 address (::ffff:0:0/96).
+ *  Accepts compressed (`::ffff:…`) and fully-expanded (`0:0:0:0:0:ffff:…`) forms, and
+ *  both dotted-quad (`127.0.0.1`) and hex-group (`7f00:1`) suffixes. Returns null when
+ *  the address is not IPv4-mapped. */
+function ipv4MappedEmbedded(v: string): string | null {
+  const rest =
+    v.match(/^::ffff:(.+)$/)?.[1] ??
+    v.match(/^(?:0:){5}ffff:(.+)$/)?.[1] ??
+    null;
+  if (!rest) return null;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(rest)) return rest;
+  const hex = rest.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return null;
+  const hi = parseInt(hex[1], 16);
+  const lo = parseInt(hex[2], 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 export function isPrivateIp(ip: string): boolean {
   if (ip.includes(":")) {
     const v = ip.toLowerCase();
@@ -39,8 +57,8 @@ export function isPrivateIp(ip: string): boolean {
     )
       return true; // fe80::/10 link-local
     if (v.startsWith("fc") || v.startsWith("fd")) return true; // fc00::/7 ULA
-    const m = v.match(/::ffff:(\d+\.\d+\.\d+\.\d+)/);
-    if (m) return isPrivateIp(m[1]);
+    const mapped = ipv4MappedEmbedded(v);
+    if (mapped) return isPrivateIp(mapped);
     if (v.startsWith("64:ff9b::")) {
       // NAT64 well-known prefix: embeds an IPv4 address in the low 32 bits.
       const embedded = nat64EmbeddedIPv4(v.slice("64:ff9b::".length));
@@ -116,6 +134,32 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * Headers that authenticate the caller to the host it addressed, and so must not
+ * travel past a redirect that leaves that origin: a `302` from a compromised (or
+ * plain-`http:`, MITM'd) endpoint to an attacker host would otherwise hand over the
+ * agent's API key, a webhook secret, or CalDAV Basic credentials. Mirrors the
+ * cross-origin stripping undici and browsers do for `Authorization`/`Cookie`, plus
+ * the header names Carbon puts secrets in.
+ *
+ * The request *body* still follows a 307/308 per spec, so a secret sent in a body
+ * (federation's `__link_secret`) is only as safe as the peer origin it was sent to.
+ */
+const CREDENTIAL_HEADERS = [
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'x-api-key',
+  'x-carbon-secret',
+  'x-federation-secret',
+];
+
+function stripCredentials(headers: RequestInit["headers"]): Headers {
+  const stripped = new Headers(headers ?? {});
+  for (const name of CREDENTIAL_HEADERS) stripped.delete(name);
+  return stripped;
+}
+
 /** A dispatcher whose DNS resolution is pinned to exactly the addresses already
  *  validated by checkSafeEndpoint — so the connection actually made can't differ from
  *  the one that was checked (no re-resolve, no DNS-rebinding window). SNI/Host still use
@@ -156,13 +200,18 @@ export async function safeFetch(
   let current = url;
   let method = init?.method ?? "GET";
   let body = init?.body;
+  let headers = init?.headers;
+  let origin: string | null = null;
   for (let hop = 0; ; hop++) {
     const { addresses } = await checkSafeEndpoint(current, allowPrivate);
+    // Safe to parse: checkSafeEndpoint just did, and threw if it wasn't a URL.
+    origin ??= new URL(current).origin;
     const dispatcher = addresses.length ? pinnedDispatcher(addresses) : undefined;
     const res = await fetch(current, {
       ...init,
       method,
       body,
+      headers,
       redirect: "manual",
       signal,
       ...(dispatcher ? { dispatcher } : {}),
@@ -181,6 +230,11 @@ export async function safeFetch(
       method = "GET";
       body = undefined;
     }
-    current = new URL(location, current).toString();
+    const next = new URL(location, current);
+    // Credentials belong to the origin the caller chose. Once the chain leaves it
+    // they stop travelling — and they stay gone if a later hop comes back, since
+    // `headers` is never restored from `init`.
+    if (next.origin !== origin) headers = stripCredentials(headers);
+    current = next.toString();
   }
 }

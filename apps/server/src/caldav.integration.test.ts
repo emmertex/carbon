@@ -405,10 +405,16 @@ test("a re-sync heals a pre-existing orphan task (null owner) into visibility", 
   );
   await syncProject(db, dev, getCaldavConfigRow(db, owned.id)!, true);
   const t = getChildren(db, owned.id).find((k) => k.title === "Heal me")!;
-  // simulate the pre-fix orphan: strip the owner so it's invisible
+  // Simulate a pre-fix orphan: strip the owner. The child stays visible because it
+  // lives under bob's owned project (owned subtrees are in visibleItemIds), but
+  // owner_id itself must still be healed on the next sync.
   updateItem(db, dev, t.id, { owner_id: null });
-  assert.ok(!visibleItemIds(db, "bob").has(t.id));
-  // next sync heals it back to the project owner
+  assert.ok(
+    visibleItemIds(db, "bob").has(t.id),
+    "orphan under an owned project remains visible via the owned subtree",
+  );
+  assert.equal(getItem(db, t.id)!.owner_id, null);
+  // next sync heals owner_id back to the project owner
   await syncProject(db, dev, getCaldavConfigRow(db, owned.id)!, true);
   assert.equal(getItem(db, t.id)!.owner_id, "bob");
   assert.ok(visibleItemIds(db, "bob").has(t.id));

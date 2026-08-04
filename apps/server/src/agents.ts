@@ -74,7 +74,12 @@ export function ensureAgentUsageTables(db: Db): void {
   `);
 }
 
-export type UsageKind = 'comment_reply' | 'nl_command' | 'telegram_command' | 'filter_build';
+export type UsageKind =
+  | 'comment_reply'
+  | 'nl_command'
+  | 'telegram_command'
+  | 'filter_build'
+  | 'recipe_optimise';
 
 export function recordAgentUsage(
   db: Db,
@@ -356,6 +361,26 @@ export interface ChatTuning {
   temperature?: number;
   /** OpenAI-compatible reasoning models only (GPT-OSS, o-series). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Anthropic only — that path must send a cap, and its 1024 default truncates long
+   *  rewrites. The OpenAI-compatible path sends none, letting the provider decide. */
+  maxTokens?: number;
+  /** Socket timeout for this call, overriding LLM_TIMEOUT_MS. Raise it for a single
+   *  long generation (a whole-document rewrite on a reasoning model). */
+  timeoutMs?: number;
+}
+
+/** Outbound timeout for a model call. `safeFetch`'s own 15s default is sized for
+ *  geocoding and CalDAV; an LLM is long-running by nature, and a local reasoning model
+ *  spends most of that budget thinking before it emits a single token — at 15s the
+ *  request is cancelled mid-reasoning and surfaces as a provider error, which reads as
+ *  "the model failed" rather than "we hung up on it". This only ever changes the
+ *  failure path: a call that already answered in time is unaffected. */
+const LLM_TIMEOUT_MS = 120_000;
+
+/** True for the DOMException `fetch` raises when an AbortSignal.timeout fires, so callers
+ *  can report "took too long" instead of a generic upstream failure. */
+export function isTimeoutError(e: unknown): boolean {
+  return e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
 }
 
 // Agents whose provider demonstrably rejects tuning params (the stripped retry succeeded).
@@ -437,7 +462,7 @@ export async function chatLLM(
       });
     const body: Record<string, unknown> = {
       model: agent.model || 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: tuning?.maxTokens ?? 1024,
       messages: amsgs,
     };
     if (tuning?.temperature != null) body.temperature = tuning.temperature;
@@ -448,15 +473,20 @@ export async function chatLLM(
         description: t.description,
         input_schema: t.parameters,
       }));
-    const res = await safeFetch(url, allowPrivate, {
-      method: 'POST',
-      headers: {
-        'x-api-key': agent.api_key ?? '',
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
+    const res = await safeFetch(
+      url,
+      allowPrivate,
+      {
+        method: 'POST',
+        headers: {
+          'x-api-key': agent.api_key ?? '',
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      tuning?.timeoutMs ?? LLM_TIMEOUT_MS,
+    );
     if (!res.ok) throw new LLMHttpError(res.status, `POST ${url}: ${snippet(await res.text())}`);
     const d = (await res.json()) as {
       content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
@@ -510,11 +540,16 @@ export async function chatLLM(
     if (tuning.reasoningEffort) body.reasoning_effort = tuning.reasoningEffort;
   }
   const post = (b: Record<string, unknown>) =>
-    safeFetch(url, allowPrivate, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${agent.api_key ?? ''}`, 'content-type': 'application/json' },
-      body: JSON.stringify(b),
-    });
+    safeFetch(
+      url,
+      allowPrivate,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${agent.api_key ?? ''}`, 'content-type': 'application/json' },
+        body: JSON.stringify(b),
+      },
+      tuning?.timeoutMs ?? LLM_TIMEOUT_MS,
+    );
   let res = await post(body);
   if (!res.ok && tuned && (res.status === 400 || res.status === 422) && ('temperature' in body || 'reasoning_effort' in body)) {
     // The 400 might be the provider rejecting the tuning params (pinned temperature, no
@@ -562,6 +597,7 @@ async function callLLM(
   system: string,
   userText: string,
   allowPrivate: boolean,
+  tuning?: ChatTuning,
 ): Promise<{ text: string; usage: Usage }> {
   const r = await chatLLM(
     agent,
@@ -571,6 +607,7 @@ async function callLLM(
     ],
     [],
     allowPrivate,
+    tuning,
   );
   return { text: r.text, usage: r.usage };
 }
@@ -642,6 +679,9 @@ export async function testAgent(
       'You are a connectivity test.',
       'Reply with the word: ok',
       allowPrivate,
+      // Someone is watching a Test button: a reachable model answers "ok" in seconds, so
+      // fail fast rather than making them wait out the full generation budget.
+      { timeoutMs: 20_000 },
     );
     return { ok: true, message: `Model replied: ${snippet(text.trim(), 80) || '(empty)'}` };
   } catch (e) {

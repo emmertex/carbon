@@ -1,16 +1,21 @@
-import { Navigate } from 'react-router-dom';
+import { useState } from 'react';
 import { MapPin } from 'lucide-react';
 import { tasksNearLocation } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
 import { PlanList, GroupingToggle, planEntry } from '@/components/PlanList';
 import { LocationSources } from '@/components/LocationSources';
+import { refreshWhere } from '@/lib/where';
+import { geolocationSupported } from '@/lib/location';
+import { btnPrimary } from '@/components/ui/controls';
+import { cn } from '@/lib/cn';
 
 /** Round a coordinate to ~5 decimal places (≈1m) for display. */
 const fmtCoord = (n: number) => n.toFixed(5);
 
 export function NearbyView() {
   const where = useWhere();
+  const [requesting, setRequesting] = useState(false);
 
   const data = useQuery(
     (db) => {
@@ -21,14 +26,68 @@ export function NearbyView() {
     [where.zone, where.point?.lat, where.point?.lng],
   );
 
-  // The nav item is hidden when there's no location, but a user could still hit the
-  // route directly — redirect there is nothing to show. Wait until resolution has
-  // run at least once so we don't bounce away before the first fetch lands.
-  if (where.resolved && !where.hasLocation) return <Navigate to="/today" replace />;
-
   const gpsLabel = where.point
     ? where.place ?? `${fmtCoord(where.point.lat)}, ${fmtCoord(where.point.lng)}`
     : null;
+
+  async function enableLocation() {
+    setRequesting(true);
+    try {
+      refreshWhere();
+      // Give the async resolve a moment so the button isn't a no-op flash.
+      await new Promise((r) => setTimeout(r, 800));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  // Wait until resolution has run at least once so we don't flash the empty
+  // state before the first GPS/HA fetch lands.
+  if (!where.resolved) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+          <MapPin size={22} className="text-accent" />
+          Nearby
+        </h1>
+        <p className="mt-4 text-sm text-text-muted">Finding your location…</p>
+      </div>
+    );
+  }
+
+  if (!where.hasLocation) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
+        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+          <MapPin size={22} className="text-accent" />
+          Nearby
+        </h1>
+        <div className="mt-6 rounded-xl border border-dashed border-border px-4 py-10 text-center">
+          <p className="text-sm text-text-muted">
+            Nearby shows tasks tagged or located near where you are. Carbon needs
+            location access (this device&apos;s GPS, or a linked Home Assistant
+            zone) to match them.
+          </p>
+          {geolocationSupported() && (
+            <button
+              type="button"
+              className={cn(btnPrimary, 'mt-4')}
+              disabled={requesting}
+              onClick={() => void enableLocation()}
+            >
+              {requesting ? 'Requesting…' : 'Enable location'}
+            </button>
+          )}
+          {!geolocationSupported() && (
+            <p className="mt-3 text-xs text-text-faint">
+              This browser doesn&apos;t support geolocation. Link a location source
+              in Settings, or open Carbon on a device that can share GPS.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">

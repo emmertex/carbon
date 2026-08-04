@@ -22,7 +22,9 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
   mode, data ownership, and the model's boundaries.
 - [**Federation & cross-workspace sharing**](federation.md) — L2/L3 federation (off by
   default): share a project subtree with another workspace on the same host or a different
-  Carbon server.
+  Carbon server. Includes notes on sync-epoch resets and peer re-bootstrap.
+- [**Sync log growth & epoch reset**](sync-epoch.md) — when the append-only op log hurts
+  performance, safe compaction vs operator epoch reset, and client recovery.
 - [**Privacy policy**](privacy-policy.md) — what the app stores locally vs on a sync server.
 
 ### Apps & integrations

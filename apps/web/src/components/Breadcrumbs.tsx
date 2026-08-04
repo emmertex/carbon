@@ -2,6 +2,8 @@ import { Link } from 'react-router-dom';
 import { Home, ChevronRight } from 'lucide-react';
 import { getItem, type Db, type Item } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
+import { itemRoute } from '@/lib/itemRoute';
+import { cn } from '@/lib/cn';
 
 function chain(db: Db, id: string): Item[] {
   const result: Item[] = [];
@@ -15,16 +17,12 @@ function chain(db: Db, id: string): Item[] {
   return result;
 }
 
-function hrefFor(item: Item): string {
-  return item.type === 'project' ? `/project/${item.id}` : `/focus/${item.id}`;
-}
-
-export function Breadcrumbs({ id }: { id: string }) {
+export function Breadcrumbs({ id, className }: { id: string; className?: string }) {
   const ancestors = useQuery((db) => chain(db, id), [id]) ?? [];
   if (ancestors.length === 0) return null;
 
   return (
-    <nav className="mb-3 flex items-center gap-1 text-sm text-text-muted">
+    <nav className={cn('mb-3 flex items-center gap-1 text-sm text-text-muted', className)}>
       <Link to="/today" className="flex items-center hover:text-text" aria-label="Home">
         <Home size={15} />
       </Link>
@@ -36,7 +34,7 @@ export function Breadcrumbs({ id }: { id: string }) {
             {last ? (
               <span className="font-medium text-text">{item.title || 'Untitled'}</span>
             ) : (
-              <Link to={hrefFor(item)} className="truncate hover:text-text">
+              <Link to={itemRoute(item)} className="truncate hover:text-text">
                 {item.title || 'Untitled'}
               </Link>
             )}

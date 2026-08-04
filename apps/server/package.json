@@ -11,7 +11,8 @@
     "test": "tsx --test --experimental-test-coverage \"src/**/*.test.ts\"",
     "add-user": "tsx scripts/add-user.ts",
     "mfa-admin": "tsx scripts/mfa-admin.ts",
-    "backup": "tsx scripts/backup-dbs.ts"
+    "backup": "tsx scripts/backup-dbs.ts",
+    "reset-sync-epoch": "tsx scripts/reset-sync-epoch.ts"
   },
   "dependencies": {
     "@carbon/core": "*",

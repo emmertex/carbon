@@ -13,7 +13,9 @@ import {
   Target,
   FileText,
   Download,
+  Maximize2,
 } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   getItem,
   getProjects,
@@ -52,6 +54,7 @@ import {
   removeFromPlan,
   taskActualMs,
   projectEstimateMinutes,
+  trackedMs,
   type RecurrenceRule,
   type Permission,
   type OrderMode,
@@ -70,6 +73,7 @@ import { Section } from "./Section";
 import { useFeature } from "@/hooks/useFeature";
 import { TagMark } from "./TagMark";
 import { NoteEditor } from "./NoteEditor";
+import { RecipeView } from "./RecipeView";
 import { itemTagsResolved } from "@/lib/enrich";
 import { abbreviateTagPath } from "@/lib/tagLabel";
 import { holdCompleted, releaseCompleted } from "@/lib/completion";
@@ -80,6 +84,9 @@ import { useFocusItem } from "@/hooks/useFocusItem";
 import { mutate } from "@/lib/mutate";
 import { getDb } from "@/lib/db";
 import { exportSingleNote, collectAssetHashes } from "@/lib/notesZip";
+import { ensureNoteThumb } from "@/lib/thumbs";
+import { readNoteMeta, patchNoteMeta } from "@/lib/noteMeta";
+import { RECIPE_TEMPLATE, type NoteMode } from "@/lib/recipe";
 import { useStore } from "@/lib/store";
 import {
   toDateInput,
@@ -94,7 +101,6 @@ import {
   formatDuration,
   formatMinutes,
   formatDue,
-  logDuration,
 } from "@/lib/date";
 import { cn } from "@/lib/cn";
 import {
@@ -102,6 +108,7 @@ import {
   chipCls,
   btnIcon,
   btnPrimary,
+  btnSecondary,
   Label,
   Pill,
 } from "./ui/controls";
@@ -303,6 +310,8 @@ export function TaskDetail({ id }: { id: string }) {
   const select = useStore((s) => s.select);
   const currentUser = useStore((s) => s.currentUser);
   const focusItem = useFocusItem();
+  const navigate = useNavigate();
+  const { pathname, search } = useLocation();
   const data = useQuery(
     (db) => {
       const item = getItem(db, id);
@@ -348,7 +357,35 @@ export function TaskDetail({ id }: { id: string }) {
           !!item.parent_id && getItem(db, item.parent_id)?.type === "task",
         tags: itemTagsResolved(db, item.id),
         allTags: listTags(db),
-        timeLogs: getTimeLogs(db, id),
+        timeLogs: (() => {
+          const logs = getTimeLogs(db, id);
+          // Billable totals — never sum raw session+pause+task rows (inbox tasks
+          // share session.item_id with the task and would double-count).
+          const byUser = new Map<string | null, number>();
+          const add = (uid: string | null, ms: number) => {
+            if (ms <= 0) return;
+            byUser.set(uid, (byUser.get(uid) ?? 0) + ms);
+          };
+          let totalMs = 0;
+          if (item.type === "project") {
+            for (const sess of logs.filter((l) => l.kind === "session")) {
+              const ms = trackedMs(db, sess);
+              totalMs += ms;
+              add(sess.user_id, ms);
+            }
+          } else {
+            for (const l of logs.filter((l) => l.kind === "task")) {
+              const ms = Math.max(
+                0,
+                (l.end_time ? new Date(l.end_time).getTime() : Date.now()) -
+                  new Date(l.start_time).getTime(),
+              );
+              totalMs += ms;
+              add(l.user_id, ms);
+            }
+          }
+          return { logs, totalMs, byUser: [...byUser.entries()] };
+        })(),
         trackingHere: ctx.task?.item_id === id && !ctx.paused,
         roster: listUsers(db),
         shares: listSharesForItem(db, id),
@@ -368,6 +405,18 @@ export function TaskDetail({ id }: { id: string }) {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const seededId = useRef<string | null>(null);
   const [tagInput, setTagInput] = useState("");
+  // Which detail sections show expanded by default follows the UI-complexity
+  // features — this is presentation only; every section stays here and fully usable.
+  // Must stay above the !data early return (React hooks rule); deleting the selected
+  // item used to skip these and throw React #300.
+  const gtdTools = useFeature("gtdTools");
+  const locationOn = useFeature("nearby");
+  const timeOn = useFeature("timeTracking");
+  // "More…" reveal for defer-until when GTD tools are off (still fully accessible).
+  const [showDefer, setShowDefer] = useState(false);
+  // Recipe mode shows a read-only scaled view; Edit swaps the editor in for it.
+  // Never both at once — two live editors on one `note` field race their autosaves.
+  const [noteEditing, setNoteEditing] = useState(false);
   // The Notes field's own editing/dirty/conflict state lives inside NoteEditor —
   // it needs a snapshot-at-open-time to detect remote changes, which a simple
   // reseed-on-prop-change effect here can't express. `data.item.note` is passed
@@ -376,6 +425,9 @@ export function TaskDetail({ id }: { id: string }) {
   // see hooks/useQuery.ts and lib/sync.ts), NoteEditor sees remote note changes
   // reactively without any extra subscription.
   const note = data?.item.note ?? "";
+
+  // Selecting a different item must never carry an open recipe editor across to it.
+  useEffect(() => setNoteEditing(false), [id]);
 
   useEffect(() => {
     if (!data?.item) return;
@@ -400,6 +452,9 @@ export function TaskDetail({ id }: { id: string }) {
     );
   }
 
+  const timeBundle = data.timeLogs;
+  const totalTime = timeBundle.totalMs;
+  const perUser = timeBundle.byUser.filter(([, ms]) => ms > 0);
   const {
     item,
     hasChildren,
@@ -411,7 +466,6 @@ export function TaskDetail({ id }: { id: string }) {
     projectId,
     tags,
     allTags,
-    timeLogs,
     trackingHere,
     roster,
     shares,
@@ -425,6 +479,26 @@ export function TaskDetail({ id }: { id: string }) {
   // Simplified panel for notes (plan: title + Note pill + full-height body editor +
   // expand button; task-only sections hidden — fields stay in the DB, just unshown).
   const isNote = item.type === "note";
+  // A notes container: a project whose children are notes. Its editor keeps only
+  // what still means something for a pile of notes — colour and sharing. Every
+  // task-scheduling control (review cadence, order mode, CalDAV, dates, location,
+  // time tracking) is hidden; the underlying columns are untouched and come back
+  // if it's switched to a normal project.
+  const isNotesProject = isProject && item.notes_project;
+  // How this note's body renders. Called `noteMode` (not `mode`) because NoteEditor
+  // owns a local `mode` of its own ('rendered' | 'source'). Metadata is parsed but
+  // not validated (see noteMeta.ts), so anything but 'recipe' reads as the default.
+  const noteMode: NoteMode =
+    isNote && readNoteMeta(item).noteMode === "recipe" ? "recipe" : "notes";
+  // True when the note is also open full-page behind this pane. It has its own live
+  // editor there, and a second one over the same field would race its autosaves.
+  const onOwnPage = (() => {
+    const raw = pathname.match(/^\/note\/(.+)$/)?.[1];
+    return !!raw && decodeURIComponent(raw) === id;
+  })();
+  // Whether the pane's note body is the read-only recipe view rather than an editor.
+  // Drives the body's height rule below — the two need opposite treatment.
+  const showRecipe = isNote && !onOwnPage && noteMode === "recipe" && !noteEditing;
   const rosterById = new Map(roster.map((u) => [u.id, u]));
   // "From @host" provenance: the owner is a federation shadow (remote) user.
   const ownerUser = item.owner_id ? rosterById.get(item.owner_id) : undefined;
@@ -433,20 +507,6 @@ export function TaskDetail({ id }: { id: string }) {
   const shareableUsers = roster.filter((u) => u.id !== currentUser?.id);
   const done = item.status === "done";
   const recurrence = parseRecurrence(item.recurrence);
-  const totalTime = timeLogs.reduce(
-    (sum, l) => sum + logDuration(l.start_time, l.end_time),
-    0,
-  );
-
-  // Per-user time totals (only users who tracked time).
-  const byUser = new Map<string | null, number>();
-  for (const l of timeLogs) {
-    byUser.set(
-      l.user_id,
-      (byUser.get(l.user_id) ?? 0) + logDuration(l.start_time, l.end_time),
-    );
-  }
-  const perUser = [...byUser.entries()].filter(([, ms]) => ms > 0);
 
   function toggleTimer() {
     if (trackingHere) void trackingStopActive();
@@ -487,14 +547,37 @@ export function TaskDetail({ id }: { id: string }) {
   // flags, priority, status, deps) but they go inert; flipping back restores the
   // prior status automatically since it was never cleared. Selecting a status pill
   // on a note both converts it to a task and applies that status in one op.
+  //
+  // On a PROJECT the same pill means something different: a project can't become a
+  // note (it's a container), so "Notes" flips `notes_project` instead — the
+  // container itself stays a project, its children just become notes by default.
   function setType(next: "task" | "note") {
     if (item.type === next) return;
     patch({ type: next });
+  }
+  function selectNotePill() {
+    if (isProject) patch({ notes_project: true });
+    else setType("note");
+  }
+  // Recipe vs plain notes is a render mode over the same Markdown body, so it lives
+  // in metadata rather than a column. Switching to Recipe on an EMPTY note seeds the
+  // skeleton; it never appends to a body that already has content (a mis-tap must not
+  // be destructive), and switching back to Notes leaves the body completely alone.
+  function selectNoteMode(next: NoteMode) {
+    if (next === noteMode) return;
+    patchNoteMeta(id, { noteMode: next });
+    if (next === "recipe" && !note.trim()) commitNote(RECIPE_TEMPLATE);
+    setNoteEditing(false);
   }
   function selectStatusPill(next: Item["status"]) {
     if (item.type === "note") {
       // Convert back to a task and apply the chosen status in a single op.
       patch({ type: "task", status: next });
+    } else if (isNotesProject) {
+      // Back to an ordinary project: its task controls (and the fields behind
+      // them, which were never cleared) reappear.
+      patch({ notes_project: false });
+      setStatus(next);
     } else {
       setStatus(next);
     }
@@ -526,7 +609,12 @@ export function TaskDetail({ id }: { id: string }) {
   }
   function commitNote(next: string) {
     const v = next.trim() ? next : null;
-    if (v !== item.note) patch({ note: v });
+    if (v === item.note) return;
+    patch({ note: v });
+    // Re-render the row thumbnail if this save changed the body's first image.
+    // Async and best-effort: the note is already saved, the thumbnail just catches
+    // up (and no-ops when the first image is unchanged).
+    void ensureNoteThumb(id);
   }
 
   function addTag(name: string) {
@@ -559,8 +647,10 @@ export function TaskDetail({ id }: { id: string }) {
 
   function remove() {
     if (!window.confirm("Delete this item and its sub-tasks?")) return;
-    mutate((db, dev) => deleteItem(db, dev, id));
+    // Clear selection first so this pane unmounts before the query returns null
+    // (avoids a one-frame "Task not found" flash after delete).
     select(null);
+    mutate((db, dev) => deleteItem(db, dev, id));
   }
 
   function togglePlan() {
@@ -592,14 +682,6 @@ export function TaskDetail({ id }: { id: string }) {
         : shareItem(db, dev, id, userId, perm),
     );
   }
-
-  // Which detail sections show expanded by default follows the UI-complexity
-  // features — this is presentation only; every section stays here and fully usable.
-  const gtdTools = useFeature("gtdTools");
-  const locationOn = useFeature("nearby");
-  const timeOn = useFeature("timeTracking");
-  // "More…" reveal for defer-until when GTD tools are off (still fully accessible).
-  const [showDefer, setShowDefer] = useState(false);
 
   // --- collapsed-section summaries ---
   const scheduleSummary = item.due_date
@@ -681,6 +763,23 @@ export function TaskDetail({ id }: { id: string }) {
         >
           <Flag size={17} fill={item.flagged ? "currentColor" : "none"} />
         </button>
+        {item.type === "note" && !onOwnPage && (
+          // Notes outgrow a 380px pane — a recipe's two columns need the page.
+          // Close the detail pane and remember where we came from so NoteView can
+          // offer a Return that restores the previous list/project view.
+          <button
+            type="button"
+            onClick={() => {
+              select(null);
+              navigate(`/note/${id}`, { state: { from: `${pathname}${search}` } });
+            }}
+            className={cn(btnIcon, "flex items-center p-2")}
+            aria-label="Open full page"
+            title="Open this note full-page"
+          >
+            <Maximize2 size={17} />
+          </button>
+        )}
         {item.type === "note" && (
           <button
             onClick={() => void exportSingleNote(getDb(), id)}
@@ -755,12 +854,17 @@ export function TaskDetail({ id }: { id: string }) {
             />
             {/* Lifecycle status — a segmented pill directly under the title. Active/
                 Done/Dropped always render (including projects) so every lifecycle
-                state remains reachable; the "Note" conversion pill is task-only. */}
+                state remains reachable. The last pill converts: on a task it makes
+                the item a note; on a project it makes the project a notes
+                container ("Notes"), whose children default to notes. Folders have
+                neither meaning, so they get status only. */}
             <SegmentedControl<Item["status"] | "note">
               className="mt-1"
-              value={item.type === "note" ? "note" : item.status}
+              value={
+                item.type === "note" || isNotesProject ? "note" : item.status
+              }
               onChange={(v) =>
-                v === "note" ? setType("note") : selectStatusPill(v)
+                v === "note" ? selectNotePill() : selectStatusPill(v)
               }
               options={[
                 { value: "active", label: "Active" },
@@ -774,14 +878,45 @@ export function TaskDetail({ id }: { id: string }) {
                   label: "Dropped",
                   activeClassName: "bg-surface-2 text-text-muted line-through",
                 },
-                ...(item.type !== "project"
-                  ? [{ value: "note" as const, label: "Note" }]
+                ...(item.type !== "folder"
+                  ? [
+                      {
+                        value: "note" as const,
+                        label: isProject ? "Notes" : "Note",
+                        title: isProject
+                          ? "Hold notes instead of tasks — new items in this project default to notes"
+                          : undefined,
+                      },
+                    ]
                   : []),
               ]}
             />
+            {/* Second row for notes: how the body renders. Recipe adds servings
+                scaling and unit conversion over the very same Markdown. */}
+            {isNote && (
+              <SegmentedControl<NoteMode>
+                className="mt-1.5"
+                value={noteMode}
+                onChange={selectNoteMode}
+                options={[
+                  { value: "notes", label: "Notes" },
+                  {
+                    value: "recipe",
+                    label: "Recipe",
+                    title: "Scale ingredients and convert units",
+                  },
+                ]}
+              />
+            )}
             {item.type === "note" && (
               <p className="mt-1 text-xs text-text-faint">
                 Converting back to a task restores its dates, flags and status.
+              </p>
+            )}
+            {isNotesProject && (
+              <p className="mt-1 text-xs text-text-faint">
+                New items here are notes. Task options are hidden — pick Active to
+                turn it back into a normal project.
               </p>
             )}
             {ownerRemoteServer && (
@@ -792,17 +927,50 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
         </div>
 
-        <div className={cn(isNote && "flex h-full flex-col")}>
+        {/* `h-full` makes a note's editor fill the pane — NoteEditor is a scrollable
+            box, so a fixed height is what it wants. RecipeView is a document that
+            grows instead, and `height: 100%` clipped the box to the pane while its
+            content kept rendering past it (overflow is visible), painting the
+            ingredients over Attachments/Project/Tags below. It sizes to its content. */}
+        <div className={cn(isNote && !showRecipe && "flex h-full flex-col")}>
           <Label>Notes</Label>
-          <NoteEditor
-            key={item.id}
-            value={note}
-            remoteNote={note}
-            onSave={commitNote}
-            placeholder="Add notes…  (Markdown supported)"
-            className={cn(isNote && "flex flex-1 flex-col")}
-            minHeightClassName={isNote ? "min-h-[60vh]" : undefined}
-          />
+          {onOwnPage ? (
+            // The note page behind this pane already has a live editor over this
+            // body; a second one here would race its autosaves on the same field.
+            <p className="rounded-lg bg-surface-2 px-3 py-2 text-xs text-text-muted">
+              Open full-page — edit the body there.
+            </p>
+          ) : noteMode === "recipe" && !noteEditing ? (
+            <RecipeView
+              id={id}
+              body={note}
+              onEdit={() => setNoteEditing(true)}
+              onReplace={commitNote}
+            />
+          ) : (
+            <>
+              {noteMode === "recipe" && (
+                <div className="mb-1.5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setNoteEditing(false)}
+                    className={cn(btnSecondary, "px-2.5 py-1 text-xs")}
+                  >
+                    <Check size={13} /> Done
+                  </button>
+                </div>
+              )}
+              <NoteEditor
+                key={item.id}
+                value={note}
+                remoteNote={note}
+                onSave={commitNote}
+                placeholder="Add notes…  (Markdown supported)"
+                className={cn(isNote && "flex flex-1 flex-col")}
+                minHeightClassName={isNote ? "min-h-[60vh]" : undefined}
+              />
+            </>
+          )}
           {item.metadata && (
             <MetadataPeek metadata={item.metadata} />
           )}
@@ -817,6 +985,9 @@ export function TaskDetail({ id }: { id: string }) {
             front-and-centre directly under the notes. */}
         {isProject && (
           <>
+            {/* Review cadence and CalDAV export are task machinery — meaningless
+                for a notes container, so a notes project shows only Colour. */}
+            {!isNotesProject && (
             <div>
               <Label>Review every (days)</Label>
               <input
@@ -834,6 +1005,7 @@ export function TaskDetail({ id }: { id: string }) {
                 }
               />
             </div>
+            )}
             <div>
               <Label>Colour</Label>
               <ColorSwatches
@@ -843,9 +1015,9 @@ export function TaskDetail({ id }: { id: string }) {
             </div>
             {/* CalDAV two-way sync is server-side and holds secrets, so it's
                 admin-only and hidden in local-only/offline mode (no server). */}
-            {currentUser?.role === "admin" && !!getServerConfig().url && (
-              <CalDavSettings projectId={id} />
-            )}
+            {!isNotesProject &&
+              currentUser?.role === "admin" &&
+              !!getServerConfig().url && <CalDavSettings projectId={id} />}
           </>
         )}
 
@@ -930,7 +1102,7 @@ export function TaskDetail({ id }: { id: string }) {
         {/* Order mode — how this container sequences its children. Only meaningful
             once there are children (projects always have the role). Task-scheduling
             behaviour, so hidden on notes. */}
-        {!isNote && (isProject || hasChildren) && (
+        {!isNote && !isNotesProject && (isProject || hasChildren) && (
           <div>
             <Label>Order</Label>
             <SegmentedControl<OrderMode>
@@ -955,7 +1127,7 @@ export function TaskDetail({ id }: { id: string }) {
 
         {/* Scheduling (dates, defer, reminder, recurrence) — task-only; hidden on
             notes. The values stay in the DB and reappear on conversion to a task. */}
-        {!isNote && (
+        {!isNote && !isNotesProject && (
         <Section title="Scheduling" summary={scheduleSummary} defaultOpen>
           <div className="space-y-3">
             <div>
@@ -1233,7 +1405,7 @@ export function TaskDetail({ id }: { id: string }) {
 
         {/* Location — its own section; expanded by default only when the Location
             alerts (Nearby) feature is on. Geolocation reminders don't apply to notes. */}
-        {!isNote && (
+        {!isNote && !isNotesProject && (
           <Section title="Location" summary={locationSummary} defaultOpen={locationOn}>
             <GeoEditor
               value={item.geo}
@@ -1398,7 +1570,9 @@ export function TaskDetail({ id }: { id: string }) {
         )}
 
         {/* Time tracking — expanded by default only when the feature is on. The
-            Record-time control also lives in the header, so it's always reachable. */}
+            Record-time control also lives in the header, so it's always reachable.
+            A notes container tracks nothing, so it's hidden there. */}
+        {!isNotesProject && (
         <Section title="Time tracking" summary={timeSummary} defaultOpen={timeOn}>
           <div>
             <Label>Estimate</Label>
@@ -1506,6 +1680,7 @@ export function TaskDetail({ id }: { id: string }) {
             </ul>
           )}
         </Section>
+        )}
 
         {!isProject && <Comments itemId={id} />}
       </div>

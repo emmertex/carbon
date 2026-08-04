@@ -486,6 +486,25 @@ export function setFederationPolicy(db: Db, value: FederationPolicy): void {
   setSetting(db, 'federation_policy', value);
 }
 
+/** Workspace sync-epoch (Tier-2 log rebuild). Defaults to 1 when unset. */
+export function getSyncEpoch(db: Db): number {
+  const raw = getSetting(db, 'sync_epoch');
+  const n = raw == null ? 1 : Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+}
+
+export function setSyncEpoch(db: Db, epoch: number): void {
+  const n = Math.max(1, Math.floor(epoch));
+  setSetting(db, 'sync_epoch', String(n));
+}
+
+/** Increment sync_epoch by 1; returns the new value. */
+export function bumpSyncEpoch(db: Db): number {
+  const next = getSyncEpoch(db) + 1;
+  setSyncEpoch(db, next);
+  return next;
+}
+
 interface PeerRow {
   id: string;
   base_url: string;
@@ -1227,7 +1246,10 @@ function forgesLocalIdentity(db: Db, rec: RecordOp): boolean {
  *
  *  - **Write gate + scope:** `writableRoots` = the link's roots whose permission is
  *    `write`; `allowed = subtreeIds(db, writableRoots)`. Any op/record whose
- *    `item_id ∉ allowed` is DROPPED. A read-only root accepts NO inbound writes.
+ *    `item_id ∉ allowed` is DROPPED — except a **create** of a brand-new item whose
+ *    `parent_id ∈ allowed` (attach under the shared subtree). Reparenting an
+ *    **existing** out-of-scope item into the subtree via `parent_id` is rejected.
+ *    A read-only root accepts NO inbound writes.
  *  - **Identity:** `owner_id` (ops) and `user_id`/`author_id`/`mentions`/`created_by`
  *    (records) are remapped via `remapUserRef(ref, myLabel, peerLabel)`; a shadow user
  *    is provisioned per non-local ref; join ids regenerated after remap.
@@ -1274,9 +1296,13 @@ export function sanitizeFederatedPush(
       [op.item_id],
     );
     // A create op may bring a NEW item into scope if its parent is already in `allowed`.
+    // Existing items must already be in `allowed` — do NOT let a peer reparent an
+    // out-of-scope row into the shared subtree (that would bypass the write scope).
     const parentId = (op.fields as { parent_id?: string | null } | undefined)?.parent_id;
-    const inScope =
-      allowed.has(op.item_id) || (typeof parentId === 'string' && allowed.has(parentId));
+    const inScope = existing
+      ? allowed.has(op.item_id)
+      : allowed.has(op.item_id) ||
+        (typeof parentId === 'string' && allowed.has(parentId));
     if (!inScope) continue; // scope + write-gate reject
     // Only an accepted (in-scope) op advances OUR clock — a rejected out-of-scope op must
     // NOT push the local causal clock forward (else a stray peer op silently bumps it).

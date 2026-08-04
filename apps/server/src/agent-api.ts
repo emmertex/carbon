@@ -41,8 +41,11 @@ export function registerAgentApi(api: App, deps: AgentApiDeps): void {
         q: c.req.query('q') ?? undefined,
         status: c.req.query('status') ?? undefined,
         type: c.req.query('type') ?? undefined,
+        due_before: c.req.query('due_before') ?? undefined,
+        due_after: c.req.query('due_after') ?? undefined,
         limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
         detail: c.req.query('detail') === '1',
+        full: c.req.query('full') === '1',
       }),
     ),
   );
@@ -76,6 +79,7 @@ export function registerAgentApi(api: App, deps: AgentApiDeps): void {
       q?: string;
       list?: ListRef;
       limit?: number;
+      include_done?: boolean;
     };
     return send(c, ops.resolve(c.get('userId'), b));
   });

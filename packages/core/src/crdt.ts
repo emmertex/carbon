@@ -3,7 +3,7 @@ import type { Db, SqlValue } from './db';
 import type { Item, ItemPatch, Op } from './types';
 import { ITEM_PATCH_FIELDS } from './types';
 
-const BOOLEAN_FIELDS = new Set<keyof ItemPatch>(['flagged', 'deleted']);
+const BOOLEAN_FIELDS = new Set<keyof ItemPatch>(['flagged', 'deleted', 'notes_project']);
 
 type Clock = { ts: number; dev: string };
 type ClockMap = Record<string, Clock>;
@@ -421,6 +421,8 @@ export function createPatch(item: Item): ItemPatch {
     recurrence: item.recurrence,
     geo: item.geo,
     color: item.color,
+    notes_project: item.notes_project,
+    thumb: item.thumb,
     folder_id: item.folder_id,
     sort_order: item.sort_order,
     order_mode: item.order_mode,

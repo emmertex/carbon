@@ -32,7 +32,7 @@ import { BlockBarEditor, taskColor, HATCH, type SegPreview } from '@/components/
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { getCurrentUserId } from '@/lib/store';
-import { formatDuration, formatDay, toDateTimeInput, fromDateTimeInput } from '@/lib/date';
+import { formatDuration, formatDay, toDateTimeInput, fromDateTimeInput, dateInputOffset } from '@/lib/date';
 import { cn } from '@/lib/cn';
 import { inputCls as inputBase, chipCls } from '@/components/ui/controls';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
@@ -76,9 +76,10 @@ function groupBlocks(blocks: SessionBlock[], by: 'project' | 'day'): Group[] {
 
 export function TimeTrackedView() {
   const uid = getCurrentUserId();
-  const today = startOfDay(new Date());
-  const [fromStr, setFromStr] = useState(today.toISOString().slice(0, 10));
-  const [toStr, setToStr] = useState(new Date().toISOString().slice(0, 10));
+  // Local calendar days — toISOString().slice(0,10) is UTC and can be "yesterday"
+  // in positive-offset timezones (e.g. Australia/Sydney before ~10:00).
+  const [fromStr, setFromStr] = useState(() => dateInputOffset(0));
+  const [toStr, setToStr] = useState(() => dateInputOffset(0));
   const [projectFilter, setProjectFilter] = useState('');
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);

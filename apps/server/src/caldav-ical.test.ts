@@ -33,6 +33,8 @@ function item(over: Partial<Item>): Item {
     recurrence: null,
     geo: null,
     color: null,
+    notes_project: false,
+    thumb: null,
     folder_id: null,
     sort_order: 0,
     order_mode: "parallel",

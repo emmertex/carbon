@@ -120,6 +120,70 @@ function normalizeRecurrence(value: unknown): string | null {
   return null;
 }
 
+// A note body is returned capped by default: `items detail:true` can carry 50 of them, and a
+// notebook of recipes would otherwise dwarf a small model's context window. Well above any
+// "a few short lines" note, so the common case comes back whole and unflagged.
+const NOTE_BODY_MAX = 2000;
+
+/** Parse an item's metadata column, tolerating junk. Mirrors the client's `readNoteMeta`:
+ *  the column is hand-editable and syncs from other builds, so anything that isn't a JSON
+ *  object reads as `{}` rather than throwing. */
+export function readMeta(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Merge a metadata patch onto the stored column: shallow at the top level, one level deep for
+ *  `recipe`. `metadata` is ONE whole-value LWW column shared by several features (note editor
+ *  mode, recipe scaling, GPS-track summary), so a replacing write would silently erase whatever
+ *  the agent didn't know about. Same contract as the client's `patchNoteMeta`. */
+export function mergeMeta(
+  current: string | null | undefined,
+  patch: Record<string, unknown>,
+): string | null {
+  const base = readMeta(current);
+  const merged: Record<string, unknown> = { ...base, ...patch };
+  const baseRecipe = base.recipe;
+  const patchRecipe = patch.recipe;
+  if (
+    baseRecipe && typeof baseRecipe === 'object' && !Array.isArray(baseRecipe) &&
+    patchRecipe && typeof patchRecipe === 'object' && !Array.isArray(patchRecipe)
+  ) {
+    merged.recipe = { ...(baseRecipe as object), ...(patchRecipe as object) };
+  }
+  for (const k of Object.keys(merged)) if (merged[k] === null) delete merged[k];
+  return Object.keys(merged).length ? JSON.stringify(merged) : null;
+}
+
+/** The note editor mode stored in metadata ('recipe' opens the recipe editor), or null. Only
+ *  reported on notes — a task carries the same column but no editor mode. */
+function noteModeOf(it: Item): string | null {
+  if (it.type !== 'note') return null;
+  const mode = readMeta(it.metadata).noteMode;
+  return typeof mode === 'string' ? mode : null;
+}
+
+const noteModeField = (it: Item): { note_mode?: string } => {
+  const mode = noteModeOf(it);
+  return mode ? { note_mode: mode } : {};
+};
+
+/** `note` plus a `note_truncated:true` marker when the cap bit. */
+function noteBodyFields(
+  note: string | null,
+  full: boolean,
+): { note: string | null; note_truncated?: true } {
+  if (full || note == null || note.length <= NOTE_BODY_MAX) return { note };
+  return { note: note.slice(0, NOTE_BODY_MAX), note_truncated: true };
+}
+
 /** Normalise a model-supplied datetime to a UTC ("Z") ISO string. Reminder/due sweeps
  *  (push.ts) compare due_date/reminder_at as plain strings — a non-UTC offset the model
  *  emits despite the prompt's instructions would sort wrong and fire at the wrong time.
@@ -137,7 +201,8 @@ export interface ItemsInput {
   tag?: string;
   q?: string;
   status?: string;
-  /** 'task' (default, back-compat) | 'note' | 'all'. */
+  /** 'task' (default, back-compat) | 'note' | 'all'. Omitted inside a notes container
+   *  (notebook), where the contents are notes and defaulting to 'task' returns nothing. */
   type?: string;
   /** ISO datetimes bounding due_date (inclusive). Either one restricts the result to items
    *  that HAVE a due date, sorted soonest-first — "what's due this week?" style questions. */
@@ -145,6 +210,8 @@ export interface ItemsInput {
   due_after?: string;
   limit?: number;
   detail?: boolean;
+  /** With detail, return note bodies whole instead of capped at NOTE_BODY_MAX. */
+  full?: boolean;
 }
 export interface SearchNotesInput {
   /** Text to find inside note bodies (case-insensitive substring). */
@@ -158,6 +225,7 @@ export interface SearchNotesInput {
   limit?: number;
 }
 export interface ResolveInput {
+  /** 'list' | 'tag' | 'task' (tasks AND notes) | 'note' (notes only). */
   kind?: string;
   q?: string;
   list?: ListRef;
@@ -168,8 +236,13 @@ export interface ResolveInput {
 export interface TaskInput {
   title: string;
   note?: string;
-  /** 'task' (default) | 'note'. A note's status/dates/flags/priority are preserved but inert. */
+  /** 'task' | 'note'. Omitted follows the destination container — a notes container
+   *  (notebook) makes notes, everywhere else tasks — exactly like every in-app add surface.
+   *  A note's status/dates/flags/priority are preserved but inert. */
   type?: string;
+  /** 'recipe' opens the new note in the recipe editor (stored as metadata.noteMode);
+   *  implies type:'note'. 'notes' is the plain editor and is the same as omitting it. */
+  note_mode?: string;
   due_date?: string;
   defer_date?: string;
   /** ISO datetime for a push reminder. */
@@ -313,16 +386,23 @@ export function createAgentOps(deps: AgentApiDeps) {
   const ownerOf = (userId: string): string | null => (userId === 'local' ? null : userId);
   const tagNames = (itemId: string): string[] => getItemTags(db, itemId).map((t) => t.name);
 
+  // note_mode rides along even in the minimal shape: it is one short string, and without it a
+  // plain read of a notebook can't tell a recipe from any other note.
   const minimalItem = (it: Item) => ({
     id: it.id,
     title: it.title,
     tags: tagNames(it.id),
     done: it.status === 'done',
+    ...noteModeField(it),
   });
-  const detailItem = (it: Item) => ({
+  /** A detail shape, with note bodies capped unless `full`. The cap is what keeps a read of a
+   *  notebook (50 recipes, several KB each) from filling a small model's whole context — but a
+   *  capped body must never be written back, so it is flagged and `note_append` exists to make
+   *  the read-modify-write round trip unnecessary. */
+  const detailShape = (full: boolean) => (it: Item) => ({
     ...minimalItem(it),
     type: it.type,
-    note: it.note,
+    ...noteBodyFields(it.note, full),
     status: it.status,
     due_date: it.due_date,
     defer_date: it.defer_date,
@@ -455,17 +535,22 @@ export function createAgentOps(deps: AgentApiDeps) {
     const scope = scopeItems(userId);
     const out = getProjects(db)
       .filter((p) => !scope || scope.has(p.id))
-      .map((p) =>
-        input.detail
-          ? {
-              id: p.id,
-              name: p.title,
-              open_count: getChildren(db, p.id).filter(
-                (t) => t.type === 'task' && t.status === 'active' && !t.deleted,
-              ).length,
-            }
-          : { id: p.id, name: p.title },
-      );
+      .map((p) => {
+        // A notes container holds notes, not actions: say so, so a caller reading it knows to
+        // ask for notes — and count its notes rather than reporting a stocked notebook as 0
+        // open tasks (which reads as empty).
+        const base = p.notes_project
+          ? { id: p.id, name: p.title, notes: true as const }
+          : { id: p.id, name: p.title };
+        if (!input.detail) return base;
+        const children = getChildren(db, p.id).filter((t) => !t.deleted);
+        return {
+          ...base,
+          open_count: p.notes_project
+            ? children.filter((t) => t.type === 'note').length
+            : children.filter((t) => t.type === 'task' && t.status === 'active').length,
+        };
+      });
     return ok({ lists: out });
   }
 
@@ -479,10 +564,13 @@ export function createAgentOps(deps: AgentApiDeps) {
     return ok({ tags: out });
   }
 
-  // Validate+normalize a model-supplied type filter; anything unrecognised falls back to the
-  // default ('task') rather than silently matching everything.
-  function normalizeItemType(t: string | undefined): 'task' | 'note' | 'all' {
-    return t === 'note' || t === 'all' ? t : 'task';
+  // Validate+normalize a model-supplied type filter; anything unrecognised falls back to
+  // `fallback` rather than silently matching everything.
+  function normalizeItemType(
+    t: string | undefined,
+    fallback: 'task' | 'note' | 'all' = 'task',
+  ): 'task' | 'note' | 'all' {
+    return t === 'task' || t === 'note' || t === 'all' ? t : fallback;
   }
 
   function items(userId: string, input: ItemsInput) {
@@ -490,7 +578,10 @@ export function createAgentOps(deps: AgentApiDeps) {
     const limit = Math.min(input.limit || 50, 200);
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
-    const itemType = normalizeItemType(input.type);
+    // Reading a notes container with the 'task' default returns nothing — its contents are all
+    // notes. An unstated type follows the container instead, mirroring how new items there are
+    // notes (repo.ts `defaultChildType`). An explicit type is still honoured.
+    const itemType = normalizeItemType(input.type, list?.notes_project ? 'note' : 'task');
     // 'done'/'all' need the done-inclusive pool; 'active' keeps the default. Notes carry an
     // inert status, so "active" should still include them.
     let pool = taskPool(userId, list, tag, { includeDone: status !== 'active', itemType });
@@ -516,11 +607,11 @@ export function createAgentOps(deps: AgentApiDeps) {
     pool = pool.slice(0, limit);
     // A due-filtered ask is about dates, so surface due_date even without detail:true.
     const shape = input.detail
-      ? detailItem
+      ? detailShape(input.full === true)
       : dueFiltered
         ? (it: Item) => ({ ...minimalItem(it), due_date: it.due_date })
         : minimalItem;
-    return ok({ items: pool.map(shape) });
+    return ok({ items: pool.map((it) => shape(it)) });
   }
 
   const SNIPPET_RADIUS = 80; // chars of context either side of a match
@@ -557,11 +648,19 @@ export function createAgentOps(deps: AgentApiDeps) {
     const includeDone = input.include_done !== false;
     const itemType = input.type === 'task' || input.type === 'all' ? input.type : 'note';
     const pool = taskPool(userId, list, tag, { includeDone, itemType });
-    const hits: Array<{ id: string; title: string; type: string; snippet: string }> = [];
+    const hits: Array<{
+      id: string;
+      title: string;
+      type: string;
+      note_mode?: string;
+      snippet: string;
+    }> = [];
     for (const it of pool) {
       if (!it.note) continue;
       const snippet = noteSnippet(it.note, q);
-      if (snippet) hits.push({ id: it.id, title: it.title, type: it.type, snippet });
+      if (snippet) {
+        hits.push({ id: it.id, title: it.title, type: it.type, ...noteModeField(it), snippet });
+      }
       if (hits.length >= limit) break;
     }
     return ok({ matches: hits });
@@ -573,6 +672,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     const proj = projectAncestor(db, it.id);
     return ok({
       ...it,
+      ...noteModeField(it),
       tags: getItemTags(db, it.id),
       list: proj ? { id: proj.id, name: proj.title } : null,
     });
@@ -585,6 +685,9 @@ export function createAgentOps(deps: AgentApiDeps) {
 
     let ranked;
     let nameOf: (x: { id: string }) => string;
+    // Item kinds report `type` on each candidate, so a caller that must act on a task (only a
+    // task can be completed) can tell a note apart from one.
+    let itemKind = false;
     if (input.kind === 'list') {
       const scope = scopeItems(userId);
       const projects = getProjects(db).filter((p) => !scope || scope.has(p.id));
@@ -593,22 +696,31 @@ export function createAgentOps(deps: AgentApiDeps) {
     } else if (input.kind === 'tag') {
       ranked = rankBy(q, listTags(db), [(t) => t.name, (t) => tagLeaf(t.name)], { limit });
       nameOf = (x) => (x as Tag).name;
-    } else if (input.kind === 'task') {
+    } else if (input.kind === 'task' || input.kind === 'note') {
       const list = findList(userId, input.list);
+      // kind:'task' matches notes too. It is the existence check both prompts tell the model to
+      // run before acting ("is there something called X?"), and a task-only pool answered "no"
+      // for every note the user has — so the model reported a note that exists as missing.
+      // kind:'note' narrows to notes when the caller specifically wants one.
       ranked = rankBy(
         q,
-        taskPool(userId, list, null, { includeDone: input.include_done === true }),
+        taskPool(userId, list, null, {
+          includeDone: input.include_done === true,
+          itemType: input.kind === 'note' ? 'note' : 'all',
+        }),
         [(i) => i.title],
         { limit },
       );
       nameOf = (x) => (x as Item).title;
+      itemKind = true;
     } else {
-      return fail('kind must be list, tag, or task', 400);
+      return fail('kind must be list, tag, task, or note', 400);
     }
 
     const candidates = ranked.map((s) => ({
       id: (s.item as { id: string }).id,
       name: nameOf(s.item as { id: string }),
+      ...(itemKind ? { type: (s.item as Item).type, ...noteModeField(s.item as Item) } : {}),
       score: Math.round(s.score * 100) / 100,
       reason: s.reason,
     }));
@@ -658,12 +770,19 @@ export function createAgentOps(deps: AgentApiDeps) {
       if (r) perTaskTagById.set(name, r.id);
     }
 
-    const created: Array<{ id: string; title: string; type: string }> = [];
+    const created: Array<{ id: string; title: string; type: string; note_mode?: string }> = [];
     for (const t of taskInputs) {
+      // note_mode is a note-editor setting, so asking for one is asking for a note.
+      const noteMode = t.note_mode === 'recipe' ? 'recipe' : null;
+      // An unstated type is left to createItem, which follows the destination container:
+      // notes inside a notes container (notebook), tasks everywhere else — the same rule
+      // quick-add and the outliner use. Forcing 'task' here put checkbox tasks in notebooks.
+      const type = noteMode ? 'note' : t.type === 'note' ? 'note' : t.type === 'task' ? 'task' : undefined;
       const it = createItem(db, deviceId, {
-        type: t.type === 'note' ? 'note' : 'task',
+        type,
         title: t.title,
         note: t.note ?? null,
+        metadata: noteMode ? { noteMode } : null,
         parentId: listItem?.id ?? null,
         ownerId: ownerOf(userId),
         dueDate: normalizeDateTime(t.due_date) ?? null,
@@ -683,7 +802,7 @@ export function createAgentOps(deps: AgentApiDeps) {
         if (id) tagIds.add(id);
       }
       for (const id of tagIds) setItemTagLink(db, deviceId, it.id, id, false);
-      created.push({ id: it.id, title: it.title, type: it.type });
+      created.push({ id: it.id, title: it.title, type: it.type, ...noteModeField(it) });
     }
     return ok({ list: listOut, tags: sharedTagOut, created }, 201);
   }
@@ -812,11 +931,37 @@ export function createAgentOps(deps: AgentApiDeps) {
       }
       // recurrence is stored as a JSON string; accept the model's object form.
       if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
-      // metadata is likewise TEXT JSON; accept an object and stringify.
-      if ('metadata' in patch) {
-        const m = patch.metadata as unknown;
-        if (m != null && typeof m === 'object') patch.metadata = JSON.stringify(m);
-        else if (m === '') patch.metadata = null;
+      // Appending is the common note edit ("add to my bread recipe: rest for 45 min"), and
+      // doing it server-side is what makes it safe: the alternative is the caller reading the
+      // body and writing it back, which loses everything it didn't read (or didn't fit in its
+      // context). Applies on top of a same-call `note` replacement if both are given.
+      const appendRaw = u.patch?.note_append;
+      if (typeof appendRaw === 'string' && appendRaw.trim()) {
+        const base = typeof patch.note === 'string' ? patch.note : (target.note ?? '');
+        const trimmed = base.replace(/\s+$/, '');
+        patch.note = trimmed ? `${trimmed}\n${appendRaw.trim()}` : appendRaw.trim();
+      }
+      // note_mode is the note editor's mode, stored inside metadata — offered as a plain patch
+      // key so a caller never has to hand-build that column to turn a note into a recipe.
+      const metaPatch: Record<string, unknown> = {};
+      const modeRaw = u.patch?.note_mode;
+      if (modeRaw === 'recipe' || modeRaw === 'notes') {
+        metaPatch.noteMode = modeRaw === 'recipe' ? 'recipe' : null;
+      }
+      // metadata is TEXT JSON, and one whole-value LWW column shared by several features —
+      // merge onto what's stored instead of replacing it (see mergeMeta), so setting a note's
+      // mode can't wipe its recipe scaling or a GPS-track summary. An explicit null/"" still
+      // clears the column outright; keys given alongside it then land on an empty base.
+      const rawMeta = 'metadata' in patch ? (patch.metadata as unknown) : undefined;
+      const clearMeta = rawMeta === null || rawMeta === '';
+      if (rawMeta != null && typeof rawMeta === 'object' && !Array.isArray(rawMeta)) {
+        Object.assign(metaPatch, rawMeta as Record<string, unknown>);
+      }
+      if (rawMeta !== undefined) delete (patch as Record<string, unknown>).metadata;
+      if (clearMeta || Object.keys(metaPatch).length) {
+        patch.metadata = Object.keys(metaPatch).length
+          ? mergeMeta(clearMeta ? null : target.metadata, metaPatch)
+          : null;
       }
       for (const k of ['due_date', 'defer_date', 'reminder_at'] as const) {
         if (k in patch) (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);

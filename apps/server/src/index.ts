@@ -13,6 +13,7 @@ import {
   ingestOps,
   ingestRecordOps,
   compactNoteOps,
+  compactSettingRecordOps,
   visibleItemIds,
   subtreeIds,
   hasWriteAccess,
@@ -42,7 +43,12 @@ import {
   type UserRole,
 } from '@carbon/core';
 import { openDb } from './sqlite';
-import { sanitizeOps, sanitizeRecordOps } from './sync-guard';
+import {
+  sanitizeOps,
+  sanitizeRecordOps,
+  oversizedSyncArray,
+  MAX_SYNC_BATCH,
+} from './sync-guard';
 import {
   ensureServerTables,
   bootstrapUsers,
@@ -57,6 +63,7 @@ import {
   createToken,
   listTokens,
   revokeToken,
+  revokeAllTokens,
   createSession,
   revokeSession,
   revokeAllSessions,
@@ -77,9 +84,8 @@ import {
 import {
   getMfaStatus,
   mfaReady,
-  isTrustedDevice,
+  useTrustedDevice,
   trustDevice,
-  touchTrustedDevice,
   listTrustedDevices,
   revokeTrustedDevice,
   revokeAllTrustedDevices,
@@ -119,6 +125,7 @@ import {
   getNlSettings,
   setNlSettings,
   getAgentUsage,
+  isTimeoutError,
 } from './agents';
 import {
   getHostLmConfig,
@@ -129,6 +136,7 @@ import {
 } from './host-lm';
 import { runAgentCommand } from './agent-command';
 import { runFilterCommand } from './agent-filter';
+import { runRecipeOptimise, type MeasureConvention } from './agent-recipe';
 import { getUserTimezone, setUserTimezone } from './user-prefs';
 import {
   ensureCaldavDeviceId,
@@ -154,6 +162,7 @@ import {
   fetchFederatedBlob,
   makeDeliverToPeer,
   listPeers,
+  getSyncEpoch,
   type FederationMode,
   type DeliverToPeer,
   type BlobStore,
@@ -201,6 +210,7 @@ import {
   validateSubdomain,
   tenantLockState,
   createPendingSignup,
+  getPendingSignup,
   verifyPendingSignup,
   deletePendingSignup,
   gcPendingSignups,
@@ -306,6 +316,13 @@ const blobBodyLimit = bodyLimit({
   maxSize: MAX_BLOB_BYTES,
   onError: (c) => c.json({ error: 'blob too large' }, 413),
 });
+// A sync push carries everything a client did while offline, so it needs far more room
+// than an ordinary JSON call — but still a ceiling. Override with SYNC_BODY_LIMIT_MB.
+const SYNC_BODY_LIMIT = Math.max(1, Number(process.env.SYNC_BODY_LIMIT_MB) || 16) * 1024 * 1024;
+const syncBodyLimit = bodyLimit({
+  maxSize: SYNC_BODY_LIMIT,
+  onError: (c) => c.json({ error: 'sync body too large' }, 413),
+});
 
 /** Open mode (zero users → synthetic local admin) is opt-in; default deny. */
 const ALLOW_OPEN_MODE = process.env.ALLOW_OPEN_MODE === '1';
@@ -408,6 +425,19 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     ctx.id === 'default' ? true : !!getTenantById(controlDb, ctx.id)?.host_lm_available;
 
   const api = new Hono<Env>();
+  // Cap every /api/* body before a handler can buffer it. Node reads the whole request
+  // into memory first, so an unbounded route lets any authenticated caller — including
+  // a low-privilege tasks:write token — OOM the host by streaming gigabytes. Runs ahead
+  // of auth so an unauthenticated caller can't do it either. Two surfaces legitimately
+  // exceed the JSON default and keep their own cap; /api/federation/* is already capped
+  // where it's mounted (see buildTenantApp's tenantApp.use), so it passes through.
+  api.use('*', async (c, next) => {
+    const path = c.req.path;
+    if (path.includes('/federation/')) return next();
+    if (path.includes('/blobs/')) return blobBodyLimit(c, next);
+    if (path === '/api/sync' || path === '/sync') return syncBodyLimit(c, next);
+    return jsonBodyLimit(c, next);
+  });
   // Open mode is opt-in (ALLOW_OPEN_MODE=1) and never available under BASE_DOMAIN:
   // a provisioned tenant always has an admin, and open mode if the last user were
   // deleted would expose the whole workspace to anyone on the subdomain (A2).
@@ -444,15 +474,17 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     });
   });
 
-  /** Finish login: mint session + trust device. */
+  /** Finish login: mint session + trust device. `rotated` carries the replacement
+   *  secret from a trusted-device login; a fresh 2FA pass mints a new one instead. */
   function completeLogin(
     userId: string,
     deviceId: string | undefined,
     deviceName: string | undefined,
-  ): { token: string; user: ReturnType<typeof publicUser> } {
+    rotated?: string,
+  ): { token: string; user: ReturnType<typeof publicUser>; device_token?: string } {
     const user = getUser(db, userId)!;
-    if (deviceId) trustDevice(db, userId, deviceId, deviceName);
-    return { token: createSession(db, userId), user: publicUser(user) };
+    const device_token = rotated ?? (deviceId ? trustDevice(db, userId, deviceId, deviceName) : undefined);
+    return { token: createSession(db, userId), user: publicUser(user), device_token };
   }
 
   // Password (Basic) → session if device trusted / MFA ready path; else challenge.
@@ -465,18 +497,22 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const body = (await c.req.json().catch(() => ({}))) as {
       device_id?: string;
       device_name?: string;
+      device_token?: string;
     };
     const deviceId = body.device_id?.trim() || '';
     const deviceName = body.device_name?.trim() || undefined;
+    const deviceToken = body.device_token?.trim() || '';
 
     if (!mfaReady(db, id)) {
       const challenge = createMfaChallenge(db, id, 'enroll');
       // Omit profile until MFA/enroll finishes — password-OK alone must not disclose it.
       return c.json({ status: 'needs_enrollment', challenge });
     }
-    if (deviceId && isTrustedDevice(db, id, deviceId)) {
-      touchTrustedDevice(db, id, deviceId);
-      return c.json(completeLogin(id, deviceId, deviceName));
+    // Skipping 2FA takes the device's secret, not just its (public) id. A missing
+    // or stale secret is not an error — it just means this login does the 2FA.
+    if (deviceId && deviceToken) {
+      const rotated = useTrustedDevice(db, id, deviceId, deviceToken);
+      if (rotated) return c.json(completeLogin(id, deviceId, deviceName, rotated));
     }
     const challenge = createMfaChallenge(db, id, 'login');
     const factors = getMfaStatus(db, id).factors;
@@ -726,9 +762,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     revokeAllSessions(db, id);
     revokeAllTrustedDevices(db, id);
     const deviceId = body.device_id?.trim();
-    if (deviceId) trustDevice(db, id, deviceId, body.device_name);
+    // Re-trusting the calling device issues it a fresh secret; the client must
+    // store it, or the device it just kept would need 2FA on the next login.
+    const device_token = deviceId ? trustDevice(db, id, deviceId, body.device_name) : undefined;
     const token = createSession(db, id);
-    return c.json({ ok: true, token });
+    return c.json({ ok: true, token, device_token });
   });
 
   // Revoke the current session token (sign out). Idempotent.
@@ -828,7 +866,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       ...(body.displayName !== undefined ? { display_name: body.displayName } : {}),
       ...(body.role !== undefined ? { role: body.role } : {}),
     });
-    if (body.password) setPassword(db, id, hashPassword(body.password));
+    if (body.password) {
+      setPassword(db, id, hashPassword(body.password));
+      // Match MFA reset: a forced password change invalidates existing sessions.
+      revokeAllSessions(db, id);
+    }
     // Admins may map any user to their Home Assistant `person.*` entity (the
     // per-user PATCH /api/me only sets the caller's own mapping). This lets one
     // admin token wire up household members' geofence/GPS reminders.
@@ -887,6 +929,10 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       if (admins <= 1) return c.json({ error: 'cannot delete the last admin' }, 400);
     }
     softDeleteUser(db, id);
+    // Soft-delete alone leaves sessions/API tokens valid against getUser-by-id;
+    // revoke so a deleted admin/member cannot retain access via lingering creds.
+    revokeAllSessions(db, id);
+    revokeAllTokens(db, id);
     return c.json({ ok: true });
   });
 
@@ -923,15 +969,29 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const since = Number(body.since ?? 0);
     const rsince = Number(body.rsince ?? 0);
 
+    // Bound the work one push can queue, independently of its byte size.
+    const oversized = oversizedSyncArray(body);
+    if (oversized) {
+      return c.json(
+        { error: 'too many entries in one sync', field: oversized, max: MAX_SYNC_BATCH },
+        413,
+      );
+    }
+
     // Validate/stamp client-pushed ops before applying (S1). Items first so that a
     // share/assignee pushed alongside a brand-new item sees that item already ingested.
     // Deliberately skipped in open mode: no-auth single-user has exactly one trusted
     // caller, so author_id/user_id/ownership spoofing isn't a threat to guard against.
     if (!open && Array.isArray(body.ops)) body.ops = sanitizeOps(db, userId, body.ops);
     const pushedOps = Array.isArray(body.ops) ? body.ops : [];
+    // Creates in this push (type is only set on create) — share/tag copies onto a
+    // recurrence spawn need this when ownership was preserved as the series owner.
+    const justCreatedIds = new Set(
+      pushedOps.filter((o) => o.fields && 'type' in o.fields).map((o) => o.item_id),
+    );
     if (pushedOps.length) ingestOps(db, pushedOps, true);
     if (!open && Array.isArray(body.recordOps))
-      body.recordOps = sanitizeRecordOps(db, userId, body.recordOps);
+      body.recordOps = sanitizeRecordOps(db, userId, body.recordOps, Date.now(), justCreatedIds);
     if (Array.isArray(body.recordOps) && body.recordOps.length) {
       const fresh = ingestRecordOps(db, body.recordOps, true);
       triggerAgents(ctx.id, db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
@@ -954,6 +1014,12 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       ),
     ];
     if (pushedNoteItemIds.length) compactNoteOps(db, { itemIds: pushedNoteItemIds });
+    // Same guard model as notes: prune superseded setting blobs when this push
+    // carried a setting op (settings rewrite often and bloat record_ops).
+    const pushedSettings = Array.isArray(body.recordOps)
+      ? body.recordOps.some((o) => o.entity === 'setting')
+      : false;
+    if (pushedSettings) compactSettingRecordOps(db);
 
     const visible = open ? null : visibleItemIds(db, userId);
 
@@ -1098,7 +1164,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
     // Full user rows (already exclude password_hash) so peers can materialize the roster.
     const users = listUsers(db);
-    return c.json({ ops, cursor, recordOps, rcursor, users });
+    return c.json({ ops, cursor, recordOps, rcursor, users, syncEpoch: getSyncEpoch(db) });
   });
 
   // ----- content-addressed blob storage ---------------------------------------
@@ -1135,7 +1201,17 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       "SELECT id FROM items WHERE deleted = 0 AND note LIKE '%/api/blobs/' || ? || '%'",
       [hash],
     );
-    return noteRefs.some((r) => visible.has(r.id));
+    if (noteRefs.some((r) => visible.has(r.id))) return true;
+    // Row thumbnails are ordinary blobs referenced only from `items.thumb` (JSON
+    // {src,hash,w,h}) — no attachment row, no note-body mention. Without this they
+    // would 404 for everyone but the device that generated them, and every other
+    // client would fall back to downloading the full-size original. Same visibility
+    // bar as the note body they were rendered from.
+    const thumbRefs = db.all<{ id: string }>(
+      "SELECT id FROM items WHERE deleted = 0 AND thumb LIKE '%' || ? || '%'",
+      [hash],
+    );
+    return thumbRefs.some((r) => visible.has(r.id));
   }
 
   api.get('/blobs/:hash', async (c) => {
@@ -1466,6 +1542,50 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     }
   });
 
+  // Recipe tidy-up: a note's Markdown in, a normalised rewrite out. Read-only (the client
+  // applies the result, the server writes nothing), so tasks:read is enough. Shares the NL
+  // command cap, and — unlike /agent/filter — may run on the host model, since nothing the
+  // model returns is parsed or executed.
+  api.post('/agent/recipe/optimise', requireScope('tasks:read'), async (c) => {
+    const userId = c.get('userId');
+    if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
+      return c.json({ error: 'too many requests, try later' }, 429);
+    }
+    const b = (await c.req.json().catch(() => ({}))) as { body?: string; convention?: string };
+    const text = (b.body ?? '').trim();
+    if (!text) return c.json({ error: 'text required' }, 400);
+    // A whole recipe is a few KB at most; cap it rather than forward an unbounded prompt.
+    if (text.length > RECIPE_MAX_CHARS) return c.json({ error: 'too long' }, 413);
+    const convention: MeasureConvention =
+      b.convention === 'us' || b.convention === 'metric' || b.convention === 'au' ? b.convention : 'au';
+    const nl = getNlSettings(db);
+    const agent = nl.enabled && nl.agentId ? resolveNlAgent(db, nl.agentId, hostAvailable()) : undefined;
+    if (!agent || !agent.enabled || agent.kind === 'webhook') {
+      return c.json({ error: 'nl_not_configured' }, 503);
+    }
+    if (isHostAgent(agent)) {
+      const cfg = getHostLmConfig();
+      const rl = cfg ? checkHostRateLimit(ctx.id, cfg) : { ok: false };
+      if (!rl.ok) return c.json({ error: rl.message ?? 'Try again later.' }, 429);
+    }
+    // The host operator's own endpoint is trusted regardless of this workspace's SSRF flag.
+    const allowPrivateForCall = isHostAgent(agent) ? true : allowPrivate();
+    try {
+      const r = await runRecipeOptimise(agentApiDeps, agent, userId, text, allowPrivateForCall, convention);
+      // An empty completion (truncation, refusal, a model that only emitted reasoning) would
+      // wipe the user's note if the client applied it — fail instead.
+      if (!r.text.trim()) return c.json({ error: 'optimise_failed' }, 502);
+      return c.json({ text: r.text, usage: r.usage });
+    } catch (e) {
+      console.error('[carbon] recipe optimise failed:', e);
+      // Distinguish "we hung up on a model that was still working" from "the provider
+      // errored" — they need different fixes (raise the budget / a shorter recipe, vs
+      // check the agent), and a bare 502 sent the user looking in the wrong place.
+      if (isTimeoutError(e)) return c.json({ error: 'optimise_timeout' }, 504);
+      return c.json({ error: 'optimise_failed' }, 502);
+    }
+  });
+
   // ----- Telegram linking (per-user) ------------------------------------------
   // The bot is per-server; these let the signed-in user connect their *own* chat. The pairing
   // code lives in the control DB keyed by (tenant, user); the user sends it to the bot. Open
@@ -1636,7 +1756,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   api.delete('/admin/agents/:id', requireAdmin, (c) => {
     const agent = getAgent(db, c.req.param('id'));
     deleteAgent(db, c.req.param('id'));
-    if (agent) softDeleteUser(db, agent.user_id);
+    if (agent) {
+      softDeleteUser(db, agent.user_id);
+      revokeAllSessions(db, agent.user_id);
+      revokeAllTokens(db, agent.user_id);
+    }
     return c.json({ ok: true });
   });
 
@@ -2100,16 +2224,49 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
 // ----- host bootstrap: default tenant + control plane + registry -------------
 
-mkdirSync(dirname(DB_PATH), { recursive: true });
-mkdirSync(BLOBS_DIR, { recursive: true });
+// The data directory is the only path the server writes to (Docker runs it as an
+// unprivileged user with a read-only root filesystem), so a permission failure here
+// is almost always ownership: a bind mount Docker created as root, or a ./data left
+// behind by the older image that ran as root. Both surface as a bare stack — an
+// EACCES from mkdir on a fresh install, SQLITE_READONLY from the first migration on
+// an upgrade — and both are fixed by the same chown, so say that instead.
+function exitOnUnwritableData(what: string, detail: string): never {
+  console.error(
+    `[carbon] cannot write to ${what} (${detail}).\n` +
+      '  The server runs as uid 1000 in Docker, so the mounted ./data must be owned by it:\n' +
+      '    docker compose down && sudo chown -R 1000:1000 ./data && docker compose up -d',
+  );
+  process.exit(1);
+}
+
+try {
+  mkdirSync(dirname(DB_PATH), { recursive: true });
+  mkdirSync(BLOBS_DIR, { recursive: true });
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'EACCES' || code === 'EPERM') {
+    exitOnUnwritableData(`the data directory ${dirname(DB_PATH)}`, code);
+  }
+  throw err;
+}
 
 // Default (legacy) tenant — the single-tenant self-host DB. Pinned, never evicted.
-const defaultCtx = initTenantDb({
-  id: 'default',
-  subdomain: '',
-  dbPath: DB_PATH,
-  blobsDir: BLOBS_DIR,
-});
+const defaultCtx = (() => {
+  try {
+    return initTenantDb({
+      id: 'default',
+      subdomain: '',
+      dbPath: DB_PATH,
+      blobsDir: BLOBS_DIR,
+    });
+  } catch (err) {
+    // node:sqlite reports a file the process may open but not write as errcode 8.
+    if ((err as { errcode?: number }).errcode === 8) {
+      exitOnUnwritableData(`the database ${DB_PATH}`, 'SQLITE_READONLY');
+    }
+    throw err;
+  }
+})();
 bootstrapUsers(defaultCtx.db, process.env.AUTH_USERS);
 
 /** Whether federation's L3 transport may reach a private/loopback/LAN peer over
@@ -2323,6 +2480,7 @@ app.get('/api/health', (c) => {
   let role: 'single' | 'apex' | 'app' | 'tenant' | 'unknown' = 'single';
   let locked = false;
   let expiresAt: string | null = null;
+  let syncEpoch: number | null = null;
   if (BASE_DOMAIN) {
     const label = hostLabel(c.req.header('host'), BASE_DOMAIN);
     if (label === null) role = 'apex'; // the bare apex
@@ -2338,8 +2496,14 @@ app.get('/api/health', (c) => {
           locked = true;
           expiresAt = rec.expires_at;
         }
+        const ctx = registry.getCtx(label);
+        if (ctx) syncEpoch = getSyncEpoch(ctx.db);
       }
     }
+  } else {
+    // Single-tenant self-host: the default workspace DB holds the epoch.
+    const ctx = registry.getCtx(null);
+    if (ctx) syncEpoch = getSyncEpoch(ctx.db);
   }
   return c.json({
     status: 'ok',
@@ -2351,6 +2515,8 @@ app.get('/api/health', (c) => {
     locked,
     // Only when locked — avoids leaking subscription end dates on healthy workspaces.
     ...(locked ? { expiresAt } : {}),
+    // null on apex/app/unknown (no workspace DB); number on single/tenant.
+    syncEpoch,
   });
 });
 
@@ -2389,6 +2555,11 @@ function signupAllowed(ip: string): boolean {
 // lenient per-IP cap on /signup/verify to bound brute-forcing the 6-digit code space.
 const emailStartHits = new Map<string, number[]>();
 const SIGNUP_PER_EMAIL_HOUR = Math.max(1, Number(process.env.SIGNUP_PER_EMAIL_HOUR) || 3);
+/** Within this window a repeated /signup/start for the same email is treated as a
+ *  duplicate (double-submit / retry) and does not send another email. */
+const SIGNUP_DEDUP_MS = Math.max(5_000, Number(process.env.SIGNUP_DEDUP_MS) || 45_000);
+/** In-flight guard so two concurrent POSTs for the same email don't both send. */
+const signupInFlight = new Set<string>();
 const verifyHits = new Map<string, number[]>();
 const VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.VERIFY_PER_IP_HOUR) || 30);
 
@@ -2403,6 +2574,9 @@ const DELETE_VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.DELETE_VERIFY_P
 // provider round-trips). Keyed on the resolved user id, not IP.
 const nlCommandHits = new Map<string, number[]>();
 const NL_COMMAND_PER_USER_HOUR = Math.max(1, Number(process.env.NL_COMMAND_PER_USER_HOUR) || 120);
+// Recipe optimise sends the note body straight into the prompt — bound it (~16 KB, far more
+// than any real recipe) so a huge note can't be used to run up provider cost.
+const RECIPE_MAX_CHARS = 16_000;
 function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boolean {
   const now = Date.now();
   const win = now - 3_600_000;
@@ -2531,15 +2705,33 @@ host.post('/signup/start', async (c) => {
     adminUsername?: string;
     adminPassword?: string;
     displayName?: string;
+    /** True when the user explicitly clicked Resend — bypasses the short dedup window. */
+    resend?: boolean;
   };
   const email = b.email?.trim().toLowerCase() || '';
   if (!email) return c.json({ error: 'email required' }, 400);
   if (!b.adminUsername || !b.adminPassword) {
     return c.json({ error: 'adminUsername and adminPassword required' }, 400);
   }
+
+  // Concurrent duplicate POSTs (double-click / browser retry): only one may send.
+  if (signupInFlight.has(email)) {
+    return c.json({ pending: true, email, deduped: true }, 201);
+  }
+
+  // Recent pending for this email + not an explicit resend → treat as idempotent
+  // retry and skip a second delivery of the same verification email.
+  if (!b.resend) {
+    const existing = getPendingSignup(controlDb, email);
+    if (existing && Date.now() - Date.parse(existing.created_at) < SIGNUP_DEDUP_MS) {
+      return c.json({ pending: true, email, deduped: true }, 201);
+    }
+  }
+
   if (!hitAllowed(emailStartHits, email, SIGNUP_PER_EMAIL_HOUR)) {
     return c.json({ error: 'too many codes requested for this email, try later' }, 429);
   }
+  signupInFlight.add(email);
   try {
     const { code } = createPendingSignup(controlDb, {
       email,
@@ -2555,6 +2747,8 @@ host.post('/signup/start', async (c) => {
     // internal (e.g. email-provider) error bodies. (API-3)
     console.error('[carbon] signup/start failed:', e);
     return c.json({ error: 'signup_failed' }, 400);
+  } finally {
+    signupInFlight.delete(email);
   }
 });
 

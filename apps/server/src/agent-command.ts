@@ -138,7 +138,18 @@ title summarizing what was written down; put the body in note if there's more th
 patch:{type:"task"}}]}. Converting a note back to a task restores whatever status/dates/flags it \
 had before — nothing needs to be re-specified unless the user wants to change them. The reverse — \
 "turn X into a note" — is update {updates:[{query:"X", patch:{type:"note"}}]}.
-- To find text INSIDE a note's body (not just its title), use search_notes, not items.`;
+- To ADD to a note without losing what's in it → update {updates:[{query:"X", \
+patch:{note_append:"the new line"}}]}. The server keeps the existing body and appends, so never \
+read a note just to write it back — patch:{note:"…"} REPLACES the whole body.
+- To find text INSIDE a note's body (not just its title), use search_notes, not items.
+- Notebooks. A list reported by lists with notes:true holds notes, not tasks. Read one with \
+items {list:"NAME", type:"note"} (detail:true for the bodies), and add to one WITHOUT passing \
+type — new items in a notebook are notes automatically.
+- Recipes are notes kept in recipe mode (reported as note_mode:"recipe"). "Add a recipe for X" / \
+"save this recipe" → add_tasks {tasks:[{title:"X", note_mode:"recipe", note:"<the recipe as \
+Markdown>"}]}, into the user's recipe notebook if they have one (resolve {kind:"list", q:"recipes"}). \
+Keep the ingredients and steps exactly as given — never invent, drop or reorder any. "Add … to the X \
+recipe" is an append: update {updates:[{query:"X", patch:{note_append:"…"}}]}.`;
 
 const PLACEMENT_RULES = `Project/list placement:
 - If the user explicitly asks to create/make a new list or project, use add_tasks with \
@@ -230,17 +241,21 @@ shopping-type list resolves, or you're not sure the item is really shopping, omi
 in Inbox.
 - Never create a note unless clearly asked to. Default a bare item to a task (or the shopping add \
 above), NOT a note. Only create a note item (type:"note") when the user explicitly uses note-writing \
-wording — "note down …", "add a note …", "make a note …", "write down …", "remember that …". Without \
-such wording, never produce type:"note".
-- "Add to <name> note, DETAIL" APPENDS to an existing note — it never overwrites the body. First read \
-the note with items {q:"<name>", type:"note", detail:true} to get its current body, then write it back \
-with update {updates:[{query:"<name>", patch:{note:"…"}}]} where note is the existing body, a line \
-break, then the new detail (e.g. "add to Bread Recipe note, rest for 45 min" keeps the whole recipe \
-and adds "Rest for 45 min" on a new line). If no note by that name exists, say so — don't create one.
+wording — "note down …", "add a note …", "make a note …", "write down …", "remember that …", or asks \
+for a recipe to be saved. Without such wording, never produce type:"note". The one exception needs no \
+wording and no type at all: an add into a notebook (a list with notes:true) is a note by definition — \
+just omit type and let the list decide.
+- "Add to <name> note, DETAIL" APPENDS to an existing note — it never overwrites the body. One call: \
+update {updates:[{query:"<name>", patch:{note_append:"DETAIL"}}]} (e.g. "add to Bread Recipe note, rest \
+for 45 min" keeps the whole recipe and adds "Rest for 45 min" on a new line). Don't read the note first, \
+and don't use patch:{note:…} for this — that would replace everything. If no note by that name exists, \
+check with resolve {kind:"note", q:"<name>"}; if it really doesn't, say so — don't create one.
 
 If a search_notes/items result's note content is long, don't paste the whole body into your reply — \
 summarize the relevant part in your own words (a sentence or two) and point the user at the item by \
-title (e.g. "your note 'Trip planning' mentions …") so they can open it for the rest.
+title (e.g. "your note 'Trip planning' mentions …") so they can open it for the rest. A body marked \
+note_truncated was cut short for you: summarize what you got or re-read that one note with full:true, \
+and never write it back.
 
 You can act on a whole list or tag in ONE call — the server finds the items, never enumerate them \
 yourself: "untick my weekly shopping items" (items tagged "weekly") → complete {tag:"weekly", done:false}; \
@@ -262,11 +277,14 @@ const TOOLS: ToolDef[] = [
     description:
       'Add one or more tasks OR notes to a list (tags may be created if missing). The command loop ' +
       'does not create lists/projects unless create_list_if_missing is true. For plain tasks ' +
-      'pass titles[] (always creates type:"task"). For per-task scheduling, a note body, or to create ' +
-      'a note item, pass tasks[] with {title, type? ("task" default, or "note"), note?, due_date?, ' +
-      'defer_date?, reminder_at? (all ISO datetimes), recurrence? (object {type,interval,daysOfWeek?,' +
-      'dayOfMonth?}), flagged?, priority? (0-3), tags?}. A note is a title + body with no due ' +
-      'date/checkbox — use type:"note" when the user wants to write something down, not something to do.',
+      'pass titles[]. For per-task scheduling, a note body, or to create ' +
+      'a note item, pass tasks[] with {title, type? ("task" or "note"), note_mode? ("recipe"), note?, ' +
+      'due_date?, defer_date?, reminder_at? (all ISO datetimes), recurrence? (object {type,interval,' +
+      'daysOfWeek?,dayOfMonth?}), flagged?, priority? (0-3), tags?}. A note is a title + body with no due ' +
+      'date/checkbox — use type:"note" when the user wants to write something down, not something to do, ' +
+      'and note_mode:"recipe" (which implies a note) for a recipe, so it opens in the recipe editor. ' +
+      'An omitted type follows the list: inside a notebook (a list reported with notes:true) new items ' +
+      'are notes automatically — do not pass type:"task" there.',
     parameters: {
       type: 'object',
       properties: {
@@ -286,7 +304,8 @@ const TOOLS: ToolDef[] = [
             type: 'object',
             properties: {
               title: { type: 'string' },
-              type: { type: 'string', enum: ['task', 'note'], description: 'defaults to "task"; "note" creates a note item (body in note, no due date/checkbox)' },
+              type: { type: 'string', enum: ['task', 'note'], description: 'omit to follow the list (notes in a notebook, tasks elsewhere); "note" creates a note item (body in note, no due date/checkbox)' },
+              note_mode: { type: 'string', enum: ['recipe'], description: 'create the note in recipe mode; implies type:"note"' },
               note: { type: 'string' },
               due_date: { type: 'string', description: 'ISO datetime with UTC offset; omit unless the user gave a date/time' },
               defer_date: { type: 'string', description: 'ISO datetime with UTC offset; omit unless asked' },
@@ -325,8 +344,12 @@ const TOOLS: ToolDef[] = [
     name: 'update',
     description:
       'Change fields on tasks or notes by name. patch keys: title (rename), ' +
-      'note (the body text — use this to add/replace ' +
-      'a note ON an existing task or note, e.g. "add a note to X"), type ("task" or "note" — converts the ' +
+      'note (REPLACES the body text — use this to add/replace ' +
+      'a note ON an existing task or note, e.g. "add a note to X"), ' +
+      'note_append (append a line to the existing body instead of replacing it — the server keeps ' +
+      'what is already there, so never read a body just to write it back), ' +
+      'note_mode ("recipe" or "notes" — which editor a note opens in), ' +
+      'type ("task" or "note" — converts the ' +
       'item; converting a note back to a task restores whatever status it had before it became a note, ' +
       'since status is preserved untouched the whole time it was a note), flagged (bool), priority (0-3), ' +
       'due_date / defer_date / reminder_at (ISO datetime), estimate_minutes (number), ' +
@@ -397,16 +420,23 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'resolve',
-    description: 'Check how a name resolves before acting (kind: list|tag|task).',
+    description:
+      'Check how a name resolves before acting (kind: list|tag|task|note). kind:"task" matches ' +
+      'tasks AND notes and reports each candidate\'s type; use kind:"note" to match notes only.',
     parameters: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['list', 'tag', 'task'] }, q: { type: 'string' } },
+      properties: {
+        kind: { type: 'string', enum: ['list', 'tag', 'task', 'note'] },
+        q: { type: 'string' },
+      },
       required: ['kind', 'q'],
     },
   },
   {
     name: 'lists',
-    description: 'List the task lists (projects).',
+    description:
+      'List the task lists (projects). A list with notes:true is a notebook — it holds notes ' +
+      '(recipes, write-ups), not tasks, so read it with items {list:…, type:"note"}.',
     parameters: { type: 'object', properties: {} },
   },
   {
@@ -418,10 +448,14 @@ const TOOLS: ToolDef[] = [
     name: 'items',
     description:
       'Show tasks and/or notes in a list or with a tag. status defaults to "active"; pass "done" for ' +
-      'completed or "all" for both. type defaults to "task"; pass "note" for notes only or "all" for both. ' +
+      'completed or "all" for both. type defaults to "task" — pass "note" for notes only or "all" for ' +
+      'both (inside a notebook it defaults to "note", since a notebook holds no tasks). ' +
       'For date questions ("what\'s due today / this week / overdue?") pass due_before and/or due_after — ' +
       'only items WITH a due date match, soonest first. ' +
-      'Use detail:true to get due dates, reminders, repeat, flags and priority (and each item\'s type).',
+      'Use detail:true to get note bodies, due dates, reminders, repeat, flags and priority (and each ' +
+      "item's type). Long note bodies come back cut short and marked note_truncated — summarize those " +
+      'from the part you got, or re-read the one item with full:true; never write a truncated body back ' +
+      '(use update note_append to add to a note).',
     parameters: {
       type: 'object',
       properties: {
@@ -433,6 +467,7 @@ const TOOLS: ToolDef[] = [
         due_before: { type: 'string', description: 'ISO datetime with offset; only items due at/before it, e.g. end of "today"/"this week". Overdue = due_before now.' },
         due_after: { type: 'string', description: 'ISO datetime with offset; only items due at/after it. Combine with due_before for a window.' },
         detail: { type: 'boolean' },
+        full: { type: 'boolean', description: 'with detail, return note bodies whole instead of cut short; use only when reading ONE note' },
       },
     },
   },
@@ -563,9 +598,10 @@ const TOOLS: ToolDef[] = [
 type Ops = ReturnType<typeof createAgentOps>;
 
 // Concise per-command tracing so a failing run can be diagnosed from the server log
-// (text → anchor/geocoder state → each tool call + result → reply). On by default for
-// single-tenant self-host; set CARBON_NL_DEBUG=0 to silence.
-const NL_DEBUG = process.env.CARBON_NL_DEBUG !== '0';
+// (text → anchor/geocoder state → each tool call + result → reply). Off by default;
+// set CARBON_NL_DEBUG=1 (or true) to enable.
+const NL_DEBUG =
+  process.env.CARBON_NL_DEBUG === '1' || process.env.CARBON_NL_DEBUG === 'true';
 function dbg(msg: string): void {
   if (NL_DEBUG) console.log(`[nl] ${msg}`);
 }
@@ -898,16 +934,19 @@ function buildReply(executed: ExecutedTool[], modelText: string): string {
     if (!e.result.ok) continue;
     const d = e.result.data as Record<string, unknown>;
     if (e.tool === 'add_tasks') {
-      const created = (d.created as Array<{ title: string; type?: string }>) ?? [];
+      const created = (d.created as Array<{ title: string; type?: string; note_mode?: string }>) ?? [];
       const list = d.list as { name: string; created: boolean } | null;
       const tags = (d.tags as Array<{ name: string }>) ?? [];
       if (created.length) {
         const where = list ? ` to ${list.created ? 'new list ' : ''}"${list.name}"` : '';
         const tagStr = tags.length ? ` (tagged ${tags.map((t) => t.name).join(', ')})` : '';
-        // Say "note(s)" instead of the generic "Added" when everything created was a note,
-        // so the reply doesn't call a note a "task".
+        // Say "note(s)"/"recipe(s)" instead of the generic "Added" when everything created was
+        // one, so the reply doesn't call a note a "task". Notes land here without the model
+        // asking for them too — inside a notebook every new item is a note.
         const allNotes = created.every((c) => c.type === 'note');
-        const verb = allNotes ? (created.length === 1 ? 'Added note' : 'Added notes') : 'Added';
+        const allRecipes = allNotes && created.every((c) => c.note_mode === 'recipe');
+        const noun = allRecipes ? 'recipe' : 'note';
+        const verb = allNotes ? `Added ${noun}${created.length === 1 ? '' : 's'}` : 'Added';
         lines.push(`${verb}${where}${tagStr}: ${joinNames(created)}`);
       }
     } else if (e.tool === 'search_notes') {

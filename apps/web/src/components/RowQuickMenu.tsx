@@ -98,13 +98,18 @@ export function RowQuickMenu({
 
   async function copyMarkdown() {
     const md = itemTreeToMarkdown(itemId);
+    onClose();
     try {
       await navigator.clipboard.writeText(md);
-      useStore.getState().showToast({ message: 'Copied as Markdown' });
+      // Defer so the toast isn't painted under the closing menu portal.
+      queueMicrotask(() => {
+        useStore.getState().showToast({ message: 'Copied as Markdown' });
+      });
     } catch {
-      useStore.getState().showToast({ message: 'Copy failed' });
+      queueMicrotask(() => {
+        useStore.getState().showToast({ message: 'Copy failed' });
+      });
     }
-    onClose();
   }
 
   function toggleTag(tagId: string) {

@@ -494,4 +494,30 @@ MIGRATIONS.push({
   up: `ALTER TABLE items ADD COLUMN metadata TEXT;`,
 });
 
+MIGRATIONS.push({
+  version: 22,
+  // Notes containers + row thumbnails.
+  //
+  // `notes_project` marks a project whose contents are notes rather than actions:
+  // new children default to type='note', and the project's own editor drops every
+  // task-scheduling control. It is deliberately a flag on `type='project'` rather
+  // than a new ItemType — a notes container is still a project everywhere else
+  // (sidebar, folders, sharing, sync), only its default child type and editor
+  // surface differ.
+  //
+  // `thumb` is JSON {src, hash, w, h}: a small, separately content-addressed
+  // rendition of the FIRST image in this item's note body (`src` = the hash of
+  // the full-size image it was derived from, so it regenerates when that changes).
+  // Row rendering reads only `thumb`, so a list never has to pull megabytes of
+  // original image just to draw a 96px icon — and the blob-fetch policy can keep
+  // thumbnails resident while the originals are fetched on demand.
+  //
+  // Plain ALTER TABLEs (no CHECK to relax), so no table rebuild; both ride the
+  // item op-log like any other field.
+  up: `
+    ALTER TABLE items ADD COLUMN notes_project INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE items ADD COLUMN thumb TEXT;
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

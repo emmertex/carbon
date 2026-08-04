@@ -7,9 +7,11 @@ sync protocol never needs a retrofit.
 
 All phases below have shipped; see [`docs/features.md`](docs/features.md) for the full,
 up-to-date feature inventory. Notable additions after the original Phase A–F plan include
-first-class **Notes**, deep **time-tracking** editing (merge/split/segments, time notes),
-opt-in **GPS tracks** on sessions, sync recovery (reset local / merge-replace / erase on
-sign-out), and **federation** L2/L3 (off by default).
+first-class **Notes** (including notes projects, card rows and thumbnails), **recipe**
+notes with servings scale, deep **time-tracking** editing (merge/split/segments, time
+notes), opt-in **GPS tracks** on sessions, **Recently Deleted** recovery, sync recovery
+(reset local / merge-replace / erase on sign-out), mandatory sync **2FA**, and
+**federation** L2/L3 (off by default).
 
 ## Phases
 
@@ -111,6 +113,14 @@ agents           id, name, kind(hermes|openai|anthropic|openai-compatible), endp
   projection** (no `password_hash`).
 - **Attachments**: metadata syncs as records; the blob moves out-of-band by content
   hash (upload-if-absent, download-on-demand, cached locally).
+- **Op-log growth (locked):** clients are full replicas (sql.js → IndexedDB); pulls are
+  unpaged. Keep total `ops`+`record_ops` well under ~50 MB; past ~100 MB expect first-sync
+  and client RAM issues first (sql.js + unpaged JSON), not SQLite itself.
+  - **Tier 1 — safe prune** (cursors stay valid): LWW losers only, never delete
+    `MAX(rowid)` (rowid-reuse guard). Notes today; superseded `setting` record_ops too.
+  - **Tier 2 — sync epoch reset** (breaks incremental sync): operator rebuilds the log
+    from materialized state, bumps workspace `sync_epoch`, clients must wipe and re-pull
+    (or stay offline). Federation links must be revoked first; peers re-bootstrap manually.
 
 ## Hermes integration (Phase F) — intent
 

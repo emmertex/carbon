@@ -11,6 +11,7 @@ const GO_ROUTES: Record<string, string> = {
   p: '/plan',
   o: '/forecast',
   r: '/review',
+  d: '/trash', // Recently Deleted — reachable even when the sidebar hides it (nothing deleted)
 };
 
 const SCROLL_KEYS = new Set(['Home', 'End', 'PageUp', 'PageDown']);

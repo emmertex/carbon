@@ -348,6 +348,17 @@ export function revokeAllSessions(db: Db, userId: string): number {
   return n;
 }
 
+/** Revoke every API token for a user. Returns count revoked. */
+export function revokeAllTokens(db: Db, userId: string): number {
+  const n =
+    db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ? AND revoked = 0`,
+      [userId],
+    )?.n ?? 0;
+  db.run(`UPDATE api_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0`, [userId]);
+  return n;
+}
+
 // ----- API tokens (for HA / integrations / Hermes) --------------------------
 
 export interface TokenRow {
@@ -743,7 +754,7 @@ export function basicAuth(
         }
         const challenge = validateMfaChallenge(db, secret);
         const user = challenge ? getUser(db, challenge.userId) : undefined;
-        if (challenge && user) {
+        if (challenge && user && !user.deleted) {
           c.set('userId', user.id);
           c.set('username', user.username);
           c.set('role', user.role);
@@ -756,8 +767,9 @@ export function basicAuth(
         return c.json({ error: 'invalid challenge' }, 401);
       }
       const session = validateSession(db, secret);
+      // getUser excludes soft-deleted users — lingering sessions must not authenticate.
       const sessionUser = session ? getUser(db, session.userId) : undefined;
-      if (session && sessionUser) {
+      if (session && sessionUser && !sessionUser.deleted) {
         c.set('userId', sessionUser.id);
         c.set('username', sessionUser.username);
         c.set('role', sessionUser.role);
@@ -767,7 +779,7 @@ export function basicAuth(
       }
       const validated = validateToken(db, secret);
       const user = validated ? getUser(db, validated.userId) : undefined;
-      if (validated && user) {
+      if (validated && user && !user.deleted) {
         c.set('userId', user.id);
         c.set('username', user.username);
         c.set('role', user.role);

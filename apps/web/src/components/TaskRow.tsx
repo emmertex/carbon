@@ -20,6 +20,7 @@ import {
   isInPlan,
   isOverdue,
   isDueToday,
+  firstBlobRef,
   type Item,
   type Tag,
   type User,
@@ -33,6 +34,7 @@ import { ProgressRing } from './ProgressRing';
 import { Avatar } from './Avatar';
 import { RemoteOwnerBadge } from './RemoteOwnerBadge';
 import { RowQuickMenu, type MenuPos } from './RowQuickMenu';
+import { NoteThumbnail, noteExcerpt } from './NotePreview';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { cn } from '@/lib/cn';
 import { formatDue } from '@/lib/date';
@@ -208,6 +210,19 @@ export function TaskRow({
   const step = compact ? STEP_COMPACT_REM : STEP_ROOMY_REM;
   const padLeft = indent ? `${Math.min(indent, MAX_DEPTH) * step + INDENT_BASE_REM}rem` : undefined;
 
+  // A note row is a card, not a checkbox line: ~2.5x the height of a task row,
+  // led by the note's first image (its thumbnail) instead of a glyph, and carrying
+  // three lines of text — the title plus two lines of the body. This is the shape
+  // of every note row everywhere, not just inside a notes project.
+  //
+  // An EMPTY note (no image, no text) has nothing to fill that card with, so it
+  // falls back to the plain task-row layout — a small glyph and one line — rather
+  // than reserving three rows of blank space. The card test reads the BODY, not the
+  // stored thumbnail, so an image-only note is a card from the moment it's written,
+  // not only once its thumbnail has been generated.
+  const excerpt = isNote ? noteExcerpt(item.note) : '';
+  const noteCard = isNote && (!!firstBlobRef(item.note) || !!excerpt);
+
   return (
     <div
       data-testid="task-row"
@@ -223,22 +238,27 @@ export function TaskRow({
       style={padLeft ? { paddingLeft: padLeft } : undefined}
       className={cn(
         'group flex cursor-pointer items-start gap-2.5 rounded-lg px-3 transition-colors',
-        expanded ? 'py-3' : 'py-2',
+        noteCard ? 'min-h-[5.75rem] py-2.5' : expanded ? 'py-3' : 'py-2',
         selected ? 'bg-accent-soft' : 'hover:bg-surface-2',
         focused && 'ring-2 ring-inset ring-accent',
         onHold && !done && 'opacity-50',
       )}
     >
       {isNote ? (
-        // A note can't be completed from the row — a static glyph replaces the
-        // completion ring. Clicking the row (handled above) opens the note.
-        <span
-          className="mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center text-text-faint"
-          aria-label="Note"
-          title="Note"
-        >
-          <FileText size={15} />
-        </span>
+        // A note can't be completed from the row, so its leading slot is imagery,
+        // not a completion ring: the thumbnail on a card, or the bare glyph at
+        // checkbox size once the note is empty. Clicking the row opens the note.
+        noteCard ? (
+          <NoteThumbnail item={item} size={72} className="mt-0.5" />
+        ) : (
+          <span
+            className="mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center text-text-faint"
+            aria-label="Note"
+            title="Note"
+          >
+            <FileText size={15} />
+          </span>
+        )
       ) : (
         <button
           onClick={toggleComplete}
@@ -317,7 +337,9 @@ export function TaskRow({
               <Ban size={12} aria-label="Blocked" />
             </span>
           )}
-          {item.note && (
+          {item.note && !isNote && (
+            // On a note the body is right there in the excerpt below — the "has
+            // notes" marker would just be noise.
             <Pencil size={12} className="shrink-0 text-text-faint" aria-label="Has notes" />
           )}
           {hasComments && (
@@ -329,6 +351,15 @@ export function TaskRow({
           )}
           {remoteOwner && <RemoteOwnerBadge homeServer={remoteOwner} />}
         </div>
+
+        {noteCard && (
+          // Two lines of body text under the title. Always rendered on a card (even
+          // for an image-only note) so every card row is the same height and lists
+          // don't look ragged; an empty note isn't a card at all.
+          <p className="mt-1 line-clamp-2 whitespace-pre-line break-words text-xs leading-relaxed text-text-muted">
+            {excerpt}&nbsp;
+          </p>
+        )}
 
         {showMeta && (item.due_date || (showProject && projectName) || hasChildren) && (
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-text-muted">

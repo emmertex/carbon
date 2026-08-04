@@ -3,6 +3,7 @@ import type { EditorView } from '@tiptap/pm/view';
 import StarterKit from '@tiptap/starter-kit';
 import Image from '@tiptap/extension-image';
 import Placeholder from '@tiptap/extension-placeholder';
+import { TableKit } from '@tiptap/extension-table';
 import { Markdown as MarkdownExtension } from 'tiptap-markdown';
 import { useEffect, useRef } from 'react';
 import { storeFile, blobSrcHash, getBlobObjectUrl } from '@/lib/blobs';
@@ -138,8 +139,18 @@ export function TiptapEditor({
   const dirtyRef = useRef(false);
 
   const editor = useEditor({
+    // Avoid create-during-render; TipTap's default can race Suspense remounts
+    // (especially on mobile Chrome after a lazy chunk load) and throw into the
+    // nearest error boundary on first open.
+    immediatelyRender: false,
     extensions: [
       StarterKit,
+      // GFM tables: without TableKit, markdown-it emits <table> HTML that the
+      // StarterKit-only schema strips, concatenating cell text in the WYSIWYG view
+      // while Source + read-mode (remark-gfm) still look fine.
+      TableKit.configure({
+        table: { resizable: false },
+      }),
       BlobImage,
       Placeholder.configure({ placeholder: placeholder ?? 'Add notes…' }),
       MarkdownExtension.configure({ html: false, transformPastedText: false }),
@@ -176,7 +187,9 @@ export function TiptapEditor({
   });
 
   function flushMarkdown(instance: Editor): string {
-    if (!dirtyRef.current) return lastEmittedRef.current;
+    // A destroyed editor has had its extensionStorage cleared, so getMarkdown()
+    // would throw; the last emitted value is the best we still know.
+    if (!dirtyRef.current || instance.isDestroyed) return lastEmittedRef.current;
     const md = getMarkdown(instance);
     lastEmittedRef.current = md;
     dirtyRef.current = false;
@@ -188,7 +201,8 @@ export function TiptapEditor({
   // version — never on mount (the doc already came from `initialValue`), and never
   // when the target already matches the current doc (which would fight the caret).
   useEffect(() => {
-    if (!editor || externalVersion === undefined || externalValue === undefined) return;
+    if (!editor || editor.isDestroyed) return;
+    if (externalVersion === undefined || externalValue === undefined) return;
     if (externalVersion === appliedExternalVersionRef.current) return;
     appliedExternalVersionRef.current = externalVersion;
     if (externalValue === lastEmittedRef.current) return;
@@ -204,27 +218,37 @@ export function TiptapEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
-  // Destroy on unmount, flushing any dirty (unsaved) content first via the same
-  // onBlur path a real blur would take. This is the fix for two related bugs:
-  //   - `[]` deps here previously closed over `editor` from the render that scheduled
-  //     the effect — `useEditor` returns null on that first render and only becomes
-  //     non-null via Tiptap's own internal effect afterward, so the captured `editor`
-  //     was always null and `.destroy()` never actually ran (a ProseMirror instance
-  //     leak on every note closed). `[editor]` re-arms the cleanup once `editor`
-  //     becomes non-null.
-  //   - Switching items or closing the panel while mid-autosave (before the ~1.5s
-  //     debounce fires) previously discarded the last keystrokes: nothing flushed the
-  //     live document before the editor was torn down. Flushing here — using the
-  //     still-live `editor` instance, before `destroy()` — closes that gap without
-  //     relying on a preceding blur event.
+  // TipTap's create-time `autofocus` races with lazy/Suspense mount and often loses
+  // to focus restoration (e.g. project QuickAdd). Explicitly focus once the editor
+  // is attached so Enter goes into the note body instead of submitting stray notes.
+  // Guarded: a half-destroyed instance (commandManager null) must not take down the
+  // note panel — Android Chrome is especially prone to this after Suspense remount.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed || !autoFocus) return;
+    try {
+      editor.commands.focus('end');
+    } catch (err) {
+      console.error('[carbon] editor focus failed', err);
+    }
+  }, [editor, autoFocus]);
+
+  // Flush any dirty (unsaved) content on unmount, via the same onBlur path a real
+  // blur would take: switching items or closing the panel while mid-autosave (before
+  // the ~1.5s debounce fires) would otherwise discard the last keystrokes, since
+  // nothing else reads the live document before teardown.
+  //
+  // Deliberately does NOT call `editor.destroy()`. Tiptap v3's `useEditor` owns the
+  // instance lifecycle: its own cleanup calls `scheduleDestroy()`, which defers the
+  // destroy by a tick and CANCELS it if the component remounts, handing the same
+  // instance back. Destroying eagerly here nulls `commandManager` on an instance
+  // `useEditor` then reuses, so the next `editor.commands.*` throws
+  // "can't access property 'commands', this.commandManager is null" — which is what
+  // the lazy/Suspense mount of the notes panel triggers on every open.
   useEffect(() => {
     return () => {
-      if (!editor) return;
-      if (dirtyRef.current) {
-        const md = flushMarkdown(editor);
-        onBlurRef.current(md);
-      }
-      editor.destroy();
+      if (!editor || !dirtyRef.current) return;
+      const md = flushMarkdown(editor);
+      onBlurRef.current(md);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);

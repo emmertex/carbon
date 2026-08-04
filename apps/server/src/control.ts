@@ -518,6 +518,20 @@ function generateOtc(): string {
   return String(randomInt(0, 1_000_000)).padStart(6, '0');
 }
 
+/** Newest non-expired pending signup for an email, or null. */
+export function getPendingSignup(db: Db, email: string): PendingSignupRow | null {
+  const row = db.get<PendingSignupRow>(
+    'SELECT * FROM pending_signups WHERE email = ? ORDER BY created_at DESC LIMIT 1',
+    [email.trim().toLowerCase()],
+  );
+  if (!row) return null;
+  if (Date.now() > Date.parse(row.expires_at)) {
+    db.run('DELETE FROM pending_signups WHERE id = ?', [row.id]);
+    return null;
+  }
+  return row;
+}
+
 /**
  * Stage a signup pending email verification: validate, hash the password + a fresh
  * 6-digit code, and (re)insert the pending row for this email. Returns the plaintext

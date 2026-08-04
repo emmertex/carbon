@@ -2,6 +2,7 @@ import {
   getUnsyncedOps,
   markOpsSynced,
   compactNoteOps,
+  compactSettingRecordOps,
   ingestOps,
   getUnsyncedRecordOps,
   markRecordOpsSynced,
@@ -25,12 +26,60 @@ import {
 } from './config';
 import { isNative } from './platform';
 import { useStore } from './store';
-import { uploadPendingBlobs } from './blobs';
+import { uploadPendingBlobs, syncBlobCache } from './blobs';
+import { backfillThumbs } from './thumbs';
 import { getNlConfig } from './admin';
 import { applyInboundSettings } from './settings-sync';
 
 function joinUrl(base: string, path: string): string {
   return base.replace(/\/$/, '') + path;
+}
+
+const SYNC_EPOCH_META = 'sync_epoch';
+
+/** Locally bound sync epoch, or null if this device has never bound to a server epoch. */
+export function getLocalSyncEpoch(): number | null {
+  const raw = getMeta(SYNC_EPOCH_META);
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null;
+}
+
+function bindSyncEpoch(epoch: number): void {
+  setMeta(SYNC_EPOCH_META, String(Math.max(1, Math.floor(epoch))));
+}
+
+/**
+ * Compare a server-advertised syncEpoch to the local bind.
+ * - Fresh device (no bind, cursors at 0) → bind without alarming.
+ * - Already-synced device with no bind (pre-epoch clients) → treat as epoch 1.
+ * - Local ≠ server → set mismatch gate and return false (caller must not ingest).
+ * - Match → clear any stale mismatch flag, return true.
+ * - null/undefined server epoch → no-op (apex/app hosts).
+ */
+export function handleServerSyncEpoch(serverEpoch: number | null | undefined): boolean {
+  if (serverEpoch == null || !Number.isFinite(serverEpoch) || serverEpoch < 1) return true;
+  const epoch = Math.floor(serverEpoch);
+  let local = getLocalSyncEpoch();
+  if (local == null) {
+    const since = Number(getMeta('last_sync_seq') ?? 0);
+    const rsince = Number(getMeta('last_sync_rseq') ?? 0);
+    if (since > 0 || rsince > 0) {
+      // Pre-epoch client that already syncs: bind as epoch 1 so a server bump is visible.
+      local = 1;
+      bindSyncEpoch(1);
+    } else {
+      bindSyncEpoch(epoch);
+      useStore.getState().setSyncEpochMismatch(false);
+      return true;
+    }
+  }
+  if (local !== epoch) {
+    useStore.getState().setSyncEpochMismatch(true, epoch);
+    return false;
+  }
+  useStore.getState().setSyncEpochMismatch(false);
+  return true;
 }
 
 /** Refresh the Add box's NL keyword/enable state from the server (best-effort). */
@@ -46,11 +95,18 @@ export async function loadNlConfig(): Promise<void> {
 
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight = false;
+/** One thumbnail backfill sweep per session even if no sync ever brings changes. */
+let backfilledThisSession = false;
 // Backstop for the backfill follow-up chain. The fresh-ops-only logic already makes it
 // self-terminating, but cap consecutive auto-follow-ups so no pathological case can
 // spin the 500ms loop forever (M7).
 let followUpDepth = 0;
 const MAX_FOLLOWUP_ROUNDS = 8;
+/** Ops (and record-ops) pushed per request. The server caps a sync push (MAX_SYNC_BATCH,
+ *  10k per array) so no single request can queue unbounded work; a client that had been
+ *  offline long enough to exceed that would otherwise be stuck failing forever, so drain
+ *  in chunks and sync again immediately until the backlog is gone. */
+const SYNC_PUSH_CHUNK = 2500;
 
 // Roots to re-request a full-subtree backfill for, because access to them was just
 // (re)granted — their children may have been added while we couldn't see them and
@@ -99,6 +155,7 @@ export async function fetchHostInfo(): Promise<void> {
       locked?: boolean;
       expiresAt?: string | null;
       version?: string;
+      syncEpoch?: number | null;
     };
     if (h.role) {
       useStore.getState().setHostInfo({
@@ -109,6 +166,9 @@ export async function fetchHostInfo(): Promise<void> {
       });
       // expiresAt is only present on /api/health while locked (avoids leaking expiry).
       useStore.getState().setWorkspaceLock(!!h.locked, h.locked ? (h.expiresAt ?? null) : null);
+      // Early mismatch detection before the next sync poll (authoritative check
+      // still happens on /api/sync). Skip on apex/app where syncEpoch is null.
+      if (h.syncEpoch != null) handleServerSyncEpoch(h.syncEpoch);
       // The role-driven server-config wiring below only makes sense when `origin`
       // is where the app is actually served from (the browser/PWA case) — on native
       // it's just the sync target, and role there doesn't mean the same thing (e.g.
@@ -312,6 +372,13 @@ export async function syncNow(): Promise<boolean> {
     store.setSettingsHydrated(true); // local-only: no synced settings to wait for
     return false;
   }
+  // Don't push/pull across an epoch mismatch — the server log was rebuilt.
+  if (store.syncEpochMismatch) {
+    store.setSyncStatus('error');
+    store.setSyncError('Sync server history was rebuilt — clear local cache to continue');
+    store.setSettingsHydrated(true);
+    return false;
+  }
   if (inFlight) return false;
   inFlight = true;
   store.setSyncStatus('syncing');
@@ -327,8 +394,13 @@ export async function syncNow(): Promise<boolean> {
       return false;
     }
     const db = getDb();
-    const unsynced = getUnsyncedOps(db);
-    const unsyncedRecords = getUnsyncedRecordOps(db);
+    const pendingOps = getUnsyncedOps(db);
+    const pendingRecords = getUnsyncedRecordOps(db);
+    // Push at most one chunk of each; the rest go out on the follow-up round below.
+    const unsynced = pendingOps.slice(0, SYNC_PUSH_CHUNK);
+    const unsyncedRecords = pendingRecords.slice(0, SYNC_PUSH_CHUNK);
+    const backlog =
+      pendingOps.length > unsynced.length || pendingRecords.length > unsyncedRecords.length;
     const since = Number(getMeta('last_sync_seq') ?? 0);
     const rsince = Number(getMeta('last_sync_rseq') ?? 0);
     // Shared items we have a grant for but no local content (access granted after we
@@ -352,7 +424,18 @@ export async function syncNow(): Promise<boolean> {
       recordOps: RecordOp[];
       rcursor: number;
       users: User[];
+      syncEpoch?: number;
     };
+
+    // Authoritative epoch check — refuse to ingest/advance cursors on mismatch.
+    // Note: we may have already pushed unsynced ops in this request; that is OK for
+    // a first bind, but after a server rebuild the client should wipe before pushing.
+    // Health usually surfaces the mismatch first so this path is a safety net.
+    if (!handleServerSyncEpoch(data.syncEpoch ?? null)) {
+      store.setSyncStatus('error');
+      store.setSyncError('Sync server history was rebuilt — clear local cache to continue');
+      return false;
+    }
 
     // Each ingest opens its own transaction; don't nest (sql.js has no savepoints).
     if (data.users?.length) for (const u of data.users) upsertUser(db, u);
@@ -380,6 +463,9 @@ export async function syncNow(): Promise<boolean> {
     if (pushedNoteItemIds.length) {
       compactNoteOps(db, { syncedOnly: true, itemIds: pushedNoteItemIds });
     }
+    if (unsyncedRecords.some((o) => o.entity === 'setting')) {
+      compactSettingRecordOps(db, { syncedOnly: true });
+    }
     setMeta('last_sync_seq', String(data.cursor));
     setMeta('last_sync_rseq', String(data.rcursor));
 
@@ -400,8 +486,33 @@ export async function syncNow(): Promise<boolean> {
     await persist();
     await uploadPendingBlobs();
     store.setSyncStatus('idle');
+    // Blob housekeeping runs detached: fetching thumbnails / pruning the cache can
+    // take a while on a big workspace and must not hold the sync status at
+    // "syncing" or delay the UI bump below. Failures are logged, never fatal.
+    const changed = freshOps.length > 0 || freshRecords.length > 0;
+    void (async () => {
+      const eager = getServerConfig().blobFetch === 'all';
+      await syncBlobCache(db);
+      // Notes written before thumbnails existed (or imported) get one on the first
+      // sync that can see their image — cache-only unless we're fetching everything.
+      // Only worth re-scanning when something actually arrived (or on the first
+      // sync of the session); an idle 30s poll shouldn't re-walk every note whose
+      // source image simply isn't cached on this device.
+      if (changed || !backfilledThisSession) {
+        backfilledThisSession = true;
+        await backfillThumbs(db, eager);
+      }
+    })();
     store.setLastSyncedAt(Date.now());
     store.bump();
+    // More pending ops than one chunk holds: go straight round again. This can't spin —
+    // what we just pushed is now marked synced, so every round strictly drains the
+    // backlog — so it deliberately doesn't consume the backfill follow-up budget.
+    if (backlog) {
+      followUpDepth = 0;
+      setTimeout(() => void syncNow(), 200);
+      return true;
+    }
     // Newly-granted roots are queued; sync again shortly to pull their subtrees in.
     if (followUp && followUpDepth < MAX_FOLLOWUP_ROUNDS) {
       followUpDepth++;

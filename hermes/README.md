@@ -1,5 +1,7 @@
    Skill: carbon-nl/SKILL.md   ← NEW: natural-language lists, used DIRECTLY from Hermes
     - "add milk and eggs to my shopping list", "mark off bread and milk", "what do I need at Coles?"
+    - Notes and recipes too: "write down …", "what did I write about X?", "save this recipe",
+      "add to the sourdough recipe: rest 45 min" (carbon-cli.py note add/append/show/search).
     - No webhook needed — the agent runs carbon-nl/carbon-cli.py, which calls /api/agent/*.
     - The server fuzzy-matches names; the CLI prints a ready-to-relay line per command.
     - Token (acting as the user) in carbon-nl/.credentials (see .credentials.example).
@@ -27,6 +29,9 @@
       agent_add_timer_note(), agent_timer_context() — the server fuzzy-matches names, so pass plain
       names (never ids). agent_add() also takes scheduling fields (due_date/reminder_at/
       recurrence) via tasks=[{...}]. See docs/carbon-agent-api.md §6.
+      (Notes/recipes — GET /api/agent/notes/search, items?type=note, the note_mode and
+      note_append patch keys — have no helper here either; carbon-nl's `carbon-cli.py note`
+      covers them, or add helpers if you need them from the webhook flow.)
       (Bulk tag add/remove — POST /api/agent/tasks/tag — is available via carbon-nl's
       `carbon-cli.py tag` but doesn't yet have a helper here; add one if you need it from
       the webhook flow.)

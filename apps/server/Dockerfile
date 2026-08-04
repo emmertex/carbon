@@ -32,6 +32,14 @@ ENV NODE_ENV=production \
 COPY --from=build /app/apps/server/dist ./server
 COPY --from=build /app/apps/web/dist ./web
 
+# Run unprivileged. The bundle and web assets stay root-owned (0755) so the app
+# user can read but not rewrite its own code; /app/data is the only writable path
+# and it is pre-created as node:node so a named/anonymous volume inherits that
+# ownership. A bind mount keeps the host's ownership instead — the host directory
+# must be owned by uid 1000 (see README "Self-host").
+RUN install -d -o node -g node /app/data
+USER node
+
 EXPOSE 3069
 VOLUME ["/app/data"]
 CMD ["node", "server/index.js"]

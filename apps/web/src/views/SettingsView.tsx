@@ -18,6 +18,7 @@ import { DataBackup } from '@/components/DataBackup';
 import { AppearanceSection } from '@/components/settings/AppearanceSection';
 import { FeaturesSection } from '@/components/settings/FeaturesSection';
 import { GesturesSection } from '@/components/settings/GesturesSection';
+import { RecipesSection } from '@/components/settings/RecipesSection';
 import { SyncSection } from '@/components/settings/SyncSection';
 import { SecuritySection } from '@/components/settings/SecuritySection';
 import { FederationSection } from '@/components/settings/FederationSection';
@@ -76,6 +77,7 @@ export function SettingsView() {
     { id: 'appearance', group: 'general', show: () => true, render: () => <AppearanceSection /> },
     { id: 'features', group: 'general', show: () => true, render: () => <FeaturesSection /> },
     { id: 'gestures', group: 'general', show: () => true, render: () => <GesturesSection /> },
+    { id: 'recipes', group: 'general', show: () => true, render: () => <RecipesSection /> },
     { id: 'planning', group: 'tasks', show: (c) => c.signedIn, render: () => <PlanningSettings /> },
     { id: 'profile', group: 'account', show: (c) => c.signedIn, render: () => <Profile /> },
     { id: 'sync', group: 'account', show: () => true, render: () => <SyncSection cfg={cfg} update={update} /> },

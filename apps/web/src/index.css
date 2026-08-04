@@ -422,14 +422,37 @@ select option {
 .md table {
   border-collapse: collapse;
   margin: 0.5em 0;
+  table-layout: fixed;
+  width: 100%;
+  overflow: hidden;
 }
 .md th,
 .md td {
   border: 1px solid var(--border);
+  box-sizing: border-box;
+  min-width: 1em;
   padding: 0.3em 0.5em;
+  position: relative;
+  vertical-align: top;
 }
 .md th {
   background: var(--surface-2);
+  font-weight: 600;
+  text-align: left;
+}
+/* TipTap wraps every cell in a <p>; kill the prose paragraph gap inside cells. */
+.md th p,
+.md td p {
+  margin: 0;
+}
+/* TipTap cell selection (ProseMirror tables) — same surface as read-mode tables. */
+.tiptap-notes .selectedCell::after {
+  background: var(--accent-soft);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
 }
 .md img {
   max-width: 100%;

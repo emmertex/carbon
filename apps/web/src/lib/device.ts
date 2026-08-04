@@ -45,6 +45,42 @@ export function regenerateDeviceId(): string {
   return id;
 }
 
+// ----- trusted-device secret -------------------------------------------------
+// What actually lets this device skip 2FA on the next password login. The id
+// above is a public label; this is the proof, issued by the server and rotated
+// on every use, so it is kept per server URL — a token minted by one server is
+// meaningless to another, and sending it there would only burn that account's
+// failed-attempt budget.
+
+const TRUST_KEY = 'carbon.device.trust';
+
+function readTrustMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(TRUST_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function serverKey(url: string): string {
+  return url.trim().replace(/\/+$/, '').toLowerCase();
+}
+
+/** This device's trust secret for `url`, or '' if it has none (→ 2FA on login). */
+export function getDeviceTrustToken(url: string): string {
+  return readTrustMap()[serverKey(url)] ?? '';
+}
+
+/** Store the secret the server just issued (or clear it with null). */
+export function setDeviceTrustToken(url: string, token: string | null): void {
+  const map = readTrustMap();
+  const key = serverKey(url);
+  if (token) map[key] = token;
+  else delete map[key];
+  localStorage.setItem(TRUST_KEY, JSON.stringify(map));
+}
+
 /** A friendly fallback label from UA hints (web/desktop). */
 function uaFallback(): string {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';

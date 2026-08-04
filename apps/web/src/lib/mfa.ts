@@ -1,8 +1,20 @@
 import { getServerConfig, authHeaders } from './config';
-import { getDeviceId, getDeviceName } from './device';
+import {
+  getDeviceId,
+  getDeviceName,
+  getDeviceTrustToken,
+  setDeviceTrustToken,
+} from './device';
 
 function joinUrl(base: string, path: string): string {
   return base.replace(/\/$/, '') + path;
+}
+
+/** Persist the rotated device secret that came back with a login. Every response
+ *  that trusts this device carries one; missing it just costs a 2FA prompt next
+ *  time, so an older server that doesn't send one still works. */
+function rememberTrust(url: string, token: string | undefined): void {
+  if (token) setDeviceTrustToken(url, token);
 }
 
 function challengeHeaders(challenge: string): HeadersInit {
@@ -76,6 +88,7 @@ export async function loginWithPassword(
       body: JSON.stringify({
         device_id: getDeviceId(),
         device_name: getDeviceName(),
+        device_token: getDeviceTrustToken(cfg.url),
       }),
     });
     if (res.status === 401) return { status: 'badCredentials' };
@@ -87,9 +100,13 @@ export async function loginWithPassword(
       challenge?: string;
       factors?: { email: boolean; totp: boolean };
       recovery_codes?: string[];
+      device_token?: string;
     };
     if (data.open) return { status: 'open' };
-    if (data.token) return { status: 'ok', token: data.token, recovery_codes: data.recovery_codes };
+    if (data.token) {
+      rememberTrust(cfg.url, data.device_token);
+      return { status: 'ok', token: data.token, recovery_codes: data.recovery_codes };
+    }
     if (data.status === 'needs_enrollment' && data.challenge) {
       return { status: 'needs_enrollment', challenge: data.challenge };
     }
@@ -162,7 +179,13 @@ export async function mfaEnrollFinish(
     }),
   });
   if (!res.ok) throw new Error(await errMsg(res, 'could not finish enrollment'));
-  return (await res.json()) as { token: string; recovery_codes?: string[] };
+  const data = (await res.json()) as {
+    token: string;
+    recovery_codes?: string[];
+    device_token?: string;
+  };
+  rememberTrust(cfg.url, data.device_token);
+  return data;
 }
 
 export async function mfaLoginEmailSend(
@@ -192,7 +215,9 @@ export async function mfaLoginVerify(
     }),
   });
   if (!res.ok) throw new Error(await errMsg(res, 'invalid code'));
-  return (await res.json()) as { token: string };
+  const data = (await res.json()) as { token: string; device_token?: string };
+  rememberTrust(cfg.url, data.device_token);
+  return data;
 }
 
 export async function fetchMfaStatus(): Promise<MfaStatusResponse> {
@@ -212,11 +237,15 @@ export async function revokeTrustedDevice(deviceId: string): Promise<void> {
 }
 
 export async function resetOwnDeviceTrust(): Promise<void> {
-  const res = await fetch(joinUrl(getServerConfig().url, '/api/mfa/devices/reset'), {
+  const cfg = getServerConfig();
+  const res = await fetch(joinUrl(cfg.url, '/api/mfa/devices/reset'), {
     method: 'POST',
-    headers: authHeaders(getServerConfig()),
+    headers: authHeaders(cfg),
   });
   if (!res.ok) throw new Error(await errMsg(res, 'reset failed'));
+  // Every trust just died server-side, including this device's — drop the stale
+  // secret so the next login doesn't spend a failed-attempt slot proving it.
+  setDeviceTrustToken(cfg.url, null);
 }
 
 export async function regenerateRecoveryCodes(): Promise<string[]> {
@@ -266,14 +295,17 @@ export async function settingsTotpConfirm(code: string): Promise<void> {
 }
 
 export async function revokeAllSessionsAndTrust(): Promise<string> {
-  const res = await fetch(joinUrl(getServerConfig().url, '/api/mfa/sessions/revoke-all'), {
+  const cfg = getServerConfig();
+  const res = await fetch(joinUrl(cfg.url, '/api/mfa/sessions/revoke-all'), {
     method: 'POST',
-    headers: authHeaders(getServerConfig()),
+    headers: authHeaders(cfg),
     body: JSON.stringify({
       device_id: getDeviceId(),
       device_name: getDeviceName(),
     }),
   });
   if (!res.ok) throw new Error(await errMsg(res, 'revoke failed'));
-  return ((await res.json()) as { token: string }).token;
+  const data = (await res.json()) as { token: string; device_token?: string };
+  rememberTrust(cfg.url, data.device_token);
+  return data.token;
 }

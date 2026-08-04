@@ -1,9 +1,10 @@
 # Carbon
 
-A self-hosted task manager that's **simple on the surface** (like Todoist / Microsoft To-Do)
-and **powerful underneath** (projects, tags/contexts, defer & due dates, review, recurrence,
-flags — the OmniFocus toolbox). It runs **fully offline** in the browser and syncs to your own
-server whenever it's reachable. No SaaS, no accounts you don't control.
+**1.0** — a self-hosted task manager that's **simple on the surface** (like Todoist /
+Microsoft To-Do) and **powerful underneath** (projects, tags/contexts, defer & due dates,
+review, recurrence, flags — the OmniFocus toolbox). It runs **fully offline** in the
+browser and syncs to your own server whenever it's reachable. No SaaS, no accounts you
+don't control. See [CHANGELOG.md](CHANGELOG.md) for what's in this release.
 
 ## Architecture
 
@@ -42,9 +43,25 @@ docker compose up -d --build
 The container serves the web app and the API on port `3069`. Data lives in `./data`.
 Leave `AUTH_USERS` empty for an open, single-user LAN instance.
 
+The server runs as the unprivileged `node` user (uid 1000) with a read-only root
+filesystem, no capabilities and `no-new-privileges`; `./data` is the only writable path.
+That means **`./data` must be owned by uid 1000** — the default for a first user on most
+Linux hosts, so a fresh install just works. Two cases need a one-off fix:
+
+```bash
+# Upgrading from an older image that ran as root, or a host user whose uid isn't 1000
+sudo chown -R 1000:1000 ./data
+```
+
+If your host uid genuinely can't be 1000, override the container user instead — add
+`user: "<uid>:<gid>"` to the `carbon` service in `docker-compose.yml`.
+
 Passwords set via the API/admin UI use salted scrypt; `AUTH_USERS` (`user:sha256hex`) still
 works for bootstrap. Sync accounts require **2FA** (email and/or authenticator); new devices
-must verify once and then stay trusted until reset. If an admin is locked out:
+must verify once and then stay trusted until reset. What makes a device trusted is a secret
+the server issues to it and rotates on every login — never its device id, which the owner
+can read in Settings. Devices trusted before this existed re-verify once, then hold a secret
+like any other. If an admin is locked out:
 
 ```bash
 npm run mfa-admin -w @carbon/server -- issue-session default alice
@@ -56,6 +73,12 @@ Optional env knobs: `BLOB_MAX_MB` (attachment size cap, default 25),
 `SIGNUP_GLOBAL_HOUR` (multi-tenant signup ceiling), and `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`
 (allow LAN/private agent endpoints when running multi-tenant — on by default for
 single-tenant self-host). SMTP (`SMTP_*`) is used for email 2FA codes.
+
+Request bodies are capped so no caller can exhaust host memory: `JSON_BODY_LIMIT_KB`
+(ordinary API calls, default 1024), `SYNC_BODY_LIMIT_MB` (a sync push carries an
+offline backlog, so it gets its own ceiling — default 16), `MAX_SYNC_BATCH` (ops per
+push, default 10000), and `BLOB_MAX_MB` for uploads. Raise them only if a real
+workspace hits one.
 
 Run the test suite with `npm test` (no extra deps — uses Node's built-in test runner).
 

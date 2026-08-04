@@ -209,5 +209,8 @@ usually don't need extra `GET /api/tasks` calls unless you need broader context.
 
 ## Related Skills
 
+- **carbon-nl** — for anything the user asks for in plain language rather than by @mention:
+  lists, tasks, and Carbon's own **notes and recipes** (`carbon-cli.py note add/append/show/search`).
+  This skill's REST surface covers tasks and comments only.
 - **smart-home skills** (home-assistant-troubleshooting, cbus-gateway) — when a Carbon task involves Home Assistant or C-Bus automation, load the relevant skill
 - **productivity skills** (google-workspace, maps, obsidian) — when a Carbon task involves calendar, maps, or notes integration

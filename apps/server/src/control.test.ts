@@ -24,6 +24,7 @@ import {
   tenantLockState,
   validateSubdomain,
   createPendingSignup,
+  getPendingSignup,
   verifyPendingSignup,
   deletePendingSignup,
   gcPendingSignups,
@@ -335,6 +336,9 @@ describe('pending signup flow', () => {
     });
     assert.ok(id, 'signup id returned');
     assert.match(code, /^\d{6}$/, '6-digit OTP code');
+    const pending = getPendingSignup(db, 'alice@example.com');
+    assert.ok(pending, 'pending row readable');
+    assert.equal(pending?.id, id);
   });
 
   test('verifyPendingSignup accepts the correct code', () => {

@@ -8,7 +8,13 @@ import {
   type Op,
   type RecordOp,
 } from '@carbon/core';
-import { sanitizeOps, sanitizeRecordOps } from './sync-guard';
+import {
+  sanitizeOps,
+  sanitizeRecordOps,
+  oversizedSyncArray,
+  MAX_SYNC_BATCH,
+} from './sync-guard';
+import { getSyncEpoch } from './federation';
 import { makeTestDb, makeHono, appFetch, type TestDb } from './test-app';
 
 // ─── inline sync route (mirrors index.ts POST /api/sync) ─────────────────────
@@ -102,7 +108,7 @@ function buildSyncApp(db: TestDb) {
     }
 
     const users = listUsers(db);
-    return c.json({ ops, cursor, recordOps, rcursor, users });
+    return c.json({ ops, cursor, recordOps, rcursor, users, syncEpoch: getSyncEpoch(db) });
   });
 
   return app;
@@ -127,12 +133,29 @@ describe('POST /sync — open mode (no auth)', () => {
       recordOps: RecordOp[];
       rcursor: number;
       users: unknown[];
+      syncEpoch: number;
     };
     assert.deepEqual(body.ops, []);
     assert.equal(body.cursor, 0);
     assert.deepEqual(body.recordOps, []);
     assert.equal(body.rcursor, 0);
     assert.ok(Array.isArray(body.users));
+    assert.equal(body.syncEpoch, 1);
+  });
+
+  test('syncEpoch reflects bumped workspace setting', async () => {
+    const { db, deviceId } = makeTestDb();
+    const { bumpSyncEpoch } = await import('./federation');
+    bumpSyncEpoch(db);
+    const testDb = Object.assign(db, { deviceId });
+    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
+    const res = await appFetch(app, '/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const body = (await res.json()) as { syncEpoch: number };
+    assert.equal(body.syncEpoch, 2);
   });
 
   test('ops pushed by client are returned in next sync', async () => {
@@ -308,5 +331,34 @@ describe('POST /sync — op ingestion idempotency', () => {
       [op.id],
     )?.n ?? 0;
     assert.equal(count, 1, 'op stored exactly once');
+  });
+});
+
+// ─── push batch ceiling ───────────────────────────────────────────────────────
+// The real /api/sync calls oversizedSyncArray before ingesting anything, so this
+// covers the guard itself rather than the mirrored route above.
+
+describe('sync push batch ceiling', () => {
+  const filled = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+  test('a push within the cap passes', () => {
+    assert.equal(oversizedSyncArray({ ops: filled(3), recordOps: filled(3) }, 3), null);
+    assert.equal(oversizedSyncArray({}, 3), null);
+    assert.equal(oversizedSyncArray({ ops: 'not-an-array' }, 3), null);
+  });
+
+  test('the oversized array is named, ops before recordOps', () => {
+    assert.equal(oversizedSyncArray({ ops: filled(4) }, 3), 'ops');
+    assert.equal(oversizedSyncArray({ recordOps: filled(4) }, 3), 'recordOps');
+    assert.equal(oversizedSyncArray({ need: filled(4) }, 3), 'need');
+    assert.equal(oversizedSyncArray({ ops: filled(4), recordOps: filled(4) }, 3), 'ops');
+  });
+
+  test('arrays are capped independently, so a big need does not sink a normal push', () => {
+    assert.equal(oversizedSyncArray({ ops: filled(2), recordOps: filled(2), need: filled(2) }, 3), null);
+  });
+
+  test('the default ceiling leaves room for the client chunk size (2500)', () => {
+    assert.ok(MAX_SYNC_BATCH >= 2500, `MAX_SYNC_BATCH=${MAX_SYNC_BATCH} would reject a full client chunk`);
   });
 });

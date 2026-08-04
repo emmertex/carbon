@@ -15,6 +15,12 @@ import {
   projectAncestor,
   completedBefore,
   purgeCompleted,
+  createUser,
+  shareItem,
+  assignItem,
+  listSharesForItem,
+  listAssigneesForItem,
+  visibleItemIds,
 } from './repo';
 
 // Minimal in-memory Db backed by node:sqlite (mirrors apps/server/src/sqlite.ts).
@@ -127,6 +133,35 @@ test('setCompleted carries estimate, geo, and tags onto the spawned recurrence',
   // The item_tags link is copied onto the new occurrence.
   const spawnedTags = getItemTags(db, spawned.id).map((t) => t.id);
   assert.deepEqual(spawnedTags, [tag.id]);
+});
+
+test('setCompleted copies shares and assignees onto the spawned recurrence', () => {
+  const db = openMemoryDb();
+  const alice = createUser(db, { username: 'alice' });
+  const bob = createUser(db, { username: 'bob' });
+  const due = futureDue();
+  const original = createItem(db, DEVICE, {
+    title: 'Shared chore',
+    ownerId: alice.id,
+    dueDate: due.toISOString(),
+  });
+  updateItem(db, DEVICE, original.id, { recurrence: DAILY });
+  shareItem(db, DEVICE, original.id, bob.id, 'write');
+  assignItem(db, DEVICE, original.id, bob.id);
+
+  const { item, spawned } = setCompleted(db, DEVICE, original.id, true);
+  assert.equal(item?.status, 'done');
+  assert.ok(spawned, 'expected a spawned next occurrence');
+
+  const shares = listSharesForItem(db, spawned.id);
+  assert.equal(shares.length, 1);
+  assert.equal(shares[0]!.user_id, bob.id);
+  assert.equal(shares[0]!.permission, 'write');
+  const assignees = listAssigneesForItem(db, spawned.id);
+  assert.equal(assignees.length, 1);
+  assert.equal(assignees[0]!.user_id, bob.id);
+  // Collaborator still sees the next occurrence (direct share, not via a parent).
+  assert.ok(visibleItemIds(db, bob.id).has(spawned.id));
 });
 
 test('setCompleted shifts reminder_at to keep its offset relative to the new due', () => {

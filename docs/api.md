@@ -34,15 +34,25 @@ anything internet-facing. It is ignored when `BASE_DOMAIN` is set.
 
 ### Sign-in + 2FA
 
-1. `POST /api/login` with Basic + JSON `{ device_id, device_name? }`.
+1. `POST /api/login` with Basic + JSON `{ device_id, device_name?, device_token? }`.
 2. Response is one of:
-   - `{ token, user }` — device already trusted (or open mode `{ open: true }` when enabled)
+   - `{ token, user, device_token }` — device trusted (or open mode `{ open: true }` when enabled)
    - `{ status: "needs_enrollment", challenge }` — set up email and/or authenticator
    - `{ status: "needs_2fa", challenge, factors }` — verify with TOTP, email OTC, or recovery code
      (`factors` are booleans only; the profile is omitted until MFA completes)
 3. Challenge endpoints under `/api/mfa/*` use `Authorization: Bearer mfac_…`.
 4. Successful enroll/verify returns a `carbons_…` session and trusts `device_id` forever
    until the user, a tenant admin, or `npm run mfa-admin` resets trust.
+
+**`device_token` (`carbond_…`) is what skips 2FA — not `device_id`.** The id is a public
+label (the owner sees it in Settings, and it rides along in location reports); the token is
+a server-issued secret, stored hashed, and **rotated on every login**: each response that
+trusts the device carries the replacement, which the client must persist in place of the
+old one. A client that omits it, or sends a stale one, just gets `needs_2fa` — the previous
+token stays usable for a few minutes so a login whose response was lost can retry. After a
+handful of bad tokens the shortcut closes for that account for 15 minutes (`DEVICE_TRUST_FAIL_MAX`,
+default 5); 2FA still works throughout. Trusts created before device tokens existed no
+longer skip 2FA — the device re-verifies once and is issued a token.
 
 ### Scopes
 

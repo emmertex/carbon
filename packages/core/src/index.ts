@@ -4,6 +4,7 @@ export * from './schema';
 export * from './migrate';
 export * from './crdt';
 export * from './records';
+export * from './sync-epoch';
 export * from './repo';
 export * from './availability';
 export * from './recurrence';

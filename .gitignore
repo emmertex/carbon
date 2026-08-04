@@ -13,8 +13,11 @@ dev-dist/
 # Editor / agent tooling
 .claude/
 
-# Environment
+# Environment (all variants — never commit real env files)
 .env
+.env.*
+!.env.example
+!**/.env.example
 .env.local
 .env.*.local
 
@@ -51,8 +54,13 @@ yarn-error.log*
 *.sqlite3
 *.db
 
-# Data volumes (for Docker)
+# Data volumes (for Docker). Any data/ dir stays ignored, but the *root* one is
+# tracked via .gitkeep so a fresh clone already owns it — otherwise Docker creates
+# the bind-mount source as root and the unprivileged container can't write to it.
 data/
+!/data/
+/data/*
+!/data/.gitkeep
 
 .quasar/
 .turbo/
@@ -64,16 +72,6 @@ dist/
 build/
 *.tsbuildinfo
 docs/internal/
-
-.env
-.env.local
-.env.*.local
-
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
 
 # Playwright benchmark artifacts
 test-results/

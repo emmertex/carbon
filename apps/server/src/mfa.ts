@@ -67,11 +67,14 @@ export function ensureMfaTables(db: Db): void {
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS trusted_devices (
-      user_id      TEXT NOT NULL,
-      device_id    TEXT NOT NULL,
-      name         TEXT,
-      created_at   TEXT NOT NULL,
-      last_used_at TEXT,
+      user_id          TEXT NOT NULL,
+      device_id        TEXT NOT NULL,
+      name             TEXT,
+      created_at       TEXT NOT NULL,
+      last_used_at     TEXT,
+      secret_hash      TEXT,
+      prev_secret_hash TEXT,
+      prev_expires_at  TEXT,
       PRIMARY KEY (user_id, device_id)
     );
     CREATE INDEX IF NOT EXISTS idx_trusted_devices_user ON trusted_devices(user_id);
@@ -87,6 +90,14 @@ export function ensureMfaTables(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_mfa_challenges_hash ON mfa_challenges(token_hash);
   `);
+
+  // Device trust secrets (added after initial schema). A row with no secret_hash is
+  // a legacy trust from before device tokens existed: it still shows in the device
+  // list but no longer skips 2FA, and the next full login re-issues a secret for it.
+  const tdCols = db.all<{ name: string }>(`PRAGMA table_info(trusted_devices)`).map((c) => c.name);
+  for (const col of ['secret_hash', 'prev_secret_hash', 'prev_expires_at']) {
+    if (!tdCols.includes(col)) db.exec(`ALTER TABLE trusted_devices ADD COLUMN ${col} TEXT`);
+  }
 
   // Per-challenge email OTC send budget (added after initial schema).
   const chCols = db.all<{ name: string }>(`PRAGMA table_info(mfa_challenges)`).map((c) => c.name);
@@ -218,7 +229,58 @@ function ensureAuthRow(db: Db, userId: string): void {
 }
 
 // ----- trusted devices ------------------------------------------------------
+// A trusted device skips 2FA on password login, so the trust has to be something
+// only that device holds. `device_id` is not that: the client picks it, the owner
+// sees it in Settings, and it travels in location reports — a leak (XSS, log,
+// backup) would hand anyone with the password a full session. So each trust also
+// carries a server-generated secret, stored hashed and rotated on every use, and
+// the fast path is only open while an account is under its failed-attempt budget.
 
+/** Grace window in which the *previous* secret still works. Covers a rotation the
+ *  client never received (dropped connection, tab closed mid-login) — without it
+ *  a single lost response would silently un-trust the device. */
+export const DEVICE_SECRET_GRACE_MS = Math.max(
+  0,
+  Number(process.env.DEVICE_SECRET_GRACE_MS) || 5 * 60_000,
+);
+/** Failed secret presentations per account before the trusted-device shortcut
+ *  closes for the window (2FA still works — this only shuts the bypass). */
+export const DEVICE_TRUST_FAIL_MAX = Math.max(1, Number(process.env.DEVICE_TRUST_FAIL_MAX) || 5);
+export const DEVICE_TRUST_FAIL_WINDOW_MS = 15 * 60_000;
+
+// Per-tenant-DB sliding window, keyed by user id. Deliberately a local copy of
+// auth.ts's basic-auth throttle rather than an import — auth.ts already imports
+// this module, and the cycle isn't worth saving a dozen lines.
+const deviceFailsByDb = new WeakMap<Db, Map<string, number[]>>();
+
+function deviceFails(db: Db): Map<string, number[]> {
+  let buckets = deviceFailsByDb.get(db);
+  if (!buckets) {
+    buckets = new Map();
+    deviceFailsByDb.set(db, buckets);
+  }
+  const cutoff = Date.now() - DEVICE_TRUST_FAIL_WINDOW_MS;
+  for (const [k, v] of buckets) {
+    const fresh = v.filter((t) => t > cutoff);
+    if (fresh.length) buckets.set(k, fresh);
+    else buckets.delete(k);
+  }
+  return buckets;
+}
+
+function recordDeviceTrustFailure(db: Db, userId: string): void {
+  const buckets = deviceFails(db);
+  buckets.set(userId, [...(buckets.get(userId) ?? []), Date.now()]);
+}
+
+/** Note there is no clear-on-success: a valid secret must not reset the budget,
+ *  or one working device would keep re-opening the guessing window for the rest. */
+function deviceTrustAllowed(db: Db, userId: string): boolean {
+  return (deviceFails(db).get(userId) ?? []).length < DEVICE_TRUST_FAIL_MAX;
+}
+
+/** Presence check only — a trust row is NOT authorization to skip 2FA. The bypass
+ *  goes through useTrustedDevice, which also demands the device's secret. */
 export function isTrustedDevice(db: Db, userId: string, deviceId: string): boolean {
   if (!deviceId) return false;
   const row = db.get<{ device_id: string }>(
@@ -228,30 +290,88 @@ export function isTrustedDevice(db: Db, userId: string, deviceId: string): boole
   return !!row;
 }
 
+function newDeviceSecret(): string {
+  return `carbond_${randomBytes(32).toString('hex')}`;
+}
+
+/** Trust a device after a full password + 2FA pass and return its secret — the
+ *  only time the plaintext exists server-side. Any earlier secret for the device
+ *  (including one in its grace window) stops working. */
 export function trustDevice(
   db: Db,
   userId: string,
   deviceId: string,
   name?: string | null,
-): void {
+): string {
   if (!deviceId) throw new Error('device_id required');
+  const secret = newDeviceSecret();
   const now = new Date().toISOString();
   db.run(
-    `INSERT INTO trusted_devices (user_id, device_id, name, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO trusted_devices
+       (user_id, device_id, name, created_at, last_used_at, secret_hash, prev_secret_hash, prev_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
      ON CONFLICT(user_id, device_id) DO UPDATE SET
        name = COALESCE(excluded.name, trusted_devices.name),
-       last_used_at = excluded.last_used_at`,
-    [userId, deviceId, name?.trim() || null, now, now],
+       last_used_at = excluded.last_used_at,
+       secret_hash = excluded.secret_hash,
+       prev_secret_hash = NULL,
+       prev_expires_at = NULL`,
+    [userId, deviceId, name?.trim() || null, now, now, sha256Hex(secret)],
   );
+  return secret;
 }
 
-export function touchTrustedDevice(db: Db, userId: string, deviceId: string): void {
-  if (!deviceId) return;
-  db.run(
-    `UPDATE trusted_devices SET last_used_at = ? WHERE user_id = ? AND device_id = ?`,
-    [new Date().toISOString(), userId, deviceId],
+/**
+ * Spend a device secret: verify it, rotate it, and return the replacement the
+ * client must store. `null` means no bypass — unknown device, legacy trust with
+ * no secret, wrong/expired secret, or the account's failure budget is spent —
+ * and the caller falls back to the normal 2FA challenge.
+ */
+export function useTrustedDevice(
+  db: Db,
+  userId: string,
+  deviceId: string,
+  secret: string,
+): string | null {
+  if (!deviceId || !secret) return null;
+  if (!deviceTrustAllowed(db, userId)) return null;
+  const row = db.get<{
+    secret_hash: string | null;
+    prev_secret_hash: string | null;
+    prev_expires_at: string | null;
+  }>(
+    `SELECT secret_hash, prev_secret_hash, prev_expires_at FROM trusted_devices
+     WHERE user_id = ? AND device_id = ?`,
+    [userId, deviceId],
   );
+  const presented = sha256Hex(secret);
+  const graceOpen =
+    !!row?.prev_secret_hash &&
+    !!row.prev_expires_at &&
+    Date.parse(row.prev_expires_at) > Date.now();
+  const matched =
+    (!!row?.secret_hash && safeEqualHex(row.secret_hash, presented)) ||
+    (graceOpen && safeEqualHex(row!.prev_secret_hash!, presented));
+  if (!matched) {
+    recordDeviceTrustFailure(db, userId);
+    return null;
+  }
+  const next = newDeviceSecret();
+  const now = Date.now();
+  db.run(
+    `UPDATE trusted_devices
+       SET secret_hash = ?, prev_secret_hash = ?, prev_expires_at = ?, last_used_at = ?
+     WHERE user_id = ? AND device_id = ?`,
+    [
+      sha256Hex(next),
+      row!.secret_hash,
+      new Date(now + DEVICE_SECRET_GRACE_MS).toISOString(),
+      new Date(now).toISOString(),
+      userId,
+      deviceId,
+    ],
+  );
+  return next;
 }
 
 export function listTrustedDevices(db: Db, userId: string): TrustedDevice[] {

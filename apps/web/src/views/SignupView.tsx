@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Loader2, Check, MailCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { signupStart, signupVerify, type SignupInput, type SignupResult } from '@/lib/host';
@@ -22,6 +22,8 @@ export function SignupView() {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<SignupResult | null>(null);
   const [resent, setResent] = useState(false);
+  // Synchronous guard — React state alone can't stop a double-submit before re-render.
+  const inFlight = useRef(false);
 
   function input(): SignupInput {
     return {
@@ -35,6 +37,8 @@ export function SignupView() {
 
   async function startSignup(e: React.FormEvent) {
     e.preventDefault();
+    if (inFlight.current || busy) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -43,20 +47,24 @@ export function SignupView() {
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
 
   async function resend() {
+    if (inFlight.current || busy) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     setResent(false);
     try {
-      await signupStart(input());
+      await signupStart(input(), { resend: true });
       setResent(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }

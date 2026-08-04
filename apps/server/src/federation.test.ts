@@ -31,6 +31,9 @@ import {
   workspacePolicyAllows,
   canOffer,
   canAccept,
+  getSyncEpoch,
+  setSyncEpoch,
+  bumpSyncEpoch,
   type FederationMode,
   type FederationPolicy,
   type FederationTier,
@@ -333,5 +336,17 @@ describe('canOffer / canAccept — full (mode × policy × tier × allow × deny
     // Sanity: without the deny flag both of those are allowed.
     assert.equal(canOffer({ ...open, peerOnDenylist: false }).ok, true);
     assert.equal(canOffer({ ...admin, peerOnDenylist: false }).ok, true);
+  });
+});
+
+describe('sync_epoch workspace setting', () => {
+  test('defaults to 1 and bumps', () => {
+    const { db } = makeTestDb();
+    ensureGovernanceTables(db);
+    assert.equal(getSyncEpoch(db), 1);
+    setSyncEpoch(db, 3);
+    assert.equal(getSyncEpoch(db), 3);
+    assert.equal(bumpSyncEpoch(db), 4);
+    assert.equal(getSyncEpoch(db), 4);
   });
 });

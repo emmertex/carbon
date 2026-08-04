@@ -1,7 +1,7 @@
 ---
 name: carbon-nl
-description: Use when the user wants to manage their Carbon to-do/shopping lists in plain language — add tasks ("add milk and eggs to my shopping list"), check things off ("mark off bread and milk"), ask what they need somewhere ("what do I need at Coles?"), set reminders/due dates/repeats ("remind me to take my son to swimming every Tuesday at 5pm, an hour before"), share or assign a task to someone, or start/stop a time-tracking timer. Drives the Carbon natural-language API via the carbon-cli.py helper. NOT for webhook/mention triggers — that's the carbon-agent skill.
-version: 1.1.0
+description: Use when the user wants to manage their Carbon to-do/shopping lists, notes or recipes in plain language — add tasks ("add milk and eggs to my shopping list"), check things off ("mark off bread and milk"), ask what they need somewhere ("what do I need at Coles?"), set reminders/due dates/repeats ("remind me to take my son to swimming every Tuesday at 5pm, an hour before"), write or search notes ("write down that the spare key is under the pot", "what did I write about the rental car?"), save and add to recipes ("save this recipe", "add to the sourdough recipe: rest 45 min"), share or assign a task to someone, or start/stop a time-tracking timer. Drives the Carbon natural-language API via the carbon-cli.py helper. NOT for webhook/mention triggers — that's the carbon-agent skill.
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -51,10 +51,15 @@ CARBON_TOKEN=carbon_xxxxxxxx
 | Check off | `done <title> [<title> …] [--list "<list>"]`  (alias: `complete`, `check-off`) |
 | Re-open | `done <title> --undo`  (finds the completed task) |
 | What's at a place | `nearby --tag <tag>`  (or `--zone <name>`, or `--lat <n> --lng <n>`) |
-| Show lists | `lists` |
+| Show lists | `lists`  (📓 = a notebook: holds notes, not tasks) |
 | Show tags | `tags` |
-| Show a list's tasks | `items --list "<list>" [--all]`  (`--all` includes completed) |
-| Check a name | `resolve list\|tag\|task "<name>"` |
+| Show a list's contents | `items --list "<list>" [--all] [--notes] [--detail]` |
+| Write a note | `note add "<title>" --body "<text>" [--list "<notebook>"]` |
+| Save a recipe | `note add "<title>" --recipe --body-file recipe.md [--list recipes]` |
+| Add to a note/recipe | `note append "<title>" "<the new line>"` |
+| Read one note in full | `note show "<title>"` |
+| Search note contents | `note search "<text>"` |
+| Check a name | `resolve list\|tag\|task\|note "<name>"` |
 | Give a tag a location | `tag-geo <tag> --lat <n> --lng <n> [--radius <m>] [--label "<text>"]` |
 | Locate nearest place | `tag-geo <tag> --near-name "<place>" --lat <n> --lng <n>` |
 | List people | `users` |
@@ -70,6 +75,13 @@ Add `--json` to any command to get the raw response instead of the friendly line
 
 **People.** `share`/`assign` resolve names fuzzily and only work on tasks you own or can write to
 (others are reported as skipped). Bots can't be shared/assigned to — run `users` to see who's valid.
+
+**Notes and recipes.** A note is a title plus a body, with no due date or checkbox; a **notebook**
+is a list that holds notes (shown with 📓 by `lists`). `items --list "<notebook>"` shows its notes
+without any extra flag — elsewhere `items` shows tasks, and `--notes` / `--everything` switch that.
+A **recipe** is a note kept in recipe mode so it opens in Carbon's recipe editor: create it with
+`note add --recipe`, and pass the body with `--body-file` (or `--body-file -` to pipe it in) so the
+Markdown survives intact.
 
 ## Map intents → commands
 
@@ -103,15 +115,38 @@ Add `--json` to any command to get the raw response instead of the friendly line
 - **"Start a timer on the report"** / **"stop the timer."**
   `python3 carbon-cli.py timer start "report"` / `python3 carbon-cli.py timer stop`.
 
+- **"Write down that the spare key is under the pot."**
+  `python3 carbon-cli.py note add "Spare key" --body "Under the pot by the back door."`
+  → *Note saved: Spare key*. Only write a note when the user actually asks for one ("note down",
+  "write down", "remember that") — a bare item is a task.
+
+- **"What did I write about the rental car?"**
+  `python3 carbon-cli.py note search "rental car"` → summarise the snippet in a sentence and name
+  the note; don't paste a long body back at them.
+
+- **"What's in my recipes notebook?"** / **"what recipes do I have?"**
+  `python3 carbon-cli.py items --list recipes` (a notebook lists its notes by default).
+
+- **"Save this recipe: …"**
+  `python3 carbon-cli.py note add "Sourdough" --recipe --list recipes --body-file -` and pipe the
+  Markdown in. Keep every ingredient and step exactly as given — never invent, drop or reorder any.
+
+- **"Add to the sourdough recipe: rest for 45 min."**
+  `python3 carbon-cli.py note append "Sourdough" "Rest for 45 min"` → the server keeps the rest of
+  the recipe. **Never** read a note and write it back to add to it; you would drop everything you
+  didn't read.
+
 ## Rules
 
 1. One add request → **one** `add` command with all the titles. One check-off request → **one**
    `done` command with all the names. Don't loop one item at a time.
 2. Don't invent or complete tasks the user didn't mention. Do exactly what was asked.
 3. If a name is genuinely ambiguous, run `resolve` first; if it says *unsure*, ask the user
-   which they meant rather than guessing.
-4. Keep replies short and conversational. The tool output already is — lean on it.
-5. If a command errors (e.g. *could not reach Carbon*), tell the user plainly; check
+   which they meant rather than guessing. `resolve task` matches notes too and prints `[note]` or
+   `[task]` — only a task can be checked off.
+4. To add to a note, use `note append`. Never `note show` then re-save the body.
+5. Keep replies short and conversational. The tool output already is — lean on it.
+6. If a command errors (e.g. *could not reach Carbon*), tell the user plainly; check
    `CARBON_URL`/`CARBON_TOKEN`.
 
 ## Troubleshooting: "the agent says it added them but I don't see them on the web"
@@ -139,8 +174,13 @@ python3 carbon-cli.py whoami                                   # should say "(us
 python3 carbon-cli.py add "test milk" --list "shopping list"
 python3 carbon-cli.py items --list shopping
 python3 carbon-cli.py done "test milk" --list shopping
+python3 carbon-cli.py note add "test note" --body "hello from the skill"
+python3 carbon-cli.py note append "test note" "second line"
+python3 carbon-cli.py note show "test note"
 ```
-Expect: *Acting as: <you> (user)*, *Added …*, the list with the item, then *Marked off: test milk*.
+Expect: *Acting as: <you> (user)*, *Added …*, the list with the item, *Marked off: test milk*, then
+the note with **both** lines (if the first line is gone, you're on a Carbon older than the
+`note_append` patch key — upgrade the server).
 
 ## Install
 

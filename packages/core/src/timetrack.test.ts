@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { openMemoryDb } from './test-helpers';
-import { createItem, createTag, setItemTags, saveTimeLog, rowToTimeLog, getItem, deleteItem } from './repo';
+import { createItem, createTag, setItemTags, saveTimeLog, rowToTimeLog, getItem, deleteItem, getTimeLogs, taskActualMs } from './repo';
 import type { TimeLog } from './types';
 import {
   startSession,
@@ -24,6 +24,7 @@ import {
   updateSegment,
   removeSegment,
   trackedMs,
+  listSessions,
   MERGE_QUICK_WINDOW_MS,
   MERGE_BLOCK_WINDOW_MS,
   addTimeNote,
@@ -579,4 +580,36 @@ test('removeTimeNote mode=note deletes the note item; deleted note stays labelle
 test('addTimeNote is a no-op without an active session', () => {
   const db = openMemoryDb();
   assert.equal(addTimeNote(db, A, U, { title: 'x' }), null);
+});
+
+// Inbox/orphan tasks use sessionAnchor = the task itself, so session and task
+// segments share item_id. Detail UIs must not sum every getTimeLogs row or they
+// double-count (~2× vs the Time Tracked report's trackedMs).
+test('inbox task: taskActualMs matches session trackedMs (no double-count)', () => {
+  const db = openMemoryDb();
+  const task = createItem(db, A, { title: 'inbox task', type: 'task' });
+  const start = new Date(Date.now() - 14_000).toISOString();
+  startTask(db, A, task.id, U);
+  // Backdate the open rows so the closed span is deterministic.
+  const ctx = getTimeContext(db, U);
+  assert.ok(ctx.session);
+  assert.ok(ctx.task);
+  assert.equal(ctx.session!.item_id, task.id, 'session anchors on the inbox task');
+  db.run(`UPDATE time_logs SET start_time = ? WHERE id = ?`, [start, ctx.session!.id]);
+  db.run(`UPDATE time_logs SET start_time = ? WHERE id = ?`, [start, ctx.task!.id]);
+  stopActive(db, A, U);
+
+  const session = listSessions(db, start, new Date().toISOString(), U)[0]!;
+  assert.ok(session);
+  const reportMs = trackedMs(db, session);
+  const detailMs = taskActualMs(db, task.id, U);
+  assert.ok(reportMs >= 13_000 && reportMs <= 15_000, `report ~14s, got ${reportMs}`);
+  assert.equal(detailMs, reportMs, 'detail must match report (not 2×)');
+
+  // Raw sum of all getTimeLogs rows would be ~2× — document the trap.
+  const raw = getTimeLogs(db, task.id).reduce((s, l) => {
+    const end = l.end_time ? new Date(l.end_time).getTime() : Date.now();
+    return s + Math.max(0, end - new Date(l.start_time).getTime());
+  }, 0);
+  assert.ok(raw >= reportMs * 1.5, 'raw all-kinds sum is roughly double');
 });

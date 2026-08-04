@@ -81,12 +81,17 @@ async function parseError(res: Response): Promise<string> {
   return msg || `request failed: ${res.status}`;
 }
 
-/** Signup step 1: stage the workspace and email a one-time verification code. */
-export async function signupStart(input: SignupInput): Promise<void> {
+/** Signup step 1: stage the workspace and email a one-time verification code.
+ *  Pass `resend: true` when the user explicitly asks for a new code (bypasses
+ *  the server's short duplicate-submit dedup window). */
+export async function signupStart(
+  input: SignupInput,
+  opts?: { resend?: boolean },
+): Promise<void> {
   const res = await fetch(`${base()}/host/signup/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, resend: opts?.resend === true }),
   });
   if (!res.ok) throw new Error(await parseError(res));
 }

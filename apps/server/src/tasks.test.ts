@@ -175,6 +175,29 @@ describe('visibility scoping', () => {
     shareItem(db, DEV, task.id, bobId, 'write');
     assert.ok(hasWriteAccess(db, task.id, bobId), 'write share → has write');
   });
+
+  test('owner keeps write access to children a collaborator creates under a shared project', () => {
+    const { db, addUser } = makeTestDb();
+    const { id: aliceId } = addUser('alice', 'pw');
+    const { id: bobId } = addUser('bob', 'pw');
+    const project = createItem(db, DEV, {
+      type: 'project',
+      title: 'Shared list',
+      ownerId: aliceId,
+    });
+    shareItem(db, DEV, project.id, bobId, 'write');
+    // Bob adds a task under Alice's project — he owns the new row.
+    const child = createItem(db, DEV, {
+      type: 'task',
+      title: 'Bob added this',
+      parentId: project.id,
+      ownerId: bobId,
+    });
+
+    assert.ok(hasWriteAccess(db, child.id, aliceId), 'project owner can edit collaborator child');
+    assert.ok(hasWriteAccess(db, child.id, bobId), 'creator still has write');
+    assert.ok(visibleItemIds(db, aliceId).has(child.id), 'owner syncs collaborator child');
+  });
 });
 
 // ─── comments ────────────────────────────────────────────────────────────────

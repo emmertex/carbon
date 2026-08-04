@@ -57,6 +57,14 @@ export interface Item {
   geo: string | null;
   /** Hex color, mainly for projects/visual grouping. */
   color: string | null;
+  /** Projects only: this container holds notes, not actions. New children default
+   *  to type='note' and the project editor hides every task-scheduling control
+   *  (only colour + sharing remain). Inert on tasks/notes/folders. */
+  notes_project: boolean;
+  /** JSON-encoded {@link NoteThumb} for the first image in this item's `note`
+   *  body, or null when it has none. Written by the client that saves the note;
+   *  read by list rows so they never fetch the full-size image. */
+  thumb: string | null;
   /** Sidebar folder this project belongs to (null = top-level/ungrouped). Visual
    *  grouping only — never used for task nesting; that is always via parent_id. */
   folder_id: string | null;
@@ -106,6 +114,8 @@ export type ItemPatch = Partial<
     | 'recurrence'
     | 'geo'
     | 'color'
+    | 'notes_project'
+    | 'thumb'
     | 'folder_id'
     | 'sort_order'
     | 'order_mode'
@@ -134,6 +144,8 @@ export const ITEM_PATCH_FIELDS = [
   'recurrence',
   'geo',
   'color',
+  'notes_project',
+  'thumb',
   'folder_id',
   'sort_order',
   'order_mode',
@@ -141,6 +153,24 @@ export const ITEM_PATCH_FIELDS = [
   'metadata',
   'deleted',
 ] as const satisfies readonly (keyof ItemPatch)[];
+
+/**
+ * A cached, downscaled rendition of the first image in an item's note body.
+ *
+ * `src` is the content hash of the full-size image it was derived from — the
+ * regeneration trigger: when the note's first image changes, `src` no longer
+ * matches and the thumbnail is rebuilt. `hash` is the thumbnail's own blob hash
+ * (thumbnails are ordinary content-addressed blobs, just small ones).
+ */
+export interface NoteThumb {
+  /** Blob hash of the source image this was rendered from. */
+  src: string;
+  /** Blob hash of the thumbnail itself. */
+  hash: string;
+  /** Thumbnail pixel dimensions (for aspect-correct row rendering). */
+  w: number;
+  h: number;
+}
 
 export interface GeoReminder {
   lat: number;

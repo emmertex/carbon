@@ -140,6 +140,11 @@ Federation v1 is deliberately scoped. Known limitations:
 - **No cross-workspace user discovery.** You must know the recipient's `username@subdomain`
   out-of-band. Directory lookup between mutually-whitelisted workspaces — and sharing to a
   federation address directly from a task's share dialog — is planned but not yet available.
+- **Sync epoch reset invalidates federation cursors.** An operator rebuild of a workspace's
+  op log (see [`sync-epoch.md`](sync-epoch.md)) bumps `sync_epoch` and rewrites `ops` /
+  `record_ops` rowids. Active federation links must be revoked before that script runs;
+  re-establish links afterward so peers pull a fresh bootstrap — do not continue old
+  `federation_cursors` across an epoch bump.
 
 ## Environment variables (summary)
 

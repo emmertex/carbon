@@ -7,8 +7,10 @@ import {
   createToken,
   listTokens,
   revokeToken,
+  revokeAllTokens,
   createSession,
   revokeSession,
+  revokeAllSessions,
   publicUser,
   requireAdmin,
   setPassword,
@@ -71,6 +73,18 @@ describe('API tokens', () => {
 
     revokeToken(db, row.id);
     assert.equal(listTokens(db).length, 0);
+  });
+
+  test('revokeAllTokens revokes every token for that user only', () => {
+    const { db, addUser } = makeTestDb();
+    const alice = addUser('alice', 'pw', 'admin');
+    const bob = addUser('bob', 'pw', 'member');
+    createToken(db, { userId: alice.id, name: 'a1', scopes: ['tasks:read'] });
+    createToken(db, { userId: alice.id, name: 'a2', scopes: ['tasks:write'] });
+    createToken(db, { userId: bob.id, name: 'b1', scopes: ['tasks:read'] });
+    assert.equal(revokeAllTokens(db, alice.id), 2);
+    assert.equal(listTokens(db).length, 1);
+    assert.equal(listTokens(db)[0]!.user_id, bob.id);
   });
 });
 
@@ -151,7 +165,21 @@ function buildApp(allowOpen = false) {
       if (admins <= 1) return c.json({ error: 'cannot delete the last admin' }, 400);
     }
     softDeleteUser(db, id);
+    revokeAllSessions(db, id);
+    revokeAllTokens(db, id);
     return c.json({ ok: true });
+  });
+
+  app.patch('/admin/users/:id', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as { password?: string; role?: 'admin' | 'member' };
+    if (body.role !== undefined) updateUser(db, id, { role: body.role });
+    if (body.password) {
+      setPassword(db, id, hashPassword(body.password));
+      revokeAllSessions(db, id);
+    }
+    return c.json(publicUser(getUser(db, id)!));
   });
 
   return { app, db, admin, member, addUser };
@@ -489,6 +517,8 @@ describe('DELETE /admin/users/:id', () => {
         if (admins <= 1) return c.json({ error: 'cannot delete the last admin' }, 400);
       }
       softDeleteUser(ctx2.db, id);
+      revokeAllSessions(ctx2.db, id);
+      revokeAllTokens(ctx2.db, id);
       return c.json({ ok: true });
     });
     // delete a3 first → 2 admins left
@@ -500,6 +530,60 @@ describe('DELETE /admin/users/:id', () => {
     });
     // hits "cannot delete yourself" first, which is also 400
     assert.equal(res.status, 400);
+  });
+
+  test('soft-delete revokes sessions and API tokens; lingering creds cannot auth', async () => {
+    const { app, db, admin, addUser } = buildApp();
+    const victim = addUser('victim', 'pass', 'member');
+    const session = createSession(db, victim.id);
+    const { token } = createToken(db, { userId: victim.id, name: 'ha', scopes: ['tasks:read'] });
+
+    const del = await appFetch(app, `/admin/users/${victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: admin.basic },
+    });
+    assert.equal(del.status, 200);
+    assert.equal(getUser(db, victim.id), undefined, 'getUser hides soft-deleted users');
+    assert.equal(listTokens(db).filter((t) => t.user_id === victim.id).length, 0);
+
+    const viaSession = await appFetch(app, '/me', {
+      headers: { Authorization: `Bearer ${session}` },
+    });
+    assert.equal(viaSession.status, 401);
+
+    const viaToken = await appFetch(app, '/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(viaToken.status, 401);
+
+    const viaBasic = await appFetch(app, '/me', {
+      headers: { Authorization: victim.basic },
+    });
+    assert.equal(viaBasic.status, 401);
+  });
+
+  test('admin password reset revokes existing sessions', async () => {
+    const { app, db, admin, member } = buildApp();
+    const session = createSession(db, member.id);
+    const before = await appFetch(app, '/me', {
+      headers: { Authorization: `Bearer ${session}` },
+    });
+    assert.equal(before.status, 200);
+
+    const patch = await appFetch(app, `/admin/users/${member.id}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: admin.basic,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password: 'brand-new-secret' }),
+    });
+    assert.equal(patch.status, 200);
+
+    const after = await appFetch(app, '/me', {
+      headers: { Authorization: `Bearer ${session}` },
+    });
+    assert.equal(after.status, 401, 'old session invalidated after password reset');
   });
 });
 

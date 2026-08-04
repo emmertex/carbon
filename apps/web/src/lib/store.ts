@@ -30,6 +30,9 @@ interface AppState {
   ready: boolean;
   /** Bumped after every mutation/sync so `useQuery` re-runs. */
   dbRevision: number;
+  /** Bumped when synced settings (perspectives / view prefs) change, without
+   *  invalidating item-query caches. */
+  settingsRevision: number;
   selectedId: string | null;
   /** What the selected id refers to — a task/project item, or a tag. Drives which
    *  detail pane (TaskDetail vs TagDetail) the right column renders. */
@@ -79,6 +82,11 @@ interface AppState {
   workspaceLocked: boolean;
   /** ISO timestamp the workspace locks / locked at (for the gate copy). */
   workspaceExpiresAt: string | null;
+  /** Server rebuilt its op log (sync_epoch bumped). Blocks sync until the user
+   *  downloads a backup / wipes local / or goes offline. */
+  syncEpochMismatch: boolean;
+  /** Server-advertised sync epoch when mismatch was detected (for copy). */
+  serverSyncEpoch: number | null;
   /** Gesture / mobile-layout preferences (persisted to localStorage). */
   uiPrefs: UiPrefs;
   /** Incremented to request focusing the quick-add input (keyboard `c` / `/`).
@@ -119,8 +127,12 @@ interface AppState {
     version?: string | null;
   }) => void;
   setWorkspaceLock: (locked: boolean, expiresAt: string | null) => void;
+  setSyncEpochMismatch: (mismatch: boolean, serverEpoch?: number | null) => void;
   setLocalOnly: (v: boolean) => void;
   bump: () => void;
+  /** Refresh settings-driven UI (perspectives list, view prefs) without wiping
+   *  item `queryRoots` caches. */
+  bumpSettings: () => void;
   select: (id: string | null, kind?: 'item' | 'tag') => void;
   openDetail: () => void;
   closeDetail: () => void;
@@ -163,6 +175,7 @@ function loadIdSet(key: string): Set<string> {
 export const useStore = create<AppState>((set, get) => ({
   ready: false,
   dbRevision: currentRevision(),
+  settingsRevision: 0,
   selectedId: null,
   selectedKind: 'item',
   detailOpen: false,
@@ -186,6 +199,8 @@ export const useStore = create<AppState>((set, get) => ({
   localOnly: localStorage.getItem('carbon.localOnly') === '1',
   workspaceLocked: false,
   workspaceExpiresAt: null,
+  syncEpochMismatch: false,
+  serverSyncEpoch: null,
   uiPrefs: getUiPrefs(),
   settingsSyncEnabled: localStorage.getItem('carbon.settingsSync') !== '0',
   settingsHydrated: false,
@@ -211,11 +226,17 @@ export const useStore = create<AppState>((set, get) => ({
     }),
   setWorkspaceLock: (locked, expiresAt) =>
     set({ workspaceLocked: locked, workspaceExpiresAt: expiresAt }),
+  setSyncEpochMismatch: (mismatch, serverEpoch) =>
+    set({
+      syncEpochMismatch: mismatch,
+      serverSyncEpoch: mismatch ? (serverEpoch ?? get().serverSyncEpoch) : null,
+    }),
   setLocalOnly: (v) => {
     localStorage.setItem('carbon.localOnly', v ? '1' : '0');
     set({ localOnly: v });
   },
   bump: () => set(() => ({ dbRevision: bumpRevision() })),
+  bumpSettings: () => set((s) => ({ settingsRevision: s.settingsRevision + 1 })),
   // Panes are mutually exclusive on compact screens: opening one closes the other.
   // Selecting does NOT auto-open the overlay (mobile needs a 2nd tap); the docked
   // desktop pane shows on selectedId regardless of detailOpen.

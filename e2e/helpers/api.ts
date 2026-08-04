@@ -5,6 +5,9 @@ const DEFAULT_BASE = 'http://localhost:3069';
 const E2E_DEVICE_ID = 'e2e-runner';
 /** TOTP secrets from enrollments in this process (for needs_2fa on a new device id). */
 const totpSecrets = new Map<string, string>();
+/** Rotating device-trust secrets, same process-scoped caveat as the TOTP map: a
+ *  fresh process starts with none and re-verifies with TOTP. */
+const deviceTokens = new Map<string, string>();
 
 export interface LoginResult {
   token: string;
@@ -32,10 +35,15 @@ export async function login(
   password: string,
 ): Promise<LoginResult> {
   const basic = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+  const trustKey = `${baseUrl}|${username}`;
   const res = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
     headers: { Authorization: basic, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id: E2E_DEVICE_ID, device_name: 'E2E' }),
+    body: JSON.stringify({
+      device_id: E2E_DEVICE_ID,
+      device_name: 'E2E',
+      device_token: deviceTokens.get(trustKey) ?? '',
+    }),
   });
   if (!res.ok) throw new Error(`login failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as {
@@ -44,12 +52,14 @@ export async function login(
     status?: string;
     challenge?: string;
     user?: { id: string; username: string };
+    device_token?: string;
   };
 
   if (body.open) {
     throw new Error('login: server is in open mode (no users)');
   }
   if (body.token && body.user) {
+    if (body.device_token) deviceTokens.set(trustKey, body.device_token);
     return { token: body.token, basic, user: body.user };
   }
 
@@ -83,7 +93,12 @@ export async function login(
       }),
     });
     if (!finish.ok) throw new Error(`mfa enroll finish failed: ${finish.status}`);
-    const done = (await finish.json()) as { token: string; user: { id: string; username: string } };
+    const done = (await finish.json()) as {
+      token: string;
+      user: { id: string; username: string };
+      device_token?: string;
+    };
+    if (done.device_token) deviceTokens.set(trustKey, done.device_token);
     return { token: done.token, basic, user: done.user };
   }
 
@@ -107,7 +122,12 @@ export async function login(
       }),
     });
     if (!verify.ok) throw new Error(`mfa verify failed: ${verify.status}`);
-    const done = (await verify.json()) as { token: string; user: { id: string; username: string } };
+    const done = (await verify.json()) as {
+      token: string;
+      user: { id: string; username: string };
+      device_token?: string;
+    };
+    if (done.device_token) deviceTokens.set(trustKey, done.device_token);
     return { token: done.token, basic, user: done.user };
   }
 

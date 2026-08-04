@@ -68,6 +68,75 @@ test('sanitizeOps keeps a write to a shared item but strips an ownership grab', 
   assert.equal('owner_id' in out!.fields, false, 'ownership grab stripped');
 });
 
+test('sanitizeOps preserves series owner when a write-sharee completes a recurring task', () => {
+  const d = db();
+  const alice = createUser(d, { username: 'alice' });
+  const bob = createUser(d, { username: 'bob' });
+  const it = createItem(d, DEV, { title: 'daily chore', ownerId: alice.id });
+  shareItem(d, DEV, it.id, bob.id, 'write');
+  const spawnId = 'spawn-next';
+  const out = sanitizeOps(
+    d,
+    bob.id,
+    [
+      // Spawn create first (same order setCompleted emits), claiming the series owner.
+      op({
+        item_id: spawnId,
+        fields: { type: 'task', title: 'daily chore', owner_id: alice.id },
+      }),
+      op({ item_id: it.id, fields: { status: 'done', completed_at: new Date(NOW).toISOString() } }),
+    ],
+    NOW,
+  );
+  assert.equal(out.length, 2, 'create + complete both kept');
+  const create = out.find((o) => o.item_id === spawnId)!;
+  assert.equal(create.fields.owner_id, alice.id, 'series owner preserved for sharee spawn');
+  const done = out.find((o) => o.item_id === it.id)!;
+  assert.equal(done.fields.status, 'done');
+});
+
+test('sanitizeOps still forces ownership on an unrelated create by a non-owner', () => {
+  const d = db();
+  const [out] = sanitizeOps(
+    d,
+    'bob',
+    [op({ item_id: 'rogue', fields: { type: 'task', title: 'x', owner_id: 'alice' } })],
+    NOW,
+  );
+  assert.equal(out!.fields.owner_id, 'bob', 'unrelated create still attributed to pusher');
+});
+
+test('sanitizeRecordOps allows share copy onto a just-created recurrence spawn', () => {
+  const d = db();
+  const alice = createUser(d, { username: 'alice' });
+  const bob = createUser(d, { username: 'bob' });
+  // Spawn already ingested with series owner preserved; bob is not owner and has no share yet.
+  const spawn = createItem(d, DEV, { title: 'daily chore', ownerId: alice.id });
+  const [out] = sanitizeRecordOps(
+    d,
+    bob.id,
+    [rec({ entity: 'share', data: { item_id: spawn.id, user_id: bob.id, permission: 'write' } })],
+    NOW,
+    new Set([spawn.id]),
+  );
+  assert.equal(out!.entity, 'share', 'share onto just-created spawn kept');
+});
+
+test('sanitizeRecordOps still drops a share on an unrelated item the caller cannot write', () => {
+  const d = db();
+  const alice = createUser(d, { username: 'alice' });
+  const bob = createUser(d, { username: 'bob' });
+  const other = createItem(d, DEV, { title: 'private', ownerId: alice.id });
+  const out = sanitizeRecordOps(
+    d,
+    bob.id,
+    [rec({ entity: 'share', data: { item_id: other.id, user_id: bob.id, permission: 'write' } })],
+    NOW,
+    new Set(), // not just-created in this push
+  );
+  assert.equal(out.length, 0);
+});
+
 test('sanitizeOps does not strip sys_kind (non-identity marker passes through)', () => {
   const d = db();
   const [out] = sanitizeOps(

@@ -168,6 +168,240 @@ describe('POST /agent/tasks/batch — type:"note"', () => {
   });
 });
 
+// ─── notebooks (notes containers) ───────────────────────────────────────────
+
+describe('notes containers', () => {
+  /** A notebook holding one note, plus a normal project holding one task. */
+  function withNotebook() {
+    const ctx = makeTestDb();
+    const { db, deviceId } = ctx;
+    const { id: uid, basic } = ctx.addUser('a', 'pw');
+    const book = createItem(db, deviceId, {
+      type: 'project',
+      title: 'Recipes',
+      notesProject: true,
+      ownerId: uid,
+    });
+    const note = createItem(db, deviceId, {
+      type: 'note',
+      title: 'Sourdough',
+      note: '500 g flour\n350 g water',
+      parentId: book.id,
+      ownerId: uid,
+    });
+    const proj = createItem(db, deviceId, { type: 'project', title: 'Work', ownerId: uid });
+    createItem(db, deviceId, { type: 'task', title: 'Ship it', parentId: proj.id, ownerId: uid });
+    return { ...ctx, uid, basic, book, note, proj, app: buildAgentApp(db, deviceId) };
+  }
+
+  test('lists flags a notebook and counts its notes (not its zero open tasks)', async () => {
+    const { app, basic } = withNotebook();
+    const res = await appFetch(app, '/agent/lists?detail=1', { headers: { Authorization: basic } });
+    const body = (await res.json()) as {
+      lists: { name: string; notes?: boolean; open_count: number }[];
+    };
+    const book = body.lists.find((l) => l.name === 'Recipes')!;
+    assert.equal(book.notes, true);
+    assert.equal(book.open_count, 1, 'a stocked notebook must not read as empty');
+    const work = body.lists.find((l) => l.name === 'Work')!;
+    assert.equal(work.notes, undefined, 'a normal project carries no notes flag');
+    assert.equal(work.open_count, 1);
+  });
+
+  test('items with no type reads a notebook as notes (a task default returns nothing)', async () => {
+    const { app, basic, book } = withNotebook();
+    const res = await appFetch(app, `/agent/items?list=${book.id}`, {
+      headers: { Authorization: basic },
+    });
+    const body = (await res.json()) as { items: { title: string }[] };
+    assert.deepEqual(body.items.map((i) => i.title), ['Sourdough']);
+  });
+
+  test('an explicit type still wins inside a notebook', async () => {
+    const { app, basic, book } = withNotebook();
+    const res = await appFetch(app, `/agent/items?list=${book.id}&type=task`, {
+      headers: { Authorization: basic },
+    });
+    const body = (await res.json()) as { items: unknown[] };
+    assert.deepEqual(body.items, []);
+  });
+
+  test('adding to a notebook with no type creates a note, not a task', async () => {
+    const { app, basic, db } = withNotebook();
+    const res = await appFetch(app, '/agent/tasks/batch', json(basic, {
+      list: 'Recipes',
+      create_list_if_missing: false,
+      titles: ['Pancakes'],
+    }));
+    const body = (await res.json()) as { created: { id: string; type: string }[] };
+    assert.equal(body.created[0].type, 'note');
+    assert.equal(getItem(db, body.created[0].id)?.type, 'note');
+  });
+
+  test('adding to a normal project with no type still creates a task', async () => {
+    const { app, basic } = withNotebook();
+    const res = await appFetch(app, '/agent/tasks/batch', json(basic, {
+      list: 'Work',
+      create_list_if_missing: false,
+      titles: ['Email Sam'],
+    }));
+    const body = (await res.json()) as { created: { type: string }[] };
+    assert.equal(body.created[0].type, 'task');
+  });
+});
+
+// ─── recipes (notes in recipe mode) ─────────────────────────────────────────
+
+describe('recipe notes', () => {
+  test('note_mode:"recipe" creates a note in recipe mode', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { basic } = addUser('a', 'pw');
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/batch', json(basic, {
+      tasks: [{ title: 'Sourdough', note_mode: 'recipe', note: '500 g flour' }],
+    }));
+    const body = (await res.json()) as { created: { id: string; type: string; note_mode?: string }[] };
+    assert.equal(body.created[0].type, 'note', 'a recipe implies a note');
+    assert.equal(body.created[0].note_mode, 'recipe');
+    assert.deepEqual(JSON.parse(getItem(db, body.created[0].id)!.metadata!), { noteMode: 'recipe' });
+  });
+
+  test('a note_mode patch merges into metadata instead of replacing it', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Sourdough', ownerId: uid });
+    // Two other features' keys already in the shared column.
+    updateItem(db, deviceId, note.id, {
+      metadata: JSON.stringify({ recipe: { servings: 4, units: 'mlCups' }, gpsTrack: { points: 3 } }),
+    });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/update', json(basic, {
+      updates: [{ query: 'Sourdough', patch: { note_mode: 'recipe' } }],
+    }));
+    assert.equal(res.status, 200);
+    assert.deepEqual(JSON.parse(getItem(db, note.id)!.metadata!), {
+      recipe: { servings: 4, units: 'mlCups' },
+      gpsTrack: { points: 3 },
+      noteMode: 'recipe',
+    });
+  });
+
+  test('items reports note_mode so a recipe can be recognised', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Sourdough', ownerId: uid });
+    updateItem(db, deviceId, note.id, { metadata: JSON.stringify({ noteMode: 'recipe' }) });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/items?type=note&detail=1', {
+      headers: { Authorization: basic },
+    });
+    const body = (await res.json()) as { items: { title: string; note_mode?: string }[] };
+    assert.equal(body.items[0].note_mode, 'recipe');
+  });
+});
+
+// ─── note bodies: appending, and the read cap ───────────────────────────────
+
+describe('note bodies', () => {
+  test('note_append keeps the existing body and adds a line', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, {
+      type: 'note',
+      title: 'Bread Recipe',
+      note: '500 g flour\n350 g water',
+      ownerId: uid,
+    });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/tasks/update', json(basic, {
+      updates: [{ query: 'Bread Recipe', patch: { note_append: 'Rest for 45 min' } }],
+    }));
+    assert.equal(res.status, 200);
+    assert.equal(getItem(db, note.id)!.note, '500 g flour\n350 g water\nRest for 45 min');
+  });
+
+  test('note_append on an empty body writes just the addition', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Ideas', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    await appFetch(app, '/agent/tasks/update', json(basic, {
+      updates: [{ query: 'Ideas', patch: { note_append: 'First thought' } }],
+    }));
+    assert.equal(getItem(db, note.id)!.note, 'First thought');
+  });
+
+  test('patch note still REPLACES the body (unchanged)', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Ideas', note: 'old', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    await appFetch(app, '/agent/tasks/update', json(basic, {
+      updates: [{ query: 'Ideas', patch: { note: 'new' } }],
+    }));
+    assert.equal(getItem(db, note.id)!.note, 'new');
+  });
+
+  test('a short body comes back whole and unflagged; a long one is capped until full=1', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const short = 'Three short lines\nof a note\nnothing more.';
+    createItem(db, deviceId, { type: 'note', title: 'Short', note: short, ownerId: uid });
+    const long = 'x'.repeat(5000);
+    createItem(db, deviceId, { type: 'note', title: 'Long', note: long, ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+
+    const res = await appFetch(app, '/agent/items?type=note&detail=1', {
+      headers: { Authorization: basic },
+    });
+    const body = (await res.json()) as {
+      items: { title: string; note: string; note_truncated?: boolean }[];
+    };
+    const s = body.items.find((i) => i.title === 'Short')!;
+    assert.equal(s.note, short, 'a normal note must arrive intact');
+    assert.equal(s.note_truncated, undefined);
+    const l = body.items.find((i) => i.title === 'Long')!;
+    assert.equal(l.note_truncated, true);
+    assert.ok(l.note.length < long.length);
+
+    const fullRes = await appFetch(app, '/agent/items?type=note&detail=1&full=1&q=Long', {
+      headers: { Authorization: basic },
+    });
+    const fullBody = (await fullRes.json()) as { items: { note: string; note_truncated?: boolean }[] };
+    assert.equal(fullBody.items[0].note, long);
+    assert.equal(fullBody.items[0].note_truncated, undefined);
+  });
+});
+
+// ─── resolve reaches notes ──────────────────────────────────────────────────
+
+describe('POST /agent/resolve — notes', () => {
+  test('kind:"task" finds a note and reports its type', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    const note = createItem(db, deviceId, { type: 'note', title: 'Sourdough', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/resolve', json(basic, { kind: 'task', q: 'sourdough' }));
+    const body = (await res.json()) as {
+      candidates: { id: string; type: string }[];
+      best: { id: string; confident: boolean } | null;
+    };
+    assert.equal(body.best?.id, note.id);
+    assert.equal(body.candidates[0].type, 'note');
+  });
+
+  test('kind:"note" matches notes only', async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid, basic } = addUser('a', 'pw');
+    createItem(db, deviceId, { type: 'task', title: 'Buy sourdough', ownerId: uid });
+    const note = createItem(db, deviceId, { type: 'note', title: 'Sourdough recipe', ownerId: uid });
+    const app = buildAgentApp(db, deviceId);
+    const res = await appFetch(app, '/agent/resolve', json(basic, { kind: 'note', q: 'sourdough' }));
+    const body = (await res.json()) as { candidates: { id: string }[] };
+    assert.deepEqual(body.candidates.map((c) => c.id), [note.id]);
+  });
+});
+
 describe('GET /agent/notes/search', () => {
   test('finds a match inside a note body and returns a snippet + item id', async () => {
     const { db, deviceId, addUser } = makeTestDb();

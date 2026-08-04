@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Loader2, Copy, Check } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import {
@@ -54,12 +54,15 @@ export function SignInGate() {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [emailHint, setEmailHint] = useState('');
+  const [emailSent, setEmailSent] = useState(false);
   const [totpSecret, setTotpSecret] = useState('');
   const [totpUri, setTotpUri] = useState('');
   const [enrolledEmail, setEnrolledEmail] = useState(false);
   const [enrolledTotp, setEnrolledTotp] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [copied, setCopied] = useState(false);
+  // Auto-send the login email code once when entering the challenge on the Email tab.
+  const autoSentForChallenge = useRef<string | null>(null);
 
   const inputCls =
     'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent';
@@ -112,6 +115,9 @@ export function SignInGate() {
     } else {
       setChallenge(result.challenge);
       setFactors(result.factors);
+      setEmailHint('');
+      setEmailSent(false);
+      autoSentForChallenge.current = null;
       setChallengeMode(result.factors.totp ? 'totp' : result.factors.email ? 'email' : 'recovery');
       setStep('challenge');
     }
@@ -208,13 +214,35 @@ export function SignInGate() {
     try {
       const { email_hint } = await mfaLoginEmailSend(challenge);
       setEmailHint(email_hint);
+      setEmailSent(true);
       setChallengeMode('email');
     } catch (err) {
-      setError(String(err));
+      const msg = String(err);
+      // Cooldown / send-limit: keep the email tab usable; the code may already be on the way.
+      if (msg.includes('send_cooldown') || msg.includes('send_limit')) {
+        setEmailSent(true);
+        setError(
+          msg.includes('send_cooldown')
+            ? 'A code was just sent — wait a moment before requesting another.'
+            : 'Too many codes sent for this sign-in. Try again later or use another factor.',
+        );
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
   }
+
+  // When the challenge opens on the Email tab (typical after signup — email is the only
+  // factor), send the code immediately. Tab switches only change mode; Resend is explicit.
+  useEffect(() => {
+    if (step !== 'challenge' || challengeMode !== 'email' || !factors.email || !challenge) return;
+    if (autoSentForChallenge.current === challenge) return;
+    autoSentForChallenge.current = challenge;
+    void sendLoginEmail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per challenge id
+  }, [step, challengeMode, factors.email, challenge]);
 
   async function verifyChallenge(e: React.FormEvent) {
     e.preventDefault();
@@ -547,7 +575,11 @@ export function SignInGate() {
               {factors.email && (
                 <button
                   type="button"
-                  onClick={() => void sendLoginEmail()}
+                  onClick={() => {
+                    setChallengeMode('email');
+                    setCode('');
+                    setError(null);
+                  }}
                   className={`rounded-full px-3 py-1 ${challengeMode === 'email' ? 'bg-accent text-white' : 'bg-surface-2'}`}
                 >
                   Email code
@@ -566,10 +598,28 @@ export function SignInGate() {
               </button>
             </div>
             <form onSubmit={verifyChallenge} className="space-y-4">
-              {challengeMode === 'email' && emailHint && (
-                <p className="text-sm text-text-muted">
-                  Code sent to <strong>{emailHint}</strong>
-                </p>
+              {challengeMode === 'email' && (
+                <div className="space-y-2">
+                  <p className="text-sm text-text-muted">
+                    {emailHint ? (
+                      <>
+                        Code sent to <strong>{emailHint}</strong>
+                      </>
+                    ) : emailSent ? (
+                      'Check your email for a 6-digit code.'
+                    ) : (
+                      'Sending a code to your email…'
+                    )}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void sendLoginEmail()}
+                    disabled={busy}
+                    className="text-sm text-accent disabled:opacity-50"
+                  >
+                    {emailSent || emailHint ? 'Resend code' : 'Send code'}
+                  </button>
+                </div>
               )}
               <input
                 className={inputCls}

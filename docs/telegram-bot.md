@@ -109,6 +109,17 @@ Just talk to the bot:
 | `untick my weekly shopping items` | Re-opens every task tagged `weekly`. |
 | `tag everything in groceries with woolworths` | Bulk-tags the whole list. |
 | `mark off bread and milk` | Completes both; reports anything it couldn't find. |
+| `write down that the spare key is under the pot` | Creates a note (not a task). |
+| `what did I write about the rental car?` | Searches inside note bodies and summarises the hit. |
+| `what's in my recipes notebook?` | Lists the notes in a notebook (a list that holds notes). |
+| `add to the sourdough recipe: rest for 45 min` | Appends a line, keeping the rest of the recipe. |
+
+### Notes and recipes
+
+Notes are items with a body and no checkbox; a **notebook** is a list that holds them. The bot
+reads and writes both: adding to a notebook makes a note automatically, "save this recipe …"
+creates one in recipe mode (so it opens in Carbon's recipe editor), and "add to X" appends to a
+note rather than replacing it. Long note bodies are summarised rather than pasted back in full.
 
 ### Conversational context
 

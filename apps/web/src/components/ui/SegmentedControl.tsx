@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { cn } from '@/lib/cn';
 
 export type SegmentOption<T extends string> = {
@@ -29,6 +30,14 @@ export function SegmentedControl<T extends string>({
   /** Stretch to full width with equal-width segments. */
   block?: boolean;
 }) {
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+
+  // Keep the selected segment visible when the group scrolls horizontally
+  // (e.g. four Features presets on a narrow settings column).
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }, [value]);
+
   return (
     <div
       className={cn(
@@ -36,18 +45,20 @@ export function SegmentedControl<T extends string>({
         block && 'flex w-full',
         className,
       )}
+      role="group"
     >
       {options.map((opt, i) => {
         const active = value === opt.value;
         return (
           <button
             key={opt.value}
+            ref={active ? activeRef : undefined}
             type="button"
             title={opt.title}
             onClick={() => onChange(opt.value)}
             aria-pressed={active}
             className={cn(
-              'shrink-0 whitespace-nowrap px-3 py-1 font-medium transition-colors',
+              'shrink-0 whitespace-nowrap px-3 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40',
               block && 'flex-1',
               i > 0 && 'border-l border-border',
               active

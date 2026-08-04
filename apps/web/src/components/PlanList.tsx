@@ -24,6 +24,7 @@ import { toggleTaskCompletion } from "@/lib/taskActions";
 import { cn } from "@/lib/cn";
 import { TaskRow, type TaskRowData } from "./TaskRow";
 import { SwipeableRow } from "./SwipeableRow";
+import { SelectedAddTaskButtons } from "./AddTaskButtons";
 import { SegmentedControl } from "./ui/SegmentedControl";
 
 /** A planned/matched item plus the available leaf actions to surface beneath it.
@@ -93,14 +94,23 @@ export const PlanEntryRows = memo(function PlanEntryRows({
   const { parent, orderMode, hasChildren, leaves } = entry;
 
   const leafRow = (d: TaskRowData) => (
-    <SwipeableRow key={d.item.id} item={d.item}>
-      <TaskRow {...d} showProject indent={grouping === "nested" ? 1 : 0} />
-    </SwipeableRow>
+    <div key={d.item.id}>
+      <SwipeableRow item={d.item}>
+        <TaskRow {...d} showProject indent={grouping === "nested" ? 1 : 0} />
+      </SwipeableRow>
+      <SelectedAddTaskButtons
+        itemId={d.item.id}
+        depth={grouping === "nested" ? 1 : 0}
+      />
+    </div>
   );
   const parentRow = (
-    <SwipeableRow item={parent.item}>
-      <TaskRow {...parent} showProject focused={focused} />
-    </SwipeableRow>
+    <>
+      <SwipeableRow item={parent.item}>
+        <TaskRow {...parent} showProject focused={focused} />
+      </SwipeableRow>
+      <SelectedAddTaskButtons itemId={parent.item.id} depth={0} />
+    </>
   );
 
   // Plain item with no actionable children.
@@ -128,17 +138,20 @@ export const PlanEntryRows = memo(function PlanEntryRows({
   const collapsible = orderMode === "single" && leaves.length > 0;
   const showLeaves = collapsible ? expanded : true;
   const topRow = (
-    <SwipeableRow item={parent.item}>
-      <TaskRow
-        {...parent}
-        showProject
-        focused={focused}
-        collapsed={collapsible ? !expanded : undefined}
-        onToggleCollapse={
-          collapsible ? () => setExpanded((e) => !e) : undefined
-        }
-      />
-    </SwipeableRow>
+    <>
+      <SwipeableRow item={parent.item}>
+        <TaskRow
+          {...parent}
+          showProject
+          focused={focused}
+          collapsed={collapsible ? !expanded : undefined}
+          onToggleCollapse={
+            collapsible ? () => setExpanded((e) => !e) : undefined
+          }
+        />
+      </SwipeableRow>
+      <SelectedAddTaskButtons itemId={parent.item.id} depth={0} />
+    </>
   );
   const rest = (
     <>

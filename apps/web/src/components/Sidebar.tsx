@@ -43,6 +43,7 @@ import {
   getFolders,
   needsReview,
   createItem,
+  deletedRoots,
   updateItem,
   reorderItem,
   moveProjectToFolder,
@@ -67,6 +68,7 @@ import {
 import { queryRoots } from '@/lib/listQuery';
 import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
+import { useSuppressClickAfterDrag } from '@/hooks/useSuppressClickAfterDrag';
 import { TagMark } from './TagMark';
 import { useDeferredQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
@@ -75,6 +77,7 @@ import { undo, redo } from '@/lib/undo';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { mutate } from '@/lib/mutate';
 import { cn } from '@/lib/cn';
+import { itemRoute } from '@/lib/itemRoute';
 import {
   getPerspectives,
   removePerspective,
@@ -330,6 +333,9 @@ function ProjectsSection() {
   // Press-and-hold to drag (~200ms), matching every other list in the app. A
   // quick tap/scroll (moving >5px before the delay) is never treated as a drag.
   const sensors = useReorderSensors();
+  // After a drag ends, swallow the stray click dnd-kit leaves behind — otherwise
+  // the project row's `<NavLink>` follows its href and reloads the page.
+  const markDragEnd = useSuppressClickAfterDrag();
 
   function createProject(mode: OrderMode) {
     const project = mutate((db, dev) =>
@@ -355,6 +361,9 @@ function ProjectsSection() {
   }
 
   function onDragEnd(e: DragEndEvent) {
+    // Mark first, before any early return: a drag that ends without a reorder
+    // still fires a stray click that must be swallowed.
+    markDragEnd();
     const { active, over } = e;
     if (!over || active.id === over.id) return;
     const oldIndex = rows.findIndex((r) => r.id === active.id);
@@ -362,12 +371,25 @@ function ProjectsSection() {
     if (oldIndex < 0 || overIndex < 0) return;
     const activeRow = rows[oldIndex]!;
     if (!activeRow.item) return; // slots aren't draggable
+    const overRow = rows[overIndex]!;
 
     const reordered = arrayMove(rows, oldIndex, overIndex);
     const newIndex = reordered.findIndex((r) => r.id === active.id);
 
     // Folders only ever live at the top level (no nested folders).
     let group = targetGroupAt(reordered, newIndex, collapsed);
+    // Dropping directly onto an expanded folder header means "nest inside it",
+    // regardless of which direction the drag came from. Without this, a drop
+    // coming from below would otherwise compute the group from the row above the
+    // new slot (which is whatever sat above the folder, i.e. top level), so
+    // dragging a project up into a folder silently left it as a sibling.
+    if (
+      activeRow.kind === 'project' &&
+      overRow.kind === 'folder' &&
+      !collapsed.has(overRow.id)
+    ) {
+      group = overRow.id;
+    }
     if (activeRow.kind === 'folder') group = null;
 
     // sort_order = midpoint of same-group neighbours around the new slot.
@@ -809,14 +831,15 @@ function PerspectivesSection() {
   const navigate = useNavigate();
   const location = useLocation();
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
-  // A sync bumps dbRevision after applying settings; re-read so a perspective
-  // added/removed/reordered on another device shows up without a navigation.
-  const dbRevision = useStore((s) => s.dbRevision);
+  // A settings sync bumps settingsRevision after applying perspectives; re-read
+  // so a perspective added/removed/reordered on another device shows up. Do not
+  // key this on dbRevision — settings writes must not force a full recount.
+  const settingsRevision = useStore((s) => s.settingsRevision);
   const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
   const sensors = useReorderSensors();
 
   const [perspectives, setPerspectives] = useState<SavedPerspective[]>(getPerspectives);
-  useEffect(() => setPerspectives(getPerspectives()), [location.pathname, dbRevision]);
+  useEffect(() => setPerspectives(getPerspectives()), [location.pathname, settingsRevision]);
 
   // Task quantity per saved perspective, computed the same way the view page
   // itself would (see ListView) so the sidebar badge matches what you'd see on open.
@@ -924,6 +947,7 @@ export function Sidebar() {
             : 0,
         planCount,
         reviewCount: projects.filter((p) => needsReview(p)).length,
+        trashCount: deletedRoots(db).length,
         shared: (me ? sharedRoots(db, me) : []).map((it) => ({
           item: it,
           open: remaining(it.id),
@@ -1010,6 +1034,18 @@ export function Sidebar() {
         {showTime && (
           <NavItem to="/time" icon={<Clock size={17} />} label="Time tracked" onClick={close} />
         )}
+        {/* Only while there's something to undelete — an always-on Trash item is
+            clutter in a workspace that has never lost anything, and this way the
+            nav entry is present exactly when someone comes looking for it. */}
+        {!!data?.trashCount && (
+          <NavItem
+            to="/trash"
+            icon={<Trash2 size={17} />}
+            label="Recently Deleted"
+            count={data.trashCount}
+            onClick={close}
+          />
+        )}
       </nav>
 
       {showPerspectives && <PerspectivesSection />}
@@ -1023,7 +1059,7 @@ export function Sidebar() {
             {data.shared.map(({ item, open }: { item: Item; open: number }) => (
               <NavItem
                 key={item.id}
-                to={`/focus/${item.id}`}
+                to={itemRoute(item)}
                 icon={<Users size={16} />}
                 label={item.title || 'Untitled'}
                 count={open}

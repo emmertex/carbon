@@ -101,7 +101,7 @@ export const FEATURES: FeatureDef[] = [
   {
     id: "nlCommands",
     label: "Assistant in add box",
-    hint: "Type natural-language commands into the add box.",
+    hint: "Keyword-triggered assistant commands in the add box (e.g. add / remind…). Tokens: #tag, @user, !priority.",
     category: "Power tools",
     presets: { simple: false, standard: false, advanced: true },
   },

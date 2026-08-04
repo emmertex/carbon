@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowRight,
+  ChevronDown,
+  Mail,
   ListChecks,
   ListTree,
   Clock,
@@ -13,7 +15,6 @@ import {
   Check,
   WifiOff,
   MonitorSmartphone,
-  Gauge,
   Sparkles,
   MapPin,
   Plug,
@@ -31,6 +32,25 @@ import {
   saveCurrentUser,
 } from "@/lib/config";
 
+/** GitHub mark — lucide dropped brand icons, so it's inlined here. */
+function GithubMark({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+    </svg>
+  );
+}
+
+const GITHUB_URL = "https://github.com/emmertex/carbon_dev";
+const CHANGELOG_URL = `${GITHUB_URL}/blob/main/CHANGELOG.md`;
+const CONTACT_EMAIL = "email@emmertex.com";
+
 /** The positioning pillars — why Carbon exists, not an exhaustive feature list.
  *  The full inventory lives in the spotlight + grouped sections below. */
 const PILLARS: { icon: LucideIcon; title: string; body: string }[] = [
@@ -47,12 +67,7 @@ const PILLARS: { icon: LucideIcon; title: string; body: string }[] = [
   {
     icon: MonitorSmartphone,
     title: "Every platform",
-    body: "A PWA at heart, wrapped natively for Linux, Windows, Mac and Android — with iOS on the way. Web or app, it's always the exact same Carbon.",
-  },
-  {
-    icon: Gauge,
-    title: "Fast at any scale",
-    body: "Every build runs 100, 1,000 and 10,000-task performance tests to keep memory and latency low. It stays snappy no matter how much you throw at it.",
+    body: "A PWA at heart, wrapped natively for Linux, Windows and Android — with macOS and iOS on the way. Web or app, it's always the exact same Carbon.",
   },
   {
     icon: Code2,
@@ -137,13 +152,13 @@ const SPOTLIGHTS: {
   },
   {
     icon: FileText,
-    title: "First-class notes, comments and files",
-    body: "Notes are their own item type — nest them like tasks, convert either way without losing data, and edit with a rich Markdown editor. Tasks still carry GFM notes too, plus threaded comments with @mentions and attachments.",
+    title: "First-class notes, notebooks and recipes",
+    body: "Notes are their own item type — nest them like tasks, convert either way without losing data, and edit with a rich Markdown editor. Flip a project to Notes for a notebook, or a note to Recipe for scaled servings. Tasks still carry GFM notes too, plus threaded comments with @mentions and attachments.",
     points: [
-      "Dedicated notes with TipTap editing, images and zip export",
-      "Convert task ↔ note without losing data",
+      "Notes projects, card-style note rows and list thumbnails",
+      "Recipe mode with servings scale, Optimise (sync server) and a copy-able import prompt",
+      "Convert task ↔ note without losing data; zip export of all notes",
       "Comment threads with @mentions and file attachments",
-      "Multiple assignees, shared per task or whole project",
     ],
     shot: "/shots/detail.png",
   },
@@ -176,19 +191,22 @@ const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
       "Time — list, timeline or chart",
       "Tags — browse by context",
       "Nearby — location-based tasks",
+      "Recently Deleted — recover tombstoned items",
     ],
   },
   {
     icon: Database,
     title: "Sync, data & durability",
     items: [
-      "Offline-first WASM SQLite in the browser",
-      "Field-level last-writer-wins CRDT over an op log",
+      "A real SQLite database running offline, right in your browser",
+      "Conflict-free sync that merges edits from every device, field by field",
       "Debounced saves + immediate flush on tab close",
       "Full export / import, including attachment blobs",
+      "Blob cache policy: On Load / Thumbnails / All per device",
       "Settings & view sync across your devices",
       "Reset local data, merge/replace on sign-in, erase on sign-out",
       "Purge old completed tasks; copy any subtree as Markdown",
+      "Mandatory sync 2FA (email and/or authenticator) with trusted devices",
     ],
   },
   {
@@ -198,7 +216,7 @@ const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
       "Full REST API with scoped tokens",
       "Agent API for external bots",
       "Outbound webhooks",
-      "CalDAV sync (VTODO + VEVENT) per project",
+      "CalDAV sync — tasks and calendar events — per project",
       "Home Assistant capture, geofencing & two-way flows",
     ],
   },
@@ -207,6 +225,7 @@ const GROUPS: { icon: LucideIcon; title: string; items: string[] }[] = [
     title: "Editing & capture",
     items: [
       "Multi-level undo / redo (Ctrl+Z / Ctrl+Shift+Z)",
+      "Recently Deleted — restore a task or whole cascade for 30 days",
       "Inline rapid entry — Enter creates the next task",
       "Quick-add tokens: #tag @user !priority",
       "Desktop global-hotkey + tray quick-add",
@@ -307,9 +326,63 @@ function Spotlight({
   );
 }
 
+/** How many bullets a grouped card shows before collapsing behind "Show all". */
+const GROUP_PREVIEW_COUNT = 4;
+
+/** One card in the "And a lot more" grid. Long lists collapse to the first few
+ *  bullets with a toggle, so the section stays scannable. */
+function GroupCard({
+  icon: Icon,
+  title,
+  items,
+}: {
+  icon: LucideIcon;
+  title: string;
+  items: string[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = items.length > GROUP_PREVIEW_COUNT + 1;
+  const visible =
+    collapsible && !expanded ? items.slice(0, GROUP_PREVIEW_COUNT) : items;
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5">
+      <div className="mb-3 flex items-center gap-2">
+        <Icon className="text-accent" size={20} />
+        <h3 className="font-semibold">{title}</h3>
+      </div>
+      <ul className="space-y-1.5 text-sm text-text-muted">
+        {visible.map((it) => (
+          <li key={it} className="flex items-start gap-2">
+            <Check size={14} className="mt-1 shrink-0 text-green-500" />
+            <span>{it}</span>
+          </li>
+        ))}
+      </ul>
+      {collapsible && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-3 flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+        >
+          {expanded ? "Show less" : `Show all ${items.length}`}
+          <ChevronDown
+            size={14}
+            className={expanded ? "rotate-180 transition-transform" : "transition-transform"}
+          />
+        </button>
+      )}
+    </div>
+  );
+}
+
 const PLANS = [
-  { label: "3 months", price: "$7.50" },
-  { label: "1 year", price: "$20", highlight: true },
+  { label: "3 months", price: "$7.50", perMonth: "$2.50 / month" },
+  {
+    label: "1 year",
+    price: "$20",
+    perMonth: "$1.67 / month",
+    highlight: true,
+    badge: "Best value",
+  },
 ];
 
 /**
@@ -323,6 +396,7 @@ export function LandingView() {
   const appHost = useStore((s) => s.appHost);
   const setLocalOnly = useStore((s) => s.setLocalOnly);
   const [workspace, setWorkspace] = useState("");
+  const [shotIdx, setShotIdx] = useState(0);
 
   function useLocally() {
     // Prefer the dedicated offline host so local data lives on a stable origin
@@ -357,16 +431,59 @@ export function LandingView() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-12 sm:py-16">
+    <div>
+      {/* Sticky nav — keeps orientation and a conversion path on a long page. */}
+      <nav className="sticky top-0 z-20 border-b border-border bg-surface/90 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center gap-4 px-6 py-3">
+          <a href="#top" className="flex items-center gap-2 font-semibold">
+            <img src="/icon-192.png" alt="" className="h-6 w-6 rounded" />
+            Carbon
+          </a>
+          <div className="ml-auto flex items-center gap-4 text-sm text-text-muted">
+            <a href="#features" className="hidden hover:text-text sm:block">
+              Features
+            </a>
+            <a href="#demo" className="hidden hover:text-text sm:block">
+              Demo
+            </a>
+            <a href="#pricing" className="hover:text-text">
+              Pricing
+            </a>
+            <a
+              href={GITHUB_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 hover:text-text"
+            >
+              <GithubMark size={16} />
+              <span className="hidden sm:inline">GitHub</span>
+            </a>
+            <button
+              onClick={() => navigate("/signup")}
+              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white"
+            >
+              Create a workspace
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <div id="top" className="mx-auto max-w-5xl px-6 py-12 sm:py-16">
       {/* Hero */}
       <header className="mx-auto max-w-2xl text-center">
         <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
-          Carbon
+          Get seriously organized.
+          <br />
+          Own every byte.
         </h1>
         <p className="mt-4 text-lg text-text-muted">
-          A fast, offline-first task manager with serious GTD, first-class notes,
-          built-in time tracking, natural-language capture and location-aware
-          reminders. Open source, free to use, and yours to sync or self-host.
+          Carbon 1.0 is a free, open-source task manager built on Getting Things
+          Done. It works fully offline on every platform — syncing is optional,
+          and always on your terms.
+        </p>
+        <p className="mt-3 text-sm text-text-muted">
+          For GTD practitioners, and anyone outgrowing a flat to-do list or
+          leaving Things, OmniFocus or Todoist.
         </p>
         <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <button
@@ -394,7 +511,10 @@ export function LandingView() {
       </header>
 
       {/* Positioning pillars */}
-      <section className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <section
+        id="features"
+        className="mt-16 grid scroll-mt-20 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {PILLARS.map(({ icon: Icon, title, body }) => (
           <div
             key={title}
@@ -431,45 +551,42 @@ export function LandingView() {
           And a lot more
         </h2>
         <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {GROUPS.map(({ icon: Icon, title, items }) => (
-            <div
-              key={title}
-              className="rounded-xl border border-border bg-surface p-5"
-            >
-              <div className="mb-3 flex items-center gap-2">
-                <Icon className="text-accent" size={20} />
-                <h3 className="font-semibold">{title}</h3>
-              </div>
-              <ul className="space-y-1.5 text-sm text-text-muted">
-                {items.map((it) => (
-                  <li key={it} className="flex items-start gap-2">
-                    <Check
-                      size={14}
-                      className="mt-1 shrink-0 text-green-500"
-                    />
-                    <span>{it}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+          {GROUPS.map((g) => (
+            <GroupCard key={g.title} {...g} />
           ))}
         </div>
       </section>
 
-      {/* Screenshots */}
-      <section className="mt-20">
+      {/* Screenshots — a tabbed preview so each view gets a full-width look. */}
+      <section id="demo" className="mt-20 scroll-mt-20">
         <h2 className="mb-8 text-center text-2xl font-semibold sm:text-3xl">
           See it in action
         </h2>
-        <div className="grid gap-4 sm:grid-cols-3">
-          {SHOTS.map((s) => (
-            <Shot key={s.src} {...s} />
+        <div className="mb-4 flex justify-center gap-2">
+          {SHOTS.map((s, i) => (
+            <button
+              key={s.src}
+              onClick={() => setShotIdx(i)}
+              className={
+                "rounded-full border px-4 py-1.5 text-sm font-medium " +
+                (i === shotIdx
+                  ? "border-accent bg-accent-soft text-text"
+                  : "border-border text-text-muted hover:bg-surface-2")
+              }
+            >
+              {s.label}
+            </button>
           ))}
         </div>
+        <Shot
+          key={SHOTS[shotIdx].src}
+          {...SHOTS[shotIdx]}
+          className="mx-auto max-w-3xl"
+        />
       </section>
 
       {/* Pricing / hosting */}
-      <section className="mt-20 grid gap-4 lg:grid-cols-2">
+      <section id="pricing" className="mt-20 grid scroll-mt-20 gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-border bg-surface p-6">
           <h3 className="font-semibold">Self-host — free</h3>
           <p className="mt-1 text-sm text-text-muted">
@@ -515,12 +632,17 @@ export function LandingView() {
               <div
                 key={p.label}
                 className={
-                  "rounded-lg border p-4 text-center " +
+                  "relative rounded-lg border p-4 text-center " +
                   (p.highlight
                     ? "border-accent bg-accent-soft"
                     : "border-border")
                 }
               >
+                {p.badge && (
+                  <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                    {p.badge}
+                  </span>
+                )}
                 <div className="text-2xl font-bold">
                   {p.price}
                   <span className="ml-1 text-xs font-normal text-text-muted">
@@ -528,11 +650,13 @@ export function LandingView() {
                   </span>
                 </div>
                 <div className="text-xs text-text-muted">{p.label}</div>
+                <div className="mt-1 text-xs text-text-faint">{p.perMonth}</div>
               </div>
             ))}
           </div>
           <p className="mt-2 text-center text-xs text-text-muted">
-            Contribution toward hosting — not a product subscription
+            Contribution toward hosting — not a product subscription. Prices in
+            Australian dollars ($20 AUD is roughly US$13 or €12).
           </p>
           <button
             onClick={() => navigate("/signup")}
@@ -543,7 +667,16 @@ export function LandingView() {
           <p className="mt-3 text-xs text-text-faint">
             Included AI runs a basic model (currently GPT-OSS-20B, may change)
             under fair-use limits. Bring your own OpenAI, Anthropic or webhook
-            key anytime for higher limits or a stronger model.
+            key anytime for higher limits or a stronger model. AI features only
+            send the model the request you typed plus the task context needed to
+            act on it — and only when you use them. See the{" "}
+            <button
+              onClick={() => navigate("/privacy")}
+              className="underline underline-offset-4 hover:text-text"
+            >
+              Privacy Policy
+            </button>
+            .
           </p>
         </div>
       </section>
@@ -559,8 +692,15 @@ export function LandingView() {
               className="min-w-0 flex-1 bg-transparent py-2 outline-none"
               placeholder="your-workspace"
               value={workspace}
-              onChange={(e) => setWorkspace(e.target.value.toLowerCase())}
+              onChange={(e) =>
+                // Subdomain labels: lowercase letters, digits and hyphens only
+                // (dots allowed so a pasted full address still works).
+                setWorkspace(
+                  e.target.value.toLowerCase().replace(/[^a-z0-9.-]/g, ""),
+                )
+              }
               autoCapitalize="none"
+              spellCheck={false}
             />
             {baseDomain && (
               <span className="pr-3 text-text-muted">.{baseDomain}</span>
@@ -575,14 +715,15 @@ export function LandingView() {
           </button>
         </form>
         <p className="mt-2 text-center text-xs text-text-muted">
-          You'll sign in on your workspace's own address.
+          You'll sign in on your workspace's own address. Workspace names use
+          lowercase letters, numbers and hyphens.
         </p>
       </section>
 
       {/* Call to contributors */}
       <section
         id="contributors"
-        className="mx-auto mt-20 max-w-2xl scroll-mt-8 rounded-xl border border-border bg-surface p-6 sm:p-8"
+        className="mx-auto mt-20 max-w-2xl scroll-mt-20 rounded-xl border border-border bg-surface p-6 sm:p-8"
       >
         <HeartHandshake className="mb-3 text-accent" size={24} />
         <h2 className="text-xl font-semibold sm:text-2xl">
@@ -605,10 +746,32 @@ export function LandingView() {
       {/* Footer */}
       <footer className="mt-20 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 border-t border-border pt-8 text-center text-sm text-text-muted">
         <a
+          href={GITHUB_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1.5 underline underline-offset-4 hover:text-text"
+        >
+          <GithubMark size={14} /> Source on GitHub
+        </a>
+        <a
+          href={CHANGELOG_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="underline underline-offset-4 hover:text-text"
+        >
+          What&apos;s new in 1.0
+        </a>
+        <a
           href="#contributors"
           className="underline underline-offset-4 hover:text-text"
         >
           Call to contributors
+        </a>
+        <a
+          href={`mailto:${CONTACT_EMAIL}?subject=Carbon%20support`}
+          className="inline-flex items-center gap-1.5 underline underline-offset-4 hover:text-text"
+        >
+          <Mail size={14} /> Contact
         </a>
         <button
           onClick={() => navigate("/privacy")}
@@ -617,6 +780,7 @@ export function LandingView() {
           Privacy Policy
         </button>
       </footer>
+      </div>
     </div>
   );
 }

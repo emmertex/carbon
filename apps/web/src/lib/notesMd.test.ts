@@ -2,7 +2,21 @@ import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate, createItem, getItem, type Db, type SqlParams } from '@carbon/core';
-import { parseNoteMd, noteToMd, importNoteMd, noteSlug } from './notesMd';
+
+// notesMd reads per-note settings through noteMeta, which pulls in the mutate →
+// store → config chain; that chain touches localStorage while the module loads.
+// Same in-memory stub + deferred import as where.test.ts.
+const mem = new Map<string, string>();
+(globalThis as unknown as { localStorage: Storage }).localStorage = {
+  getItem: (k: string) => mem.get(k) ?? null,
+  setItem: (k: string, v: string) => void mem.set(k, v),
+  removeItem: (k: string) => void mem.delete(k),
+  clear: () => mem.clear(),
+  key: () => null,
+  length: 0,
+} as Storage;
+
+const { parseNoteMd, noteToMd, importNoteMd, noteSlug } = await import('./notesMd');
 
 // Minimal in-memory Db backed by node:sqlite (mirrors packages/core repo.test.ts).
 function openMemoryDb(): Db {
@@ -119,6 +133,60 @@ describe('noteToMd() round-trips through parseNoteMd()', () => {
   });
 });
 
+describe('note mode + recipe settings in frontmatter', () => {
+  test('a recipe note round-trips mode, servings and units', () => {
+    const md = noteToMd({
+      title: 'Pancakes',
+      body: '## Ingredients\n\nServes: 4\n',
+      meta: { noteMode: 'recipe', recipe: { servings: 4, units: 'mlCups' } },
+    });
+    const { frontmatter, body } = parseNoteMd(md);
+    assert.equal(frontmatter.mode, 'recipe');
+    assert.equal(frontmatter.servings, 4);
+    assert.equal(frontmatter.units, 'mlCups');
+    assert.equal(body, '## Ingredients\n\nServes: 4\n');
+  });
+
+  test('a fractional servings count survives the round trip', () => {
+    const md = noteToMd({ title: 'Half', body: '', meta: { recipe: { servings: 1.5 } } });
+    assert.equal(parseNoteMd(md).frontmatter.servings, 1.5);
+  });
+
+  test('a plain note emits none of the three keys', () => {
+    assert.equal(noteToMd({ title: 'Plain', body: 'hi' }), '---\ntitle: Plain\n---\nhi');
+  });
+
+  test('metadata with no note-mode or recipe keys emits none of them either', () => {
+    const md = noteToMd({ title: 'Plain', body: 'hi', meta: { recipe: {} } });
+    assert.equal(md, '---\ntitle: Plain\n---\nhi');
+  });
+
+  test('only the keys that are set are emitted', () => {
+    const md = noteToMd({ title: 'Stew', body: '', meta: { noteMode: 'recipe', recipe: {} } });
+    assert.equal(md, '---\ntitle: Stew\nmode: recipe\n---\n');
+  });
+
+  test('garbage mode / servings / units values are ignored, not passed through', () => {
+    const { frontmatter } = parseNoteMd(
+      '---\ntitle: X\nmode: banana\nservings: -3\nunits: nope\n---\nbody',
+    );
+    assert.equal(frontmatter.title, 'X');
+    assert.equal(frontmatter.mode, undefined);
+    assert.equal(frontmatter.servings, undefined);
+    assert.equal(frontmatter.units, undefined);
+  });
+
+  test('a non-numeric or zero servings is ignored', () => {
+    assert.equal(parseNoteMd('---\nservings: abc\n---\nb').frontmatter.servings, undefined);
+    assert.equal(parseNoteMd('---\nservings: 0\n---\nb').frontmatter.servings, undefined);
+    assert.equal(parseNoteMd('---\nservings: \n---\nb').frontmatter.servings, undefined);
+  });
+
+  test('mode: notes is a legal value and is kept', () => {
+    assert.equal(parseNoteMd('---\nmode: notes\n---\nb').frontmatter.mode, 'notes');
+  });
+});
+
 describe('importNoteMd()', () => {
   test('creates a type=note item with title + body', () => {
     const db = openMemoryDb();
@@ -171,6 +239,35 @@ describe('importNoteMd()', () => {
       parentId: project.id,
     });
     assert.equal(getItem(db, note.id)?.parent_id, project.id);
+  });
+
+  test('stores the note mode + recipe settings as item metadata', () => {
+    const db = openMemoryDb();
+    const md = '---\ntitle: Cake\nmode: recipe\nservings: 8\nunits: mlAll\n---\nbody';
+    const note = importNoteMd(db, DEV, md, {});
+    assert.deepEqual(JSON.parse(getItem(db, note.id)!.metadata!), {
+      noteMode: 'recipe',
+      recipe: { servings: 8, units: 'mlAll' },
+    });
+  });
+
+  test('an ordinary note still imports with metadata null', () => {
+    const db = openMemoryDb();
+    const note = importNoteMd(db, DEV, '---\ntitle: Ideas\n---\nbrainstorm', {});
+    assert.equal(getItem(db, note.id)!.metadata, null);
+  });
+
+  test('garbage mode/servings/units leave metadata null rather than storing junk', () => {
+    const db = openMemoryDb();
+    const md = '---\ntitle: X\nmode: banana\nservings: abc\nunits: nope\n---\nbody';
+    const note = importNoteMd(db, DEV, md, {});
+    assert.equal(getItem(db, note.id)!.metadata, null);
+  });
+
+  test('a mode with no recipe settings omits the recipe object entirely', () => {
+    const db = openMemoryDb();
+    const note = importNoteMd(db, DEV, '---\ntitle: X\nmode: recipe\n---\nbody', {});
+    assert.deepEqual(JSON.parse(getItem(db, note.id)!.metadata!), { noteMode: 'recipe' });
   });
 });
 

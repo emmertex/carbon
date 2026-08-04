@@ -40,21 +40,26 @@ export function NoteToolbar({
     editor,
     selector: (ctx) => {
       const e = ctx.editor;
-      if (!e) return null;
-      return {
-        bold: e.isActive('bold'),
-        italic: e.isActive('italic'),
-        underline: e.isActive('underline'),
-        strike: e.isActive('strike'),
-        code: e.isActive('code'),
-        h1: e.isActive('heading', { level: 1 }),
-        h2: e.isActive('heading', { level: 2 }),
-        h3: e.isActive('heading', { level: 3 }),
-        bulletList: e.isActive('bulletList'),
-        orderedList: e.isActive('orderedList'),
-        blockquote: e.isActive('blockquote'),
-        link: e.isActive('link'),
-      };
+      if (!e || e.isDestroyed) return null;
+      try {
+        return {
+          bold: e.isActive('bold'),
+          italic: e.isActive('italic'),
+          underline: e.isActive('underline'),
+          strike: e.isActive('strike'),
+          code: e.isActive('code'),
+          h1: e.isActive('heading', { level: 1 }),
+          h2: e.isActive('heading', { level: 2 }),
+          h3: e.isActive('heading', { level: 3 }),
+          bulletList: e.isActive('bulletList'),
+          orderedList: e.isActive('orderedList'),
+          blockquote: e.isActive('blockquote'),
+          link: e.isActive('link'),
+        };
+      } catch {
+        // Destroyed mid-selector (TipTap unmount race) — hide the toolbar for this tick.
+        return null;
+      }
     },
   });
 

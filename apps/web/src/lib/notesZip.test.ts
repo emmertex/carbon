@@ -3,14 +3,23 @@ import { test, describe } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { unzipSync, strFromU8 } from 'fflate';
 import { migrate, createItem, type Db, type SqlParams } from '@carbon/core';
-import {
-  buildNotesFiles,
-  buildNotesZip,
-  collectAssetHashes,
-  listNotes,
-  notesManifest,
-  type NotesManifest,
-} from './notesZip';
+import type { NotesManifest } from './notesZip';
+
+// notesZip reads per-note settings through noteMeta, which pulls in the mutate →
+// store → config chain; that chain touches localStorage while the module loads.
+// Same in-memory stub + deferred import as where.test.ts.
+const mem = new Map<string, string>();
+(globalThis as unknown as { localStorage: Storage }).localStorage = {
+  getItem: (k: string) => mem.get(k) ?? null,
+  setItem: (k: string, v: string) => void mem.set(k, v),
+  removeItem: (k: string) => void mem.delete(k),
+  clear: () => mem.clear(),
+  key: () => null,
+  length: 0,
+} as Storage;
+
+const { buildNotesFiles, buildNotesZip, collectAssetHashes, listNotes, notesManifest } =
+  await import('./notesZip');
 
 // Minimal in-memory Db backed by node:sqlite (mirrors notesMd.test.ts).
 function openMemoryDb(): Db {

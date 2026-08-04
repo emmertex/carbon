@@ -6,6 +6,27 @@ import {
   type Complexity,
   type FeaturePrefs,
 } from './features';
+import type { CupConvention } from './recipe';
+
+/**
+ * How eagerly this device pulls attachment / note-image blobs off the sync server.
+ * The three modes differ only in what is fetched *ahead of time*; anything not
+ * prefetched still downloads the first time something displays it.
+ *
+ * 'on-demand'  — prefetch nothing, not even thumbnails. The leanest option: a note
+ *   list downloads a thumbnail only as its row scrolls into view.
+ * 'thumbnails' — prefetch row thumbnails (kilobytes each), leave full-size images
+ *   and attachments to first use. The default: note lists render complete and
+ *   offline without pulling a single full-size photo.
+ * 'all'        — prefetch every referenced blob on each sync, so notes and
+ *   attachments open instantly offline. No pruning; the cache grows with the
+ *   workspace.
+ *
+ * `blobCacheMb` prunes the cache by least-recently-used in the first two modes.
+ * Thumbnails are never evicted in any mode — they're what makes a note list render
+ * without touching a full-size image, and they cost almost nothing to keep.
+ */
+export type BlobFetchMode = 'on-demand' | 'thumbnails' | 'all';
 
 export interface ServerConfig {
   url: string;
@@ -15,7 +36,16 @@ export interface ServerConfig {
   /** Opaque session token from /api/login. This, not the password, is what's stored. */
   token: string;
   autoSync: boolean;
+  /** Blob caching strategy for this device (see BlobFetchMode). Deliberately
+   *  device-local, not a synced UI pref: a phone and a desktop want different
+   *  answers. */
+  blobFetch: BlobFetchMode;
+  /** LRU cache budget in MB, honoured in every mode except 'all'. 0 = never evict. */
+  blobCacheMb: number;
 }
+
+/** Default cache budget (MB) before least-recently-used blobs are dropped. */
+export const DEFAULT_BLOB_CACHE_MB = 250;
 
 const SERVER_KEY = 'carbon.server';
 
@@ -77,6 +107,8 @@ const DEFAULT_SERVER: ServerConfig = {
   password: '',
   token: '',
   autoSync: true,
+  blobFetch: 'thumbnails',
+  blobCacheMb: DEFAULT_BLOB_CACHE_MB,
 };
 
 export function getServerConfig(): ServerConfig {
@@ -132,6 +164,8 @@ export interface UiPrefs {
   welcomed: boolean;
   /** Per-feature desktop/mobile visibility; consulted only when complexity==='custom'. */
   features: FeaturePrefs;
+  /** Which measuring-cup standard the recipe view converts against. */
+  cupConvention: CupConvention;
 }
 
 const UI_KEY = 'carbon.ui';
@@ -156,6 +190,7 @@ const DEFAULT_UI: UiPrefs = {
   complexityChosen: false,
   welcomed: false,
   features: DEFAULT_FEATURE_PREFS,
+  cupConvention: 'au',
 };
 
 export function getUiPrefs(): UiPrefs {

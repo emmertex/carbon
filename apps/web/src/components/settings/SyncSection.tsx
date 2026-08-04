@@ -1,15 +1,20 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CloudOff, Cloud, RefreshCw, Loader2 } from 'lucide-react';
+import { blobRefIndex } from '@carbon/core';
 import { syncNow, signOut as doSignOut, resetLocalDataAndReload } from '@/lib/sync';
-import { type ServerConfig } from '@/lib/config';
+import { type BlobFetchMode, type ServerConfig } from '@/lib/config';
+import { blobCacheBytes, flushBlobCache, syncBlobCache } from '@/lib/blobs';
+import { getDb } from '@/lib/db';
 import { LINKS } from '@/lib/links';
 import { useStore } from '@/lib/store';
 import { avatarInitial } from '../Avatar';
+import { SegmentedControl } from '../ui/SegmentedControl';
 import { SettingsSection } from './SettingsSection';
 import {
   SettingsToggle,
   DocLink,
+  inputCls,
   btnPrimary,
   btnSecondary,
   btnDanger,
@@ -81,6 +86,159 @@ function SyncStatusPanel() {
   );
 }
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const mb = n / 1024 / 1024;
+  return mb < 1 ? `${Math.round(n / 1024)} KB` : `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
+/**
+ * How much of the workspace's binary content this device pulls down ahead of time.
+ *
+ * Notes with images and file attachments dwarf the item graph, so the three modes
+ * trade data and disk against how much is ready before you ask for it. The default
+ * (thumbnails) is the useful middle: note lists render complete and offline for
+ * kilobytes, while the full-size photos behind them wait until opened. Whatever
+ * isn't prefetched still downloads on first display — the choice is about timing,
+ * not availability.
+ */
+function BlobCacheControls({
+  cfg,
+  update,
+}: {
+  cfg: ServerConfig;
+  update: (patch: Partial<ServerConfig>) => void;
+}) {
+  const [used, setUsed] = useState<number | null>(null);
+  const [busy, setBusy] = useState<null | 'flush' | 'download'>(null);
+  const [flushMsg, setFlushMsg] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    void blobCacheBytes().then(setUsed);
+  }, []);
+  useEffect(refresh, [refresh]);
+
+  async function flush() {
+    setBusy('flush');
+    setFlushMsg(null);
+    try {
+      // Holds back pending uploads always, and thumbnails outside On Load — see
+      // flushBlobCache. Say which, so a flush that frees nothing doesn't read as a
+      // dead button.
+      const r = await flushBlobCache(blobRefIndex(getDb()).thumbs);
+      if (r.freed > 0) {
+        setFlushMsg(`Freed ${formatBytes(r.freed)} from ${r.dropped} file${r.dropped === 1 ? '' : 's'}.`);
+      } else if (r.keptPending > 0) {
+        setFlushMsg(
+          `Nothing to clear — ${r.keptPending} file${r.keptPending === 1 ? " hasn't" : "s haven't"} uploaded to the server yet, so this device holds the only copy.`,
+        );
+      } else if (r.keptThumbs > 0) {
+        setFlushMsg(
+          'Nothing to clear — only thumbnails are cached, and they stay so note lists keep their pictures. Switch to On Load to drop those too.',
+        );
+      } else {
+        setFlushMsg('Cache is already empty.');
+      }
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Run the prefetch pass this mode would normally do on the next sync. */
+  async function prefetchNow() {
+    setBusy('download');
+    try {
+      await syncBlobCache(getDb());
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border border-border p-3">
+      <p className="text-sm font-medium text-text">Images &amp; attachments</p>
+      {/* The segment labels are deliberately one or two words, so what each one
+          actually does is spelled out here rather than in a tooltip nobody on a
+          touch screen can reach. */}
+      <p className="mt-0.5 text-sm text-text-muted">
+        Note images and attachments can be large. Choose what this device downloads ahead of
+        time: <strong className="font-medium text-text">On Load</strong> nothing,{' '}
+        <strong className="font-medium text-text">Thumbnails</strong> just the small previews
+        note lists show, <strong className="font-medium text-text">All</strong> every image and
+        attachment. Whatever isn&apos;t downloaded in advance still arrives the first time you
+        open it.
+      </p>
+      <SegmentedControl<BlobFetchMode>
+        className="mt-2"
+        value={cfg.blobFetch}
+        onChange={(v) => update({ blobFetch: v })}
+        options={[
+          {
+            value: 'on-demand',
+            label: 'On Load',
+            title: 'Download nothing in advance — images and thumbnails arrive as you view them',
+          },
+          {
+            value: 'thumbnails',
+            label: 'Thumbnails',
+            title:
+              'Always download note thumbnails so lists render offline; full-size images arrive when opened',
+          },
+          {
+            value: 'all',
+            label: 'All',
+            title: 'Keep a full offline copy of every image and attachment',
+          },
+        ]}
+      />
+
+      {cfg.blobFetch !== 'all' && (
+        <label className="mt-3 flex flex-wrap items-center gap-2 text-sm text-text-muted">
+          Keep up to
+          <input
+            type="number"
+            min={0}
+            step={50}
+            className={`${inputCls} w-24`}
+            value={cfg.blobCacheMb}
+            onChange={(e) =>
+              update({ blobCacheMb: Math.max(0, Math.round(Number(e.target.value) || 0)) })
+            }
+          />
+          MB — least-recently-opened files are dropped first
+          {cfg.blobCacheMb === 0 && (
+            <span className="text-xs text-text-faint">(0 = never drop anything)</span>
+          )}
+        </label>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <span className="text-sm text-text-muted">
+          Cached now: <span className="font-medium text-text">{used === null ? '…' : formatBytes(used)}</span>
+        </span>
+        <button onClick={() => void flush()} disabled={busy !== null} className={btnSecondary}>
+          {busy === 'flush' && <Loader2 className="animate-spin" size={16} />}
+          Clear cached files
+        </button>
+        {cfg.blobFetch !== 'on-demand' && (
+          <button
+            onClick={() => void prefetchNow()}
+            disabled={busy !== null}
+            className={btnSecondary}
+          >
+            {busy === 'download' && <Loader2 className="animate-spin" size={16} />}
+            Download now
+          </button>
+        )}
+      </div>
+
+      {flushMsg && <p className="mt-1.5 text-xs text-text-muted">{flushMsg}</p>}
+    </div>
+  );
+}
+
 /**
  * Sync server card. Signing in lives in the dedicated full-screen flow (the
  * "Login" button opens it) so credentials are never typed here — a background
@@ -99,8 +257,9 @@ export function SyncSection({
   const baseDomain = useStore((s) => s.baseDomain);
   const signedIn = !!currentUser && !currentUser.open;
 
-  // Inline confirm state for the two destructive actions, so neither fires on a
-  // single tap. `resetting` also drives a spinner while the wipe + reload runs.
+  // Inline confirm state for destructive actions, so none fire on a single tap.
+  // `confirmReset` covers both signed-in "Reset local data" and unsigned-in
+  // "Delete local data". `resetting` drives a spinner while the wipe + reload runs.
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -151,10 +310,30 @@ export function SyncSection({
           />
         )}
 
+        {/* Blob (image/attachment) caching policy. Gated on a configured server
+            rather than on being signed in: local-only devices already hold every
+            byte they have, so there's nothing to fetch or re-fetch. */}
+        {!!cfg.url && <BlobCacheControls cfg={cfg} update={update} />}
+
         <div className="flex flex-wrap items-center gap-3 pt-1">
           {!signedIn && (
             <button onClick={openLogin} className={btnPrimary}>
               Login
+            </button>
+          )}
+          {/* Hosted signup — same multi-tenant path as landing / SignInGate. */}
+          {!signedIn && baseDomain && (
+            <Link to="/signup" className={btnSecondary}>
+              Create Account
+            </Link>
+          )}
+          {!signedIn && !confirmReset && (
+            <button
+              onClick={() => setConfirmReset(true)}
+              disabled={resetting}
+              className={btnDanger}
+            >
+              Delete local data
             </button>
           )}
           {signedIn && (
@@ -168,8 +347,9 @@ export function SyncSection({
             </button>
           )}
           {/* Workspace deletion is a hosted (multi-tenant) concept and runs its own
-              email-OTC flow, so it's reachable here regardless of sign-in state. */}
-          {baseDomain && (
+              email-OTC flow. Only offered while signed in — unsigned-in users get
+              Create Account / Delete local data above instead. */}
+          {signedIn && baseDomain && (
             <Link to="/delete-account" className={btnDanger}>
               Delete account
             </Link>
@@ -194,6 +374,33 @@ export function SyncSection({
               <button
                 onClick={() => setConfirmSignOut(false)}
                 className="px-2 py-2 text-sm text-text-muted hover:text-text"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Unsigned-in wipe: erase local data with no server to re-download from. */}
+        {!signedIn && confirmReset && (
+          <div className="rounded-lg border border-border bg-surface-2 p-3 text-sm">
+            <p className="font-medium text-text">Delete all local data?</p>
+            <p className="mt-0.5 text-text-muted">
+              Erases this device&apos;s local database and attachments. This cannot be undone.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => void resetLocal()}
+                disabled={resetting}
+                className={btnDangerSolid}
+              >
+                {resetting && <Loader2 className="animate-spin" size={16} />}
+                Delete local data
+              </button>
+              <button
+                onClick={() => setConfirmReset(false)}
+                disabled={resetting}
+                className="px-2 py-2 text-sm text-text-muted hover:text-text disabled:opacity-50"
               >
                 Cancel
               </button>

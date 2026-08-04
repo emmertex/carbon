@@ -27,7 +27,6 @@ import {
   isBlocked,
   type Item,
 } from '@carbon/core';
-import { Plus } from 'lucide-react';
 import { useQuery } from '@/hooks/useQuery';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { isCompactViewport } from '@/hooks/useCompact';
@@ -41,6 +40,7 @@ import { updateFromQuickAdd } from '@/lib/quickadd';
 import type { Filters } from '@/lib/views';
 import { TaskRow } from './TaskRow';
 import { SwipeableRow } from './SwipeableRow';
+import { AddTaskButtons } from './AddTaskButtons';
 import { useTokenSuggest, SuggestionMenu } from './TokenSuggest';
 import {
   flattenTree,
@@ -174,43 +174,11 @@ function SortableTreeRow({
       </SwipeableRow>
       {selected && !edit.editing && !kbMode && !isDragging && (
         <AddTaskButtons
-          item={item}
           depth={depth}
-          onAddSibling={onAddSibling}
-          onAddSubtask={onAddSubtask}
+          onAddSibling={() => onAddSibling(item.id)}
+          onAddSubtask={() => onAddSubtask(item.id)}
         />
       )}
-    </div>
-  );
-}
-
-/** Explicit add affordances below the selected task — replaces the old free-text
- *  box. Each creates the task and drops straight into the outliner's inline edit. */
-function AddTaskButtons({
-  item,
-  depth,
-  onAddSibling,
-  onAddSubtask,
-}: {
-  item: Item;
-  depth: number;
-  onAddSibling: (afterId: string) => void;
-  onAddSubtask: (parentId: string) => void;
-}) {
-  const btn =
-    'flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-muted hover:bg-surface-2 hover:text-text';
-  return (
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{ paddingLeft: `${depth * 0.75 + 2.5}rem` }}
-      className="flex gap-2 py-1 pr-3"
-    >
-      <button onClick={() => onAddSibling(item.id)} className={btn}>
-        <Plus size={13} /> Sibling
-      </button>
-      <button onClick={() => onAddSubtask(item.id)} className={btn}>
-        <Plus size={13} /> Subtask
-      </button>
     </div>
   );
 }
@@ -453,10 +421,18 @@ export function TaskTree({
     const id = editingId!;
     if (e.key === 'Enter') {
       e.preventDefault();
+      // Empty pending row: discard instead of committing "Untitled" and spawning another.
+      if (id === pendingNewId && editText.trim() === '') {
+        discardIfPending(id);
+        return;
+      }
       const created = mutate((db, dev) => {
         updateFromQuickAdd(db, dev, id, editText.trim());
         return createSiblingAfter(db, dev, id, getCurrentUserId());
       });
+      // Treat Enter-created siblings like beginNew so Escape can discard blanks.
+      setPendingNewId(created.id);
+      setReturnToId(id);
       setEditingId(created.id);
       setFocusedId(created.id);
       setEditText('');
@@ -470,6 +446,7 @@ export function TaskTree({
       const idx = idxOf(id);
       const prev = idx > 0 ? visible[idx - 1] : undefined;
       mutate((db, dev) => deleteItem(db, dev, id));
+      setPendingNewId((cur) => (cur === id ? null : cur));
       setEditingId(null);
       setFocusedId(prev?.id ?? null);
       containerRef.current?.focus();

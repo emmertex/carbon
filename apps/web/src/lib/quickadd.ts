@@ -87,7 +87,8 @@ export interface QuickAddOpts {
   dueToday?: boolean;
   flagged?: boolean;
   ownerId?: string | null;
-  /** 'note' creates a note item instead of a task (default 'task'). */
+  /** 'note' creates a note item instead of a task. Omitted = let the destination
+   *  decide (notes inside a notes project, tasks everywhere else). */
   type?: 'task' | 'note';
 }
 
@@ -95,7 +96,7 @@ export interface QuickAddOpts {
 export function createFromQuickAdd(db: Db, deviceId: string, raw: string, opts: QuickAddOpts) {
   const parsed = parseQuickAdd(raw, listUsers(db));
   const item = createItem(db, deviceId, {
-    type: opts.type ?? 'task',
+    type: opts.type,
     title: parsed.title || raw.trim(),
     parentId: opts.parentId ?? null,
     ownerId: opts.ownerId ?? null,

@@ -1,14 +1,24 @@
 import { createItem, getItem, type Db } from '@carbon/core';
+import { readNoteMeta, type NoteMeta } from './noteMeta';
+import type { NoteMode, UnitMode } from './recipe';
 
 // Single-note Markdown import/export with YAML frontmatter. Frontmatter is a tiny,
 // dependency-free subset (flat `key: value` pairs, optionally quoted) — enough for
-// the two fields the plan defines: `title` and an optional `parent`. Anything more
-// exotic is ignored on import; export only ever emits these two keys.
+// `title`, an optional `parent`, and the note-mode/recipe settings that otherwise
+// live in `items.metadata` (a recipe exported as .md must come back as a recipe,
+// not as a plain note that has forgotten its servings). Anything more exotic is
+// ignored on import; export only ever emits these keys.
 
 export interface NoteFrontmatter {
   title?: string;
   /** Optional parent item id the note should be created under. */
   parent?: string;
+  /** Note mode; absent means the note has no explicit mode (i.e. plain notes). */
+  mode?: NoteMode;
+  /** Recipe target servings — the scaling factor's numerator. */
+  servings?: number;
+  /** Recipe unit-conversion mode. */
+  units?: UnitMode;
 }
 
 export interface ParsedNoteMd {
@@ -46,6 +56,26 @@ function yamlScalar(v: string): string {
   return v;
 }
 
+// A `.md` file is hand-editable, so the three metadata keys are validated against
+// the recipe engine's own unions on the way in AND on the way out — an unrecognised
+// value is dropped, never stored, so a typo can't produce a note the app can't
+// render (and can't be written back out into the next export either).
+
+function asNoteMode(v: unknown): NoteMode | undefined {
+  return v === 'notes' || v === 'recipe' ? v : undefined;
+}
+
+function asUnitMode(v: unknown): UnitMode | undefined {
+  return v === 'original' || v === 'mlCups' || v === 'mlAll' ? v : undefined;
+}
+
+/** Servings must be a finite positive count; `0`, `-3`, `abc`, `Infinity` and a
+ *  missing value all drop out. Accepts the frontmatter string or a stored number. */
+function asServings(v: unknown): number | undefined {
+  const n = typeof v === 'number' ? v : Number(String(v ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 /** Split a `.md` file into `{ frontmatter, body }`. A file with no frontmatter
  *  block yields empty frontmatter and the whole text as the body. */
 export function parseNoteMd(text: string): ParsedNoteMd {
@@ -62,16 +92,53 @@ export function parseNoteMd(text: string): ParsedNoteMd {
     const value = unquote(line.slice(idx + 1));
     if (key === 'title') frontmatter.title = value;
     else if (key === 'parent') frontmatter.parent = value;
+    else if (key === 'mode') {
+      const mode = asNoteMode(value);
+      if (mode) frontmatter.mode = mode;
+    } else if (key === 'servings') {
+      const servings = asServings(value);
+      if (servings !== undefined) frontmatter.servings = servings;
+    } else if (key === 'units') {
+      const units = asUnitMode(value);
+      if (units) frontmatter.units = units;
+    }
   }
   return { frontmatter, body: normalized.slice(m[0].length) };
 }
 
-/** Serialize a note to a `.md` string with `title` (+ optional `parent`) frontmatter. */
-export function noteToMd(opts: { title: string; parent?: string | null; body: string }): string {
+/** Serialize a note to a `.md` string with `title` (+ optional `parent`) frontmatter,
+ *  plus `mode`/`servings`/`units` for whichever of those the item's `meta` carries —
+ *  a plain note still emits the original two keys and nothing else. */
+export function noteToMd(opts: {
+  title: string;
+  parent?: string | null;
+  body: string;
+  /** The item's decoded metadata, from `readNoteMeta`. */
+  meta?: NoteMeta | null;
+}): string {
   const lines = ['---', `title: ${yamlScalar(opts.title ?? '')}`];
   if (opts.parent) lines.push(`parent: ${yamlScalar(opts.parent)}`);
+  const mode = asNoteMode(opts.meta?.noteMode);
+  if (mode) lines.push(`mode: ${mode}`);
+  const servings = asServings(opts.meta?.recipe?.servings);
+  if (servings !== undefined) lines.push(`servings: ${servings}`);
+  const units = asUnitMode(opts.meta?.recipe?.units);
+  if (units) lines.push(`units: ${units}`);
   lines.push('---', '');
   return lines.join('\n') + (opts.body ?? '');
+}
+
+/** The metadata JSON a note's frontmatter implies, or null when it carries none of
+ *  the three keys — an ordinary note must import with `metadata: null` rather than
+ *  an empty object. Shape matches what `readNoteMeta` reads back. */
+function frontmatterMeta(fm: NoteFrontmatter): Record<string, unknown> | null {
+  const recipe: Record<string, unknown> = {};
+  if (fm.servings !== undefined) recipe.servings = fm.servings;
+  if (fm.units) recipe.units = fm.units;
+  const meta: Record<string, unknown> = {};
+  if (fm.mode) meta.noteMode = fm.mode;
+  if (Object.keys(recipe).length) meta.recipe = recipe;
+  return Object.keys(meta).length ? meta : null;
 }
 
 /** Create a `type:'note'` item from parsed `.md`. The frontmatter `parent` is
@@ -92,6 +159,7 @@ export function importNoteMd(
     // context only when the file doesn't provide a valid parent.
     parentId: fmParent ?? opts.parentId ?? null,
     ownerId: opts.ownerId ?? null,
+    metadata: frontmatterMeta(frontmatter),
   });
 }
 
@@ -113,7 +181,12 @@ export function noteSlug(item: { id: string; title: string }): string {
 export function exportNoteMd(db: Db, id: string): void {
   const item = getItem(db, id);
   if (!item) return;
-  const md = noteToMd({ title: item.title, parent: item.parent_id, body: item.note ?? '' });
+  const md = noteToMd({
+    title: item.title,
+    parent: item.parent_id,
+    body: item.note ?? '',
+    meta: readNoteMeta(item),
+  });
   const slug = noteSlug(item);
   const blob = new Blob([md], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);

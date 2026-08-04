@@ -24,8 +24,8 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 - [tailwind-merge](https://github.com/dcastil/tailwind-merge) — conflict-free Tailwind class merging.
 - [clsx](https://github.com/lukeed/clsx) — conditional className builder.
 - [TipTap](https://tiptap.dev/) (`@tiptap/core`, `@tiptap/react`, `@tiptap/starter-kit`,
-  `@tiptap/extension-image`, `@tiptap/extension-placeholder`, `@tiptap/pm`, `tiptap-markdown`) —
-  rich note editor.
+  `@tiptap/extension-image`, `@tiptap/extension-placeholder`, `@tiptap/extension-table`,
+  `@tiptap/pm`, `tiptap-markdown`) — rich note editor.
 - [react-markdown](https://github.com/remarkjs/react-markdown) — Markdown rendering.
 - [remark-gfm](https://github.com/remarkjs/remark-gfm) — GitHub-flavored Markdown support.
 - [fflate](https://github.com/101arrowz/fflate) — zip export of notes.

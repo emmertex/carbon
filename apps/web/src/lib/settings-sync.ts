@@ -104,9 +104,9 @@ function applyViews(payload: unknown): void {
       localStorage.setItem(PERSPECTIVES_KEY, JSON.stringify(p.perspectives));
     }
   });
-  // View components re-read prefs/perspectives on the next render driven by the
-  // db revision; bump so the sidebar perspective list and open view refresh.
-  useStore.getState().bump();
+  // View components re-read prefs/perspectives on the next settings revision —
+  // do NOT bump item dbRevision (that wipes queryRoots and freezes the sidebar).
+  useStore.getState().bumpSettings();
 }
 
 // ----- push (debounced) -----------------------------------------------------

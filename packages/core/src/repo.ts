@@ -4,6 +4,7 @@ import type {
   Item,
   ItemPatch,
   ItemType,
+  NoteThumb,
   OrderMode,
   ItemDep,
   Tag,
@@ -83,7 +84,7 @@ export function listUsers(db: Db): User[] {
 }
 
 export function getUser(db: Db, id: string): User | undefined {
-  const r = db.get<UserRow>('SELECT * FROM users WHERE id = ?', [id]);
+  const r = db.get<UserRow>('SELECT * FROM users WHERE id = ? AND deleted = 0', [id]);
   return r ? rowToUser(r) : undefined;
 }
 
@@ -239,6 +240,8 @@ interface ItemRow extends Row {
   recurrence: string | null;
   geo: string | null;
   color: string | null;
+  notes_project: number | null;
+  thumb: string | null;
   folder_id: string | null;
   sort_order: number;
   order_mode: string | null;
@@ -270,6 +273,8 @@ function rowToItem(r: ItemRow): Item {
     recurrence: r.recurrence,
     geo: r.geo,
     color: r.color,
+    notes_project: !!r.notes_project,
+    thumb: r.thumb ?? null,
     folder_id: r.folder_id,
     sort_order: r.sort_order,
     order_mode: (r.order_mode as OrderMode) || 'parallel',
@@ -361,6 +366,118 @@ export function getProjects(db: Db): Item[] {
     .map(rowToItem);
 }
 
+// ----- notes containers -----------------------------------------------------
+
+/**
+ * The project a would-be child of `parentId` belongs to: `parentId` itself when
+ * it is a project, else its nearest project ancestor. Undefined at the Inbox
+ * (no project in the chain).
+ */
+function containingProject(db: Db, parentId: string | null): Item | undefined {
+  if (!parentId) return undefined;
+  const parent = getItem(db, parentId);
+  if (!parent) return undefined;
+  return parent.type === 'project' ? parent : projectAncestor(db, parentId);
+}
+
+/** True when new children of `parentId` land inside a notes container. */
+export function inNotesProject(db: Db, parentId: string | null): boolean {
+  return !!containingProject(db, parentId)?.notes_project;
+}
+
+/**
+ * The type a newly-created child of `parentId` should get: 'note' inside a notes
+ * container, 'task' everywhere else. The single place the "new items default to
+ * notes" rule lives, so every add surface (quick-add, outliner, sibling/subtask
+ * buttons) agrees.
+ */
+export function defaultChildType(db: Db, parentId: string | null): 'task' | 'note' {
+  return inNotesProject(db, parentId) ? 'note' : 'task';
+}
+
+// ----- note thumbnails ------------------------------------------------------
+
+/** Decode an item's `thumb` column, or null when unset/corrupt. */
+export function parseThumb(item: Pick<Item, 'thumb'> | undefined | null): NoteThumb | null {
+  if (!item?.thumb) return null;
+  try {
+    const t = JSON.parse(item.thumb) as NoteThumb;
+    return t && typeof t.hash === 'string' && typeof t.src === 'string' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Matches `/api/blobs/{64-hex}` references as they appear in note bodies —
+ *  markdown `![alt](/api/blobs/{hash})` or a bare reference. Case-insensitive:
+ *  hashes are minted lowercase, but a hand-edited body could carry uppercase. */
+const BLOB_REF = /\/api\/blobs\/([0-9a-fA-F]{64})/g;
+
+/** All distinct blob hashes referenced by a note body, in document order. */
+export function collectBlobRefs(body: string | null | undefined): string[] {
+  if (!body) return [];
+  const out = new Set<string>();
+  for (const m of body.matchAll(BLOB_REF)) out.add(m[1]!.toLowerCase());
+  return [...out];
+}
+
+/** The hash of the first image a note body references, or null. Drives which
+ *  image a row's thumbnail is rendered from. */
+export function firstBlobRef(body: string | null | undefined): string | null {
+  return collectBlobRefs(body)[0] ?? null;
+}
+
+/**
+ * Items whose `thumb` is out of date relative to the note body:
+ *
+ *   - body has a first image but `thumb` is missing or still describes a previous one
+ *   - body has no image but `thumb` is still set (orphan — needs clearing)
+ *
+ * The SQL prefilter keeps this cheap enough to run after every sync: only rows that
+ * embed a blob or already carry a thumbnail are materialised and re-checked in JS.
+ */
+export function itemsNeedingThumb(db: Db): Item[] {
+  return db
+    .all<ItemRow>(
+      `${SELECT} WHERE deleted = 0 AND (note LIKE '%/api/blobs/%' OR thumb IS NOT NULL)`,
+    )
+    .map(rowToItem)
+    .filter((it) => {
+      const src = firstBlobRef(it.note);
+      const thumb = parseThumb(it);
+      if (!src) return !!thumb; // orphan thumbnail — clear on backfill
+      return thumb?.src !== src;
+    });
+}
+
+/**
+ * Every blob hash the workspace references, split by how eagerly it should be
+ * cached. `thumbs` are tiny and drive list rendering, so they are always synced
+ * and never evicted; `full` (note images + attachments) is what the fetch policy
+ * and the LRU cache budget govern.
+ */
+export function blobRefIndex(db: Db): { thumbs: Set<string>; full: Set<string> } {
+  const thumbs = new Set<string>();
+  const full = new Set<string>();
+  const rows = db.all<{ note: string | null; thumb: string | null }>(
+    'SELECT note, thumb FROM items WHERE deleted = 0 AND (note IS NOT NULL OR thumb IS NOT NULL)',
+  );
+  for (const r of rows) {
+    for (const h of collectBlobRefs(r.note)) full.add(h);
+    const t = parseThumb(r);
+    if (t) thumbs.add(t.hash);
+  }
+  for (const a of db.all<{ hash: string }>(
+    'SELECT hash FROM attachments WHERE deleted = 0',
+  )) {
+    if (a.hash) full.add(a.hash.toLowerCase());
+  }
+  // A hash that is both a thumbnail and a full asset stays a thumbnail (the
+  // stronger retention wins).
+  for (const h of thumbs) full.delete(h);
+  return { thumbs, full };
+}
+
 /** Sidebar folders (visual-only grouping). Mirrors getProjects. */
 export function getFolders(db: Db): Item[] {
   return db
@@ -393,6 +510,8 @@ export interface CreateItemInput {
   deferDate?: string | null;
   dueDate?: string | null;
   color?: string | null;
+  /** Projects only: create this container as a notes container (see Item.notes_project). */
+  notesProject?: boolean;
   folderId?: string | null;
   sortOrder?: number;
   orderMode?: OrderMode;
@@ -417,10 +536,15 @@ export function encodeMetadata(
 export function createItem(db: Db, deviceId: string, input: CreateItemInput): Item {
   const now = new Date().toISOString();
   const id = uuidv4();
+  // An unspecified type follows the destination container: inside a notes project
+  // new items are notes, everywhere else they're tasks. Doing it here (rather than
+  // at each add surface) means quick-add, the outliner, and the sibling/subtask
+  // buttons all agree without each having to ask.
+  const type = input.type ?? defaultChildType(db, input.parentId ?? null);
   const item: Item = {
     id,
     parent_id: input.parentId ?? null,
-    type: input.type ?? 'task',
+    type,
     owner_id: input.ownerId ?? null,
     title: input.title.trim(),
     note: input.note ?? null,
@@ -433,11 +557,13 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
     estimate_minutes: null,
     completed_at: null,
     // Projects default to a 30-day review cadence; tasks aren't reviewed.
-    review_interval: input.type === 'project' ? 30 : null,
+    review_interval: type === 'project' ? 30 : null,
     reviewed_at: null,
     recurrence: null,
     geo: null,
     color: input.color ?? null,
+    notes_project: type === 'project' ? (input.notesProject ?? false) : false,
+    thumb: null,
     folder_id: input.folderId ?? null,
     sort_order: input.sortOrder ?? nextSortOrder(db, input.parentId ?? null),
     order_mode: input.orderMode ?? 'parallel',
@@ -568,6 +694,16 @@ export function setCompleted(
       for (const tag of getItemTags(db, current.id)) {
         setItemTagLink(db, deviceId, spawned!.id, tag.id, false);
       }
+      // Direct shares and assignees are per-item (they don't inherit sideways onto a
+      // sibling spawn). Without copying them, completing a shared/assigned recurring
+      // task drops the next occurrence out of the collaborator's visible set — so only
+      // one side keeps the series. Parent-inherited shares still apply via parent_id.
+      for (const s of listSharesForItem(db, current.id)) {
+        shareItem(db, deviceId, spawned!.id, s.user_id, s.permission);
+      }
+      for (const a of listAssigneesForItem(db, current.id)) {
+        assignItem(db, deviceId, spawned!.id, a.user_id);
+      }
     }
   }
 
@@ -579,11 +715,31 @@ export function setCompleted(
 }
 
 export function deleteItem(db: Db, deviceId: string, id: string): void {
-  // Soft-delete the item and its descendants so nothing is orphaned.
-  const ids = collectDescendants(db, id);
-  for (const childId of ids) {
+  // Soft-delete the item and its descendants so nothing is orphaned. Anything
+  // already tombstoned is skipped: re-recording {deleted:true} would bump its
+  // tombstone clock, which is what `restorableIds` reads to tell "deleted as part
+  // of this cascade" from "deleted earlier, on purpose" — so restoring this item
+  // would resurrect a subtask the user had deleted separately.
+  for (const childId of liveIds(db, collectDescendants(db, id))) {
     recordOp(db, deviceId, childId, { deleted: true });
   }
+}
+
+/** The subset of `ids` that isn't tombstoned, batched to stay under SQLite's
+ *  bound-parameter ceiling (see SUBTREE_BATCH). */
+function liveIds(db: Db, ids: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < ids.length; i += SUBTREE_BATCH) {
+    const chunk = ids.slice(i, i + SUBTREE_BATCH);
+    const rows = db.all<{ id: string }>(
+      `SELECT id FROM items WHERE deleted = 0 AND id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    );
+    for (const r of rows) out.push(r.id);
+  }
+  // Preserve the caller's (breadth-first) order rather than SQLite's.
+  const keep = new Set(out);
+  return ids.filter((id) => keep.has(id));
 }
 
 /** Age gate shared by the Settings → Data purge UI and the server's "completed
@@ -660,6 +816,189 @@ export function purgeCompleted(
     deleteItem(db, deviceId, item.id);
   }
   return items.length;
+}
+
+// ----- trash / restore ------------------------------------------------------
+//
+// Deletes are tombstones, never row removals (that's what keeps them converging
+// across peers), so an accidental delete is always recoverable — the only thing
+// missing is a way to find it again once the undo snackbar is gone. These reads
+// reconstruct "what was deleted, and when" from the per-field CRDT clocks the
+// items table already carries, so there's no new column and nothing extra to sync.
+
+/** How far back Recently Deleted looks. Tombstones live forever (a peer that has
+ *  been offline longer still needs them), so this only bounds what the view
+ *  *offers*, and nothing is destroyed when an entry ages out of it. */
+export const TRASH_WINDOW_DAYS = 30;
+
+export interface DeletedEntry {
+  item: Item;
+  /** Epoch ms the tombstone was written (from the item's `deleted` field clock). */
+  deletedAt: number;
+}
+
+/** Epoch ms of the item's `deleted` tombstone. Falls back to `updated_at` for a
+ *  row whose clocks somehow lack the field, so a deleted item can never become
+ *  unrestorable just because its clock map is unexpected. */
+function deletedAtMs(clocksJson: string | null, updatedAt: string): number {
+  try {
+    const clocks = JSON.parse(clocksJson || '{}') as Record<string, { ts?: number }>;
+    const ts = clocks.deleted?.ts;
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  } catch {
+    /* fall through to updated_at */
+  }
+  return Date.parse(updatedAt) || 0;
+}
+
+/**
+ * The delete *events* of the last `windowDays`, newest first: tombstoned items
+ * whose parent is still live, so each entry restores as one self-contained subtree.
+ * A cascade (project, or task with sub-tasks) is therefore one entry, not one per
+ * descendant — which is what makes "I deleted a group of tasks by accident" a
+ * single click to undo.
+ *
+ * A tombstoned item under a tombstoned parent is deliberately not listed: it comes
+ * back with its parent (same cascade), or — if it was deleted separately, earlier —
+ * it surfaces as its own entry once the parent is restored. Either way the list only
+ * ever offers restores that end with the item visible again.
+ */
+export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): DeletedEntry[] {
+  const cutoffMs = Date.now() - windowDays * 86_400_000;
+  // Only the columns the filtering below needs, never `SELECT *`: the sidebar count
+  // re-runs this on every revision, and a purged workspace can hold thousands of
+  // tombstones — dragging their note bodies through that would be the whole cost.
+  // Full rows are materialised at the end, for the few surviving roots.
+  //
+  // `updated_at` is bumped by every op that wins a field, so it's always at or
+  // after the tombstone — a superset-safe SQL prefilter that keeps this off a full
+  // tombstone scan. The one exception is a straggler op older than the tombstone
+  // arriving late and rewinding `updated_at`; only a >`windowDays`-old straggler
+  // could hide an entry.
+  type Lite = { id: string; parent_id: string | null; title: string; clocks: string; updated_at: string };
+  const rows = db.all<Lite>(
+    `SELECT id, parent_id, title, clocks, updated_at FROM items
+     WHERE deleted = 1 AND updated_at >= ?`,
+    [new Date(cutoffMs).toISOString()],
+  );
+  const candidates = rows
+    .map((r) => ({ row: r, deletedAt: deletedAtMs(r.clocks, r.updated_at) }))
+    .filter((c) => c.deletedAt >= cutoffMs);
+  if (candidates.length === 0) return [];
+
+  // One batched lookup for the parents, instead of a getItem() per candidate.
+  const parentIds = [...new Set(candidates.map((c) => c.row.parent_id).filter((p): p is string => !!p))];
+  const deletedParents = new Set<string>();
+  const knownParents = new Set<string>();
+  for (let i = 0; i < parentIds.length; i += SUBTREE_BATCH) {
+    const chunk = parentIds.slice(i, i + SUBTREE_BATCH);
+    for (const p of db.all<{ id: string; deleted: number }>(
+      `SELECT id, deleted FROM items WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    )) {
+      knownParents.add(p.id);
+      if (p.deleted) deletedParents.add(p.id);
+    }
+  }
+
+  const roots = candidates.filter((c) => {
+    const pid = c.row.parent_id;
+    // A missing parent row (hard-deleted by federation, or never synced) can't
+    // hold the item hostage — `restoreItem` reattaches it at the top level.
+    return !pid || !knownParents.has(pid) || !deletedParents.has(pid);
+  });
+
+  // Abandoned drafts (an empty row the tree creates for inline entry, then deletes
+  // when the user types nothing) are tombstones too. There's nothing in one to get
+  // back, so listing them as "Untitled" would be pure noise — but an untitled
+  // *container* with children is real work and stays.
+  const blank = roots.filter((c) => !c.row.title.trim()).map((c) => c.row.id);
+  const hasChildren = new Set<string>();
+  for (let i = 0; i < blank.length; i += SUBTREE_BATCH) {
+    const chunk = blank.slice(i, i + SUBTREE_BATCH);
+    for (const k of db.all<{ parent_id: string }>(
+      `SELECT DISTINCT parent_id FROM items WHERE parent_id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    )) {
+      hasChildren.add(k.parent_id);
+    }
+  }
+
+  const listed = roots
+    .filter((c) => c.row.title.trim() !== '' || hasChildren.has(c.row.id))
+    .sort((a, b) => b.deletedAt - a.deletedAt);
+  if (listed.length === 0) return [];
+
+  // Now — and only now — pay for the full rows, in id batches.
+  const full = new Map<string, Item>();
+  const ids = listed.map((c) => c.row.id);
+  for (let i = 0; i < ids.length; i += SUBTREE_BATCH) {
+    const chunk = ids.slice(i, i + SUBTREE_BATCH);
+    for (const r of db.all<ItemRow>(
+      `${SELECT} WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    )) {
+      full.set(r.id, rowToItem(r));
+    }
+  }
+  return listed
+    .map((c) => ({ item: full.get(c.row.id)!, deletedAt: c.deletedAt }))
+    .filter((e) => !!e.item);
+}
+
+/**
+ * Everything a `restoreItem(id)` would bring back: the item plus the descendants
+ * tombstoned *with* it. "With it" is `deleted` clock ≥ the item's own — a cascade
+ * stamps the parent first, so anything deleted before it (a sub-task the user threw
+ * away last week) keeps its tombstone and stays in the trash on its own.
+ *
+ * Empty when `id` isn't tombstoned — restoring a live item is a no-op, not an error.
+ */
+export function restorableIds(db: Db, id: string): string[] {
+  const root = db.get<{ deleted: number; clocks: string; updated_at: string }>(
+    'SELECT deleted, clocks, updated_at FROM items WHERE id = ?',
+    [id],
+  );
+  if (!root || !root.deleted) return [];
+  const rootTs = deletedAtMs(root.clocks, root.updated_at);
+  const ids = collectDescendants(db, id);
+  const out: string[] = [];
+  for (let i = 0; i < ids.length; i += SUBTREE_BATCH) {
+    const chunk = ids.slice(i, i + SUBTREE_BATCH);
+    const rows = db.all<{ id: string; clocks: string; updated_at: string }>(
+      `SELECT id, clocks, updated_at FROM items
+       WHERE deleted = 1 AND id IN (${chunk.map(() => '?').join(',')})`,
+      chunk,
+    );
+    for (const r of rows) {
+      if (deletedAtMs(r.clocks, r.updated_at) >= rootTs) out.push(r.id);
+    }
+  }
+  const keep = new Set(out);
+  return ids.filter((i) => keep.has(i)); // breadth-first: parents before children
+}
+
+/**
+ * Undo a delete: clear the tombstone on the item and everything that went with it
+ * (see `restorableIds`). Returns how many items came back — 0 if it wasn't deleted.
+ *
+ * Plain forward ops, so a restore syncs, converges and undoes like any other edit.
+ * If the parent row is gone entirely the item is reattached at the top level (the
+ * Inbox) rather than restored into nowhere. An item whose parent is merely
+ * tombstoned is restored in place and becomes visible when that parent is restored
+ * — `deletedRoots` never offers one, so this only comes up via a direct call.
+ */
+export function restoreItem(db: Db, deviceId: string, id: string): number {
+  const ids = restorableIds(db, id);
+  if (ids.length === 0) return 0;
+  const parentId = getItem(db, id)?.parent_id ?? null;
+  const orphaned = !!parentId && !getItem(db, parentId);
+  for (const rid of ids) {
+    const patch: ItemPatch =
+      rid === id && orphaned ? { deleted: false, parent_id: null } : { deleted: false };
+    recordOp(db, deviceId, rid, patch);
+  }
+  return ids.length;
 }
 
 export type CountScope = 'all' | 'direct';
@@ -1706,14 +2045,33 @@ export function effectiveShares(db: Db, itemId: string): EffectiveShare[] {
   return [...map.values()];
 }
 
+/**
+ * True if `userId` owns this item or any ancestor. Ownership cascades down the
+ * tree so a project/task owner keeps edit access when a collaborator creates
+ * children under a shared parent (those children are owned by the collaborator,
+ * but still live inside the owner's container).
+ */
+function ownsItemOrAncestor(db: Db, itemId: string, userId: string): boolean {
+  const seen = new Set<string>();
+  let currentId: string | null = itemId;
+  while (currentId && !seen.has(currentId)) {
+    seen.add(currentId);
+    const item = getItem(db, currentId);
+    if (!item) break;
+    if (item.owner_id === userId) return true;
+    currentId = item.parent_id;
+  }
+  return false;
+}
+
 export function hasWriteAccess(db: Db, itemId: string, userId: string): boolean {
-  if (getItem(db, itemId)?.owner_id === userId) return true;
+  if (ownsItemOrAncestor(db, itemId, userId)) return true;
   return effectiveShares(db, itemId).find((e) => e.user_id === userId)?.permission === 'write';
 }
 
-/** True if the user owns the item or has any effective share on it (read or write). */
+/** True if the user owns the item (or an ancestor), or has any effective share on it. */
 export function hasReadAccess(db: Db, itemId: string, userId: string): boolean {
-  if (getItem(db, itemId)?.owner_id === userId) return true;
+  if (ownsItemOrAncestor(db, itemId, userId)) return true;
   return effectiveShares(db, itemId).some((e) => e.user_id === userId);
 }
 
@@ -2232,8 +2590,8 @@ export function ingestRecordOps(db: Db, ops: RecordOp[], markSynced: boolean): R
   return fresh;
 }
 
-/** Item ids a user may see: items they own, plus shared items and all their
- *  descendants. Used by the server to scope sync. */
+/** Item ids a user may see: items they own (and all descendants), plus shared
+ *  items and all their descendants. Used by the server to scope sync. */
 /**
  * Tasks the user is directly shared on whose parent isn't visible to them — i.e.
  * shared sub-tasks that have no home in the user's own tree. These become the
@@ -2365,15 +2723,15 @@ export function subtreeIds(db: Db, roots: string[]): Set<string> {
 }
 
 export function visibleItemIds(db: Db, userId: string): Set<string> {
-  const set = new Set<string>();
-  for (const r of db.all<{ id: string }>('SELECT id FROM items WHERE owner_id = ?', [userId])) {
-    set.add(r.id);
-  }
-  const roots = db
+  // Owned items include their descendants: a collaborator-created child under an
+  // owned project must still sync to the owner (same as shared-subtree visibility).
+  const owned = db
+    .all<{ id: string }>('SELECT id FROM items WHERE owner_id = ?', [userId])
+    .map((r) => r.id);
+  const shareRoots = db
     .all<{ item_id: string }>('SELECT item_id FROM shares WHERE user_id = ? AND deleted = 0', [
       userId,
     ])
     .map((r) => r.item_id);
-  for (const id of subtreeIds(db, roots)) set.add(id);
-  return set;
+  return subtreeIds(db, [...owned, ...shareRoots]);
 }

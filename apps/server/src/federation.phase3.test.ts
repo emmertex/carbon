@@ -323,6 +323,74 @@ describe('federation Phase 3 — scope reject', () => {
     assert.equal(getItem(acme.db, outsideId), undefined, 'out-of-scope item never created on acme');
     assert.equal(acme.db.get<{ x: number }>('SELECT 1 AS x FROM ops WHERE id = ?', ['rogue-op-1']), undefined);
   });
+
+  test('reparenting an existing out-of-scope item into the shared subtree is rejected', async () => {
+    const { acme, globex, alice, roadmap } = await handshake('write');
+    void globex;
+    const l = links(acme, globex);
+
+    // Pre-existing item on acme OUTSIDE the Roadmap grant (parentId null).
+    const loose = createItem(acme.db, acme.deviceId, {
+      type: 'task',
+      title: 'private loose',
+      ownerId: alice.id,
+    });
+    assert.equal(getItem(acme.db, loose.id)!.parent_id, null);
+
+    // Peer pushes a reparent that would pull the private item under Roadmap.
+    const sneak: Op = {
+      id: 'reparent-sneak',
+      item_id: loose.id,
+      ts: Date.now() + 1000,
+      device_id: 'globex-dev',
+      fields: { parent_id: roadmap, title: 'hijacked into share' },
+    };
+    const { ops } = sanitizeFederatedPush(
+      acme.db,
+      l.acme,
+      'globex',
+      'acme',
+      acme.deviceId,
+      [sneak],
+      [],
+    );
+    assert.equal(ops.length, 0, 'reparent of existing out-of-scope item dropped');
+    const still = getItem(acme.db, loose.id)!;
+    assert.equal(still.parent_id, null, 'parent unchanged');
+    assert.equal(still.title, 'private loose', 'title unchanged');
+  });
+
+  test('creating a NEW child under an in-scope parent is still accepted', async () => {
+    const { acme, globex, bob, roadmap } = await handshake('write');
+    void globex;
+    const l = links(acme, globex);
+
+    const childId = 'new-fed-child';
+    const create: Op = {
+      id: 'create-child-op',
+      item_id: childId,
+      ts: Date.now(),
+      device_id: 'globex-dev',
+      fields: {
+        type: 'task',
+        parent_id: roadmap,
+        owner_id: `remote:globex:${bob.id}`,
+        title: 'new under roadmap',
+      },
+    };
+    const { ops } = sanitizeFederatedPush(
+      acme.db,
+      l.acme,
+      'globex',
+      'acme',
+      acme.deviceId,
+      [create],
+      [],
+    );
+    assert.equal(ops.length, 1, 'new create under allowed parent accepted');
+    ingestOps(acme.db, ops, true);
+    assert.equal(getItem(acme.db, childId)?.parent_id, roadmap);
+  });
 });
 
 // ─── 4. owner protection: a push changing owner_id of an existing item is ignored ─

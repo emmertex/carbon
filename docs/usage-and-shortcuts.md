@@ -24,10 +24,15 @@ submits the task.
 
 ### Natural-language commands
 
-When an admin has configured an LLM agent (**Settings → AI agents**) and enabled NL
-commands (**Settings → Natural-language commands**), the quick-add bar doubles as a
-command box. Start a line with a configured
-keyword (e.g. `add`, `remind`) and write plainly:
+When an admin has configured an LLM agent (**Settings → Integrations → AI agents**) and
+enabled NL commands (**Settings → Integrations → Natural-language commands**), and the
+**Assistant in add box** feature is on for your UI complexity, the quick-add bar doubles as
+a command box. The placeholder hints at this when commands are active
+(e.g. `· or add/remind…`).
+
+Start a line with a configured keyword (defaults: `add`, `remind`, `check off`, `mark off`,
+`mark as`, `can`) and write plainly — typing a date anywhere else in a normal task title is
+left as literal text:
 
 - `add milk and eggs to shopping` → creates both tasks in the *shopping* list.
 - `remind me to get milk at Coles` → adds the task, tags it `coles`, and geofences the tag
@@ -51,8 +56,13 @@ Notes are a first-class item type (alongside tasks and projects):
 
 - Create a note from the quick-add bar (note mode) or convert an existing **task ↔ note**
   from the detail pane — conversion keeps title, body, tags and nesting.
+- Flip a project to **Notes** and new children default to notes (a notebook). Note rows
+  show as cards with a thumbnail when they have an image or body.
 - Notes use a rich Markdown editor with inline images; they don't auto-complete when a
   parent task is done, and they stay out of Today / CalDAV action surfaces.
+- Flip a note to **Recipe** mode for a scaled servings view; Settings → Recipes sets the
+  cup convention. Use **Optimise** (sync server) or the copy-able import prompt to turn
+  web recipes into clean Markdown.
 - **Data backup → Export notes (zip)** dumps every note as Markdown plus images.
 
 ### Desktop quick-add
@@ -88,7 +98,7 @@ Work from anywhere (ignored while typing in a field):
 
 | Key | Action |
 |-----|--------|
-| **g** then **t / i / f / a / p / o / r** | go to Today / Inbox / Flagged / All / Plan / Forecast / Review |
+| **g** then **t / i / f / a / p / o / r / d** | go to Today / Inbox / Flagged / All / Plan / Forecast / Review / Recently Deleted |
 | **c** or **/** | focus the quick-add bar |
 | **Ctrl/⌘ + Z** | undo the last change |
 | **Ctrl/⌘ + Shift + Z** | redo |
@@ -100,6 +110,12 @@ Work from anywhere (ignored while typing in a field):
 > footer. Each undo is applied as a normal edit, so it syncs to your other devices like any
 > other change. The stack is per session (it clears on reload). Deleting a task still shows
 > its **Undo** snackbar, which now shares the same stack.
+
+> **Recently Deleted** (`g` `d`) picks up where that stack stops: it lists the last 30 days of
+> deletes, so a delete is still recoverable after the snackbar has gone and after a reload. The
+> sidebar shows it whenever it isn't empty. Each entry is one delete — restoring a project, or a
+> task with sub-tasks, brings the whole subtree back where it was — and a restore is itself
+> undoable.
 
 ## Outline / list keyboard navigation
 
@@ -253,6 +269,10 @@ sync, and any error message (not just the cloud-icon tooltip).
 - **Sign-in Merge vs Replace** — if the device already has local tasks, choose Merge (combine
   with the account) or Replace (discard local and pull fresh).
 - **Sign-out** — keep the local copy for offline use, or erase it on shared devices.
+- **Sync epoch reset** — rare operator maintenance that rebuilds the server's change history.
+  Incremental sync cannot continue; Carbon shows a gate with **Download local DB**, **Clear
+  cache and re-download**, or **Log out and operate offline**. Download first if you have
+  unpushed local edits.
 
 Alongside your tasks, Carbon also syncs your **UI settings, saved views, per-view filters and
 perspectives** (last-writer-wins, scoped to your account). It's on by default and pulled when

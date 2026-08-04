@@ -252,13 +252,15 @@ the failure is reported under `unmatched`.
 ### Read (small payloads)
 
 ```
-GET /api/agent/lists                 → { lists: [{ id, name }] }            (?detail=1 adds open_count)
+GET /api/agent/lists                 → { lists: [{ id, name, notes? }] }    (?detail=1 adds open_count)
 GET /api/agent/tags                  → { tags: [{ id, name, hasGeo }] }     (?detail=1 adds color/status/geo)
-GET /api/agent/items?list=&tag=&q=&status=active&limit=50
+GET /api/agent/items?list=&tag=&q=&status=active&type=task&due_before=&due_after=&limit=50
                                      → { items: [{ id, title, tags:[names], done }] }   (?detail=1 expands)
-GET /api/agent/items/{id}            → full item + { tags, list }
-POST /api/agent/resolve  { kind:"list"|"tag"|"task", q, list? }
-                                     → { candidates:[{id,name,score,reason}], best:{id,confident} }
+GET /api/agent/notes/search?q=&list=&tag=&type=note&limit=20
+                                     → { matches: [{ id, title, type, note_mode?, snippet }] }
+GET /api/agent/items/{id}            → full item + { tags, list, note_mode? }
+POST /api/agent/resolve  { kind:"list"|"tag"|"task"|"note", q, list? }
+                                     → { candidates:[{id,name,type?,score,reason}], best:{id,confident} }
 POST /api/agent/filter   { text:"due tomorrow and flagged" }
                                      → { expr: FilterExpr }   // NL → advanced filter expression
 POST /api/agent/geocode  { q:"coles", near:{lat,lng} }
@@ -266,7 +268,33 @@ POST /api/agent/geocode  { q:"coles", near:{lat,lng} }
 ```
 
 `status` is `active` (default), `done`, or `all`. `resolve` is the workhorse: call it when a
-name is uncertain — if `best.confident` is false, ask the user rather than guess.
+name is uncertain — if `best.confident` is false, ask the user rather than guess. `kind:"task"`
+matches tasks **and** notes (each candidate reports its `type`); `kind:"note"` narrows to notes.
+
+**Dates.** `due_before`/`due_after` are ISO datetimes bounding `due_date` (inclusive). Either one
+restricts the result to items that *have* a due date, soonest first — "what's due this week?".
+
+### Notes, notebooks and recipes
+
+A **note** is an item type: a title + a Markdown body, with no due date or checkbox
+(`type:"note"`). Every item — task or note — also has a `note` *field* holding that body, so
+"add a note to X" (a field edit) and "write a note about Y" (a new item) are different calls.
+
+- `GET /items` defaults to `type:"task"`. Pass `type=note` or `type=all` to see notes.
+- A **notebook** is a list whose contents are notes (reported as `notes:true` by `/lists`;
+  `open_count` then counts its notes). Reading one with the `type:"task"` default returns
+  nothing, so `/items` defaults to notes *inside a notebook*. Creating an item there with no
+  `type` likewise makes a note — the same rule the app's own add surfaces use.
+- `GET /notes/search` matches inside note **bodies** and returns a snippet per hit; `/items?q=`
+  only matches titles.
+- With `detail=1`, a note body longer than 2000 chars comes back cut short and flagged
+  `note_truncated:true` — a notebook of recipes would otherwise swamp a small model's context.
+  Add `full=1` to get one whole. **Never write a truncated body back**; append instead (below).
+- A **recipe** is a note kept in recipe mode, reported as `note_mode:"recipe"`. Create one with
+  `note_mode:"recipe"` on a `tasks[]` entry (it implies `type:"note"`), or switch an existing
+  note with `patch:{ note_mode:"recipe" }`. `POST /api/agent/recipe/optimise`
+  `{ body, convention?:"au"|"us"|"metric" }` → `{ text }` returns a tidied, metric-converted
+  rewrite of a recipe body for the user to accept or discard — it does **not** write anything.
 
 ### Write (batch)
 
@@ -280,8 +308,9 @@ POST /api/agent/tasks/batch
 ```
 
 Resolves (or creates) the list and tags once, then creates the tasks under the list. Use
-`tasks:[{title,note,due_date,defer_date,reminder_at,recurrence,estimate_minutes,flagged,priority,tags}]`
-instead of `titles` for per-task fields (`due_date`/`defer_date`/`reminder_at` are ISO datetimes;
+`tasks:[{title,type,note_mode,note,due_date,defer_date,reminder_at,recurrence,estimate_minutes,flagged,priority,tags}]`
+instead of `titles` for per-task fields (`type` is `"task"`/`"note"`, or omit it to follow the
+destination list; `note_mode:"recipe"` makes a recipe note) (`due_date`/`defer_date`/`reminder_at` are ISO datetimes;
 `recurrence` is the rule object below). A task's **location comes from its tag** (precedence
 task > tag > project), so "remind me at Coles" = add the task with `tags:["coles"]` and give the
 `coles` tag a geo.
@@ -323,8 +352,20 @@ POST /api/agent/tasks/update
 ```
 
 Patch fields: `title, note, due_date, defer_date, reminder_at` (ISO), `recurrence` (rule object, or
-`null` to clear), `estimate_minutes, flagged, priority, status` ("active"|"done"|"dropped"). Set
-`include_done:true` to match an already-completed task.
+`null` to clear), `estimate_minutes, flagged, priority, status` ("active"|"done"|"dropped"),
+`type` ("task"|"note", converts the item), `note_mode` ("recipe"|"notes"), and `note_append`. Set
+`include_done:true` to match an already-completed task. Queries match tasks **and** notes.
+
+`note` **replaces** the whole body; `note_append` adds a line and keeps what's there, so
+"add to my bread recipe: rest for 45 min" is one call and never needs a read-modify-write:
+
+```
+{ "updates":[ { "query":"Bread Recipe", "patch":{ "note_append":"Rest for 45 min" } } ] }
+```
+
+`metadata` is a single last-write-wins column shared by several features (note editor mode,
+recipe scaling, GPS-track summaries), so a `metadata` patch **merges** onto what is stored —
+shallow at the top level, one level deep for `recipe`. Pass `null` to clear it outright.
 
 ```
 POST /api/agent/tags/geo
@@ -403,6 +444,11 @@ the block. `metadata` is arbitrary JSON stored on the note item.
   `POST /tasks/batch {tasks:[{title:"Take son to swimming", due_date:"2026-07-07T17:00:00Z", reminder_at:"2026-07-07T16:00:00Z", recurrence:{type:"weekly",interval:1,daysOfWeek:[2]}}]}`
   then `POST /tasks/share {query:"Take son to swimming", users:["Rachel"]}`.
 - **"Start a timer on the report."** → `POST /timer/start {query:"report"}`; **"add a note: traffic"** → `POST /timer/note {title:"traffic"}`; later **"stop the timer"** → `POST /timer/stop {}`.
+- **"Write down that the spare key is under the pot."** → `POST /tasks/batch {tasks:[{title:"Spare key", type:"note", note:"Under the pot by the back door."}]}`.
+- **"What did I write about the rental car?"** → `GET /notes/search?q=rental car` → summarize the snippet, name the note.
+- **"What's in my recipes notebook?"** → `GET /lists` (it comes back `notes:true`) → `GET /items?list=recipes` (notes by default there).
+- **"Save this recipe: …"** → `POST /tasks/batch {list:"recipes", create_list_if_missing:false, tasks:[{title:"Sourdough", note_mode:"recipe", note:"<markdown>"}]}`.
+- **"Add to the sourdough recipe: rest 45 min."** → `POST /tasks/update {updates:[{query:"sourdough", patch:{note_append:"Rest for 45 min"}}]}` — never read-then-replace.
 
 ### Geocoding env (place lookup for "nearest Coles")
 
