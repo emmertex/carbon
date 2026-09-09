@@ -8,7 +8,7 @@
     "build": "cross-env NO_STRIP=true tauri build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.11.4",
     "cross-env": "^10.1.0"
   }
 }
