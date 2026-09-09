@@ -1,5 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
-import type { Db, Row } from './db';
+import { v4 as uuidv4 } from "uuid";
+import type { Db, Row } from "./db";
 import type {
   Item,
   ItemPatch,
@@ -20,19 +20,22 @@ import type {
   AttachmentParent,
   Plan,
   Permission,
-} from './types';
-import { recordOp, createPatch, nextTs, observeTs, causalNowIso } from './crdt';
-import { nextDueDate } from './recurrence';
-import {
-  insertRecordOp,
-  recordOpExists,
-  type RecordOp,
-} from './records';
+} from "./types";
+import { recordOp, createPatch, nextTs, observeTs, causalNowIso } from "./crdt";
+import { nextDueDate } from "./recurrence";
+import { insertRecordOp, recordOpExists, type RecordOp } from "./records";
 
 // ----- users ----------------------------------------------------------------
 
 const AVATAR_COLORS = [
-  '#ef4444', '#f59e0b', '#10b981', '#06b6d4', '#6366f1', '#a855f7', '#ec4899', '#84cc16',
+  "#ef4444",
+  "#f59e0b",
+  "#10b981",
+  "#06b6d4",
+  "#6366f1",
+  "#a855f7",
+  "#ec4899",
+  "#84cc16",
 ];
 
 function colorFor(seed: string): string {
@@ -79,17 +82,23 @@ function rowToUser(r: UserRow): User {
 
 export function listUsers(db: Db): User[] {
   return db
-    .all<UserRow>('SELECT * FROM users WHERE deleted = 0 ORDER BY username')
+    .all<UserRow>("SELECT * FROM users WHERE deleted = 0 ORDER BY username")
     .map(rowToUser);
 }
 
 export function getUser(db: Db, id: string): User | undefined {
-  const r = db.get<UserRow>('SELECT * FROM users WHERE id = ? AND deleted = 0', [id]);
+  const r = db.get<UserRow>(
+    "SELECT * FROM users WHERE id = ? AND deleted = 0",
+    [id],
+  );
   return r ? rowToUser(r) : undefined;
 }
 
 export function getUserByUsername(db: Db, username: string): User | undefined {
-  const r = db.get<UserRow>('SELECT * FROM users WHERE username = ? AND deleted = 0', [username]);
+  const r = db.get<UserRow>(
+    "SELECT * FROM users WHERE username = ? AND deleted = 0",
+    [username],
+  );
   return r ? rowToUser(r) : undefined;
 }
 
@@ -106,12 +115,14 @@ export function createUser(db: Db, input: CreateUserInput): User {
   // Usernames are unique. If a row already exists (e.g. a previously soft-deleted
   // user/agent), revive it in place rather than inserting a duplicate (which would
   // violate the UNIQUE(username) constraint).
-  const existing = db.get<UserRow>('SELECT * FROM users WHERE username = ?', [username]);
+  const existing = db.get<UserRow>("SELECT * FROM users WHERE username = ?", [
+    username,
+  ]);
   const user: User = {
     id: existing?.id ?? uuidv4(),
     username,
     display_name: input.displayName ?? existing?.display_name ?? null,
-    role: input.role ?? 'member',
+    role: input.role ?? "member",
     is_bot: input.isBot ?? false,
     avatar_color: existing?.avatar_color ?? colorFor(username),
     avatar_initial: existing?.avatar_initial ?? null,
@@ -133,13 +144,13 @@ export function updateUser(
   patch: Partial<
     Pick<
       User,
-      | 'display_name'
-      | 'role'
-      | 'avatar_color'
-      | 'avatar_initial'
-      | 'is_bot'
-      | 'plan_startup_min'
-      | 'plan_default_estimate_min'
+      | "display_name"
+      | "role"
+      | "avatar_color"
+      | "avatar_initial"
+      | "is_bot"
+      | "plan_startup_min"
+      | "plan_default_estimate_min"
     >
   >,
 ): void {
@@ -156,19 +167,22 @@ export function softDeleteUser(db: Db, id: string): void {
 
 /** Insert-or-replace a user row (used by admin ops and by sync ingest, LWW). */
 export function upsertUser(db: Db, user: User): void {
-  const existing = db.get<{ updated_at: string }>('SELECT updated_at FROM users WHERE id = ?', [
-    user.id,
-  ]);
+  const existing = db.get<{ updated_at: string }>(
+    "SELECT updated_at FROM users WHERE id = ?",
+    [user.id],
+  );
   if (existing && existing.updated_at > user.updated_at) return; // older write loses
   // Guard UNIQUE(username): if a *different* id already holds this username (two
   // devices minted separate ids for the same name — e.g. re-adding a soft-deleted
   // user offline), a raw insert throws SQLITE_CONSTRAINT and wedges the entire sync
   // ingest. De-collide deterministically so sync converges; per-id LWW is unaffected.
-  const clash = db.get<{ id: string }>('SELECT id FROM users WHERE username = ? AND id <> ?', [
-    user.username,
-    user.id,
-  ]);
-  const username = clash ? `${user.username}~${user.id.slice(0, 8)}` : user.username;
+  const clash = db.get<{ id: string }>(
+    "SELECT id FROM users WHERE username = ? AND id <> ?",
+    [user.username, user.id],
+  );
+  const username = clash
+    ? `${user.username}~${user.id.slice(0, 8)}`
+    : user.username;
   db.run(
     `INSERT INTO users (id, username, display_name, role, is_bot, avatar_color, avatar_initial, plan_startup_min, plan_default_estimate_min, is_remote, home_server, created_at, updated_at, deleted)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -187,7 +201,7 @@ export function upsertUser(db: Db, user: User): void {
       user.id,
       username,
       user.display_name ?? null,
-      user.role ?? 'member',
+      user.role ?? "member",
       user.is_bot ? 1 : 0,
       user.avatar_color ?? null,
       user.avatar_initial ?? null,
@@ -205,9 +219,10 @@ export function upsertUser(db: Db, user: User): void {
 // ----- device identity ------------------------------------------------------
 
 export function ensureDeviceId(db: Db): string {
-  const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [
-    'device_id',
-  ]);
+  const row = db.get<{ value: string }>(
+    "SELECT value FROM meta WHERE key = ?",
+    ["device_id"],
+  );
   if (row?.value) return row.value;
   const id = uuidv4();
   db.run(
@@ -260,7 +275,7 @@ function rowToItem(r: ItemRow): Item {
     owner_id: r.owner_id,
     title: r.title,
     note: r.note,
-    status: r.status as Item['status'],
+    status: r.status as Item["status"],
     flagged: !!r.flagged,
     priority: r.priority,
     defer_date: r.defer_date,
@@ -277,7 +292,7 @@ function rowToItem(r: ItemRow): Item {
     thumb: r.thumb ?? null,
     folder_id: r.folder_id,
     sort_order: r.sort_order,
-    order_mode: (r.order_mode as OrderMode) || 'parallel',
+    order_mode: (r.order_mode as OrderMode) || "parallel",
     sys_kind: r.sys_kind,
     metadata: r.metadata ?? null,
     created_at: r.created_at,
@@ -286,7 +301,7 @@ function rowToItem(r: ItemRow): Item {
   };
 }
 
-const SELECT = 'SELECT * FROM items';
+const SELECT = "SELECT * FROM items";
 
 // ----- reads ----------------------------------------------------------------
 
@@ -307,17 +322,20 @@ export function projectAncestor(db: Db, itemId: string): Item | undefined {
     seen.add(pid);
     const p = getItem(db, pid);
     if (!p) break;
-    if (p.type === 'project') return p;
+    if (p.type === "project") return p;
     pid = p.parent_id;
   }
   return undefined;
 }
 
 export function getChildren(db: Db, parentId: string | null): Item[] {
-  const where = parentId === null ? 'parent_id IS NULL' : 'parent_id = ?';
+  const where = parentId === null ? "parent_id IS NULL" : "parent_id = ?";
   const params = parentId === null ? [] : [parentId];
   return db
-    .all<ItemRow>(`${SELECT} WHERE ${where} AND deleted = 0 ORDER BY sort_order, created_at`, params)
+    .all<ItemRow>(
+      `${SELECT} WHERE ${where} AND deleted = 0 ORDER BY sort_order, created_at`,
+      params,
+    )
     .map(rowToItem);
 }
 
@@ -347,14 +365,16 @@ export interface ItemQuery {
 }
 
 export function queryItems(db: Db, q: ItemQuery): Item[] {
-  const where = ['deleted = 0'];
+  const where = ["deleted = 0"];
   if (q.tasksOnly) where.push("type = 'task'");
   if (q.activeOnly) where.push("(status != 'done' OR type = 'note')");
-  if (q.flaggedOnly) where.push('flagged = 1');
-  if (q.rootOnly) where.push('parent_id IS NULL');
-  if (q.dueOrFlagged) where.push('(flagged = 1 OR due_date IS NOT NULL)');
+  if (q.flaggedOnly) where.push("flagged = 1");
+  if (q.rootOnly) where.push("parent_id IS NULL");
+  if (q.dueOrFlagged) where.push("(flagged = 1 OR due_date IS NOT NULL)");
   return db
-    .all<ItemRow>(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY sort_order, created_at`)
+    .all<ItemRow>(
+      `${SELECT} WHERE ${where.join(" AND ")} ORDER BY sort_order, created_at`,
+    )
     .map(rowToItem);
 }
 
@@ -377,7 +397,7 @@ function containingProject(db: Db, parentId: string | null): Item | undefined {
   if (!parentId) return undefined;
   const parent = getItem(db, parentId);
   if (!parent) return undefined;
-  return parent.type === 'project' ? parent : projectAncestor(db, parentId);
+  return parent.type === "project" ? parent : projectAncestor(db, parentId);
 }
 
 /** True when new children of `parentId` land inside a notes container. */
@@ -391,18 +411,25 @@ export function inNotesProject(db: Db, parentId: string | null): boolean {
  * notes" rule lives, so every add surface (quick-add, outliner, sibling/subtask
  * buttons) agrees.
  */
-export function defaultChildType(db: Db, parentId: string | null): 'task' | 'note' {
-  return inNotesProject(db, parentId) ? 'note' : 'task';
+export function defaultChildType(
+  db: Db,
+  parentId: string | null,
+): "task" | "note" {
+  return inNotesProject(db, parentId) ? "note" : "task";
 }
 
 // ----- note thumbnails ------------------------------------------------------
 
 /** Decode an item's `thumb` column, or null when unset/corrupt. */
-export function parseThumb(item: Pick<Item, 'thumb'> | undefined | null): NoteThumb | null {
+export function parseThumb(
+  item: Pick<Item, "thumb"> | undefined | null,
+): NoteThumb | null {
   if (!item?.thumb) return null;
   try {
     const t = JSON.parse(item.thumb) as NoteThumb;
-    return t && typeof t.hash === 'string' && typeof t.src === 'string' ? t : null;
+    return t && typeof t.hash === "string" && typeof t.src === "string"
+      ? t
+      : null;
   } catch {
     return null;
   }
@@ -456,11 +483,14 @@ export function itemsNeedingThumb(db: Db): Item[] {
  * and never evicted; `full` (note images + attachments) is what the fetch policy
  * and the LRU cache budget govern.
  */
-export function blobRefIndex(db: Db): { thumbs: Set<string>; full: Set<string> } {
+export function blobRefIndex(db: Db): {
+  thumbs: Set<string>;
+  full: Set<string>;
+} {
   const thumbs = new Set<string>();
   const full = new Set<string>();
   const rows = db.all<{ note: string | null; thumb: string | null }>(
-    'SELECT note, thumb FROM items WHERE deleted = 0 AND (note IS NOT NULL OR thumb IS NOT NULL)',
+    "SELECT note, thumb FROM items WHERE deleted = 0 AND (note IS NOT NULL OR thumb IS NOT NULL)",
   );
   for (const r of rows) {
     for (const h of collectBlobRefs(r.note)) full.add(h);
@@ -468,7 +498,7 @@ export function blobRefIndex(db: Db): { thumbs: Set<string>; full: Set<string> }
     if (t) thumbs.add(t.hash);
   }
   for (const a of db.all<{ hash: string }>(
-    'SELECT hash FROM attachments WHERE deleted = 0',
+    "SELECT hash FROM attachments WHERE deleted = 0",
   )) {
     if (a.hash) full.add(a.hash.toLowerCase());
   }
@@ -476,6 +506,148 @@ export function blobRefIndex(db: Db): { thumbs: Set<string>; full: Set<string> }
   // stronger retention wins).
   for (const h of thumbs) full.delete(h);
   return { thumbs, full };
+}
+
+/** A single blob reference and how it got there (A5). */
+export interface BlobReference {
+  /** Lowercased content hash — the store key. */
+  hash: string;
+  kind: "note" | "thumb" | "attachment";
+  /** id of the item that owns the reference (resolved for comment attachments). */
+  itemId: string;
+  /** Present for kind === 'attachment'. */
+  attachmentId?: string;
+  /** True when the owning row is tombstoned (deleted = 1). */
+  deleted: boolean;
+}
+
+/** De-duplication priority: a hash that is several kinds at once keeps the
+ *  stronger retention — thumbnail first, then attachment, then note body. */
+const REF_KIND_PRIORITY: Record<BlobReference["kind"], number> = {
+  thumb: 0,
+  attachment: 1,
+  note: 2,
+};
+
+/**
+ * Every blob the workspace references, split by reference type so callers
+ * (export, import verification, reconcile, orphan cleanup) can reason about
+ * provenance instead of re-scanning. Composes the existing reference carriers —
+ * do not duplicate them:
+ *   - **note images** — `collectBlobRefs(item.note)`
+ *   - **thumbnails**  — `parseThumb(item)` (the row's `items.thumb`)
+ *   - **attachments** — the `attachments` table; a comment-attached blob
+ *     resolves its owning item through the `comments` table, exactly the way the
+ *     server's blob ACL (`canReadBlob`) and reconcile already do.
+ *
+ * `includeDeleted` (default `true`) controls whether tombstoned items contribute
+ * references: orphan cleanup needs the trashed ones (still within the trash
+ * retention window), while export/reconcile pass `false` to see only live
+ * references. A detached attachment row (`deleted = 1`) never references its
+ * blob again, so it is always skipped.
+ *
+ * `refs` is the full per-reference list (a hash referenced by several rows
+ * appears once per row); `byHash` de-duplicates by hash with first-wins `kind`
+ * priority (thumb > attachment > note). Pure `Db` — runs unchanged in web and
+ * server.
+ */
+export function blobReferenceInventory(
+  db: Db,
+  opts: { includeDeleted?: boolean } = {},
+): { refs: BlobReference[]; byHash: Map<string, BlobReference> } {
+  const includeDeleted = opts.includeDeleted ?? true;
+  const refs: BlobReference[] = [];
+
+  // Items — only the columns the reference scan needs (a purged workspace can
+  // hold thousands of tombstones; dragging their full rows through is the cost
+  // `deletedRoots` goes to lengths to avoid).
+  const items = db.all<{
+    id: string;
+    note: string | null;
+    thumb: string | null;
+    deleted: number;
+  }>(
+    `SELECT id, note, thumb, deleted FROM items${includeDeleted ? "" : " WHERE deleted = 0"}`,
+  );
+  for (const it of items) {
+    const deleted = !!it.deleted;
+    for (const h of collectBlobRefs(it.note)) {
+      refs.push({ hash: h, kind: "note", itemId: it.id, deleted });
+    }
+    const thumb = parseThumb({ thumb: it.thumb });
+    if (thumb) {
+      refs.push({
+        hash: thumb.hash.toLowerCase(),
+        kind: "thumb",
+        itemId: it.id,
+        deleted,
+      });
+    }
+  }
+
+  // Markdown comments can reference images independently of attachment rows.
+  for (const comment of db.all<{ item_id: string; body: string; deleted: number }>(
+    `SELECT c.item_id, c.body, i.deleted FROM comments c JOIN items i ON i.id = c.item_id
+     WHERE c.deleted = 0${includeDeleted ? "" : " AND i.deleted = 0"}`,
+  )) {
+    for (const hash of collectBlobRefs(comment.body))
+      refs.push({ hash, kind: "note", itemId: comment.item_id, deleted: !!comment.deleted });
+  }
+
+  // Attachments — a detached row no longer references its blob. A comment-
+  // attached blob's owner is the comment's item (resolve the same way the
+  // server does); the reference's `deleted` is the OWNING ITEM's flag, so a
+  // trashed item's still-attached file protects its blob through the retention
+  // window.
+  const atts = db.all<{
+    id: string;
+    parent_type: string;
+    parent_id: string;
+    item_id: string;
+    hash: string;
+    deleted: number;
+  }>(
+    "SELECT id, parent_type, parent_id, item_id, hash, deleted FROM attachments",
+  );
+  for (const a of atts) {
+    if (a.deleted) continue;
+    if (!a.hash) continue;
+    let itemId = a.item_id;
+    if (!itemId) {
+      if (a.parent_type === "item") {
+        itemId = a.parent_id;
+      } else {
+        itemId =
+          db.get<{ item_id: string }>(
+            "SELECT item_id FROM comments WHERE id = ?",
+            [a.parent_id],
+          )?.item_id ?? "";
+      }
+    }
+    if (!itemId) continue; // owner never materialised — nothing to attribute to
+    const itemDeleted = !!db.get<{ deleted: number }>(
+      "SELECT deleted FROM items WHERE id = ?",
+      [itemId],
+    )?.deleted;
+    if (!includeDeleted && itemDeleted) continue;
+    refs.push({
+      hash: a.hash.toLowerCase(),
+      kind: "attachment",
+      itemId,
+      attachmentId: a.id,
+      deleted: itemDeleted,
+    });
+  }
+
+  // De-duplicate by hash with the stronger-retention kind winning.
+  const byHash = new Map<string, BlobReference>();
+  const sorted = [...refs].sort(
+    (a, b) => REF_KIND_PRIORITY[a.kind] - REF_KIND_PRIORITY[b.kind],
+  );
+  for (const r of sorted) {
+    if (!byHash.has(r.hash)) byHash.set(r.hash, r);
+  }
+  return { refs, byHash };
 }
 
 /** Sidebar folders (visual-only grouping). Mirrors getProjects. */
@@ -490,7 +662,7 @@ export function getFolders(db: Db): Item[] {
 // ----- writes ---------------------------------------------------------------
 
 function nextSortOrder(db: Db, parentId: string | null): number {
-  const where = parentId === null ? 'parent_id IS NULL' : 'parent_id = ?';
+  const where = parentId === null ? "parent_id IS NULL" : "parent_id = ?";
   const params = parentId === null ? [] : [parentId];
   const row = db.get<{ m: number | null }>(
     `SELECT MAX(sort_order) AS m FROM items WHERE ${where}`,
@@ -526,14 +698,18 @@ export function encodeMetadata(
   value: string | Record<string, unknown> | null | undefined,
 ): string | null {
   if (value == null) return null;
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     const t = value.trim();
-    return t === '' ? null : t;
+    return t === "" ? null : t;
   }
   return JSON.stringify(value);
 }
 
-export function createItem(db: Db, deviceId: string, input: CreateItemInput): Item {
+export function createItem(
+  db: Db,
+  deviceId: string,
+  input: CreateItemInput,
+): Item {
   const now = new Date().toISOString();
   const id = uuidv4();
   // An unspecified type follows the destination container: inside a notes project
@@ -548,7 +724,7 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
     owner_id: input.ownerId ?? null,
     title: input.title.trim(),
     note: input.note ?? null,
-    status: 'active',
+    status: "active",
     flagged: input.flagged ?? false,
     priority: input.priority ?? 0,
     defer_date: input.deferDate ?? null,
@@ -557,16 +733,16 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
     estimate_minutes: null,
     completed_at: null,
     // Projects default to a 30-day review cadence; tasks aren't reviewed.
-    review_interval: type === 'project' ? 30 : null,
+    review_interval: type === "project" ? 30 : null,
     reviewed_at: null,
     recurrence: null,
     geo: null,
     color: input.color ?? null,
-    notes_project: type === 'project' ? (input.notesProject ?? false) : false,
+    notes_project: type === "project" ? (input.notesProject ?? false) : false,
     thumb: null,
     folder_id: input.folderId ?? null,
     sort_order: input.sortOrder ?? nextSortOrder(db, input.parentId ?? null),
-    order_mode: input.orderMode ?? 'parallel',
+    order_mode: input.orderMode ?? "parallel",
     sys_kind: input.sysKind ?? null,
     metadata: encodeMetadata(input.metadata),
     created_at: now,
@@ -576,18 +752,25 @@ export function createItem(db: Db, deviceId: string, input: CreateItemInput): It
   recordOp(db, deviceId, id, createPatch(item));
   // A freshly-added (incomplete) sub-task re-opens a parent that was marked done.
   // A note child is inert (not actionable), so it never reopens a completed parent.
-  if (item.type !== 'note') reopenParentIfNeeded(db, deviceId, item.parent_id);
+  if (item.type !== "note") reopenParentIfNeeded(db, deviceId, item.parent_id);
   return item;
 }
 
 /** Adding/moving an incomplete task under a completed parent re-opens that parent
  *  (so a "done" task can't hide unfinished children). Callers must skip this for
  *  inert (note) children, which never affect a parent's completion. */
-function reopenParentIfNeeded(db: Db, deviceId: string, parentId: string | null): void {
+function reopenParentIfNeeded(
+  db: Db,
+  deviceId: string,
+  parentId: string | null,
+): void {
   if (!parentId) return;
   const parent = getItem(db, parentId);
-  if (parent && parent.type === 'task' && parent.status === 'done') {
-    updateItem(db, deviceId, parentId, { status: 'active', completed_at: null });
+  if (parent && parent.type === "task" && parent.status === "done") {
+    updateItem(db, deviceId, parentId, {
+      status: "active",
+      completed_at: null,
+    });
   }
 }
 
@@ -604,9 +787,9 @@ export function updateItem(
   // Converting a note back into an active task must preserve the same invariant as
   // create/move: a done parent can't hide unfinished task children.
   if (
-    before?.type === 'note' &&
-    patch.type === 'task' &&
-    updated?.status === 'active'
+    before?.type === "note" &&
+    patch.type === "task" &&
+    updated?.status === "active"
   ) {
     reopenParentIfNeeded(db, deviceId, updated.parent_id);
   }
@@ -631,7 +814,7 @@ export function setCompleted(
   // so any caller (agent ops, sync replay, a future UI path) that reaches setCompleted
   // directly on a note can't flip its status or spawn a recurring note successor; the
   // cascade-level guard alone left this reachable outside the cascade.
-  if (current.type === 'note') return { item: current, spawned: undefined };
+  if (current.type === "note") return { item: current, spawned: undefined };
 
   let spawned: Item | undefined;
   if (done && current.recurrence) {
@@ -648,7 +831,8 @@ export function setCompleted(
       if (current.due_date && current.defer_date) {
         const origDefer = new Date(current.defer_date);
         const gapDays = Math.round(
-          (new Date(current.due_date).getTime() - origDefer.getTime()) / 86_400_000,
+          (new Date(current.due_date).getTime() - origDefer.getTime()) /
+            86_400_000,
         );
         const d = new Date(nextDue);
         d.setDate(d.getDate() - gapDays);
@@ -685,8 +869,11 @@ export function setCompleted(
       // drop it (a fixed reminder for a past occurrence shouldn't re-fire).
       if (current.reminder_at && current.due_date) {
         const delta =
-          new Date(current.reminder_at).getTime() - new Date(current.due_date).getTime();
-        carry.reminder_at = new Date(new Date(nextDue).getTime() + delta).toISOString();
+          new Date(current.reminder_at).getTime() -
+          new Date(current.due_date).getTime();
+        carry.reminder_at = new Date(
+          new Date(nextDue).getTime() + delta,
+        ).toISOString();
       }
       // Re-read so the returned item reflects the carried-over fields.
       spawned = updateItem(db, deviceId, spawned.id, carry);
@@ -708,7 +895,7 @@ export function setCompleted(
   }
 
   const item = updateItem(db, deviceId, id, {
-    status: done ? 'done' : 'active',
+    status: done ? "done" : "active",
     completed_at: done ? new Date().toISOString() : null,
   });
   return { item, spawned };
@@ -732,7 +919,7 @@ function liveIds(db: Db, ids: string[]): string[] {
   for (let i = 0; i < ids.length; i += SUBTREE_BATCH) {
     const chunk = ids.slice(i, i + SUBTREE_BATCH);
     const rows = db.all<{ id: string }>(
-      `SELECT id FROM items WHERE deleted = 0 AND id IN (${chunk.map(() => '?').join(',')})`,
+      `SELECT id FROM items WHERE deleted = 0 AND id IN (${chunk.map(() => "?").join(",")})`,
       chunk,
     );
     for (const r of rows) out.push(r.id);
@@ -759,7 +946,11 @@ export const COMPLETED_PURGE_AGE_DAYS = 7;
  *  with an active, too-recent, or someone-else's descendant is held back until
  *  its whole subtree is purgeable. That keeps the count shown in the UI equal to
  *  what a purge actually tombstones. */
-export function completedBefore(db: Db, ownerId: string | null, cutoffIso: string): Item[] {
+export function completedBefore(
+  db: Db,
+  ownerId: string | null,
+  cutoffIso: string,
+): Item[] {
   const matched = db
     .all<ItemRow>(
       `${SELECT} WHERE owner_id IS ? AND status = 'done' AND deleted = 0
@@ -775,7 +966,7 @@ export function completedBefore(db: Db, ownerId: string | null, cutoffIso: strin
   const matchedIds = new Set(matched.map((i) => i.id));
   const parentOf = new Map<string, string | null>();
   for (const r of db.all<{ id: string; parent_id: string | null }>(
-    'SELECT id, parent_id FROM items WHERE deleted = 0',
+    "SELECT id, parent_id FROM items WHERE deleted = 0",
   )) {
     parentOf.set(r.id, r.parent_id);
   }
@@ -842,9 +1033,12 @@ export interface DeletedEntry {
  *  unrestorable just because its clock map is unexpected. */
 function deletedAtMs(clocksJson: string | null, updatedAt: string): number {
   try {
-    const clocks = JSON.parse(clocksJson || '{}') as Record<string, { ts?: number }>;
+    const clocks = JSON.parse(clocksJson || "{}") as Record<
+      string,
+      { ts?: number }
+    >;
     const ts = clocks.deleted?.ts;
-    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (typeof ts === "number" && Number.isFinite(ts)) return ts;
   } catch {
     /* fall through to updated_at */
   }
@@ -863,7 +1057,10 @@ function deletedAtMs(clocksJson: string | null, updatedAt: string): number {
  * it surfaces as its own entry once the parent is restored. Either way the list only
  * ever offers restores that end with the item visible again.
  */
-export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): DeletedEntry[] {
+export function deletedRoots(
+  db: Db,
+  windowDays: number = TRASH_WINDOW_DAYS,
+): DeletedEntry[] {
   const cutoffMs = Date.now() - windowDays * 86_400_000;
   // Only the columns the filtering below needs, never `SELECT *`: the sidebar count
   // re-runs this on every revision, and a purged workspace can hold thousands of
@@ -875,7 +1072,13 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   // tombstone scan. The one exception is a straggler op older than the tombstone
   // arriving late and rewinding `updated_at`; only a >`windowDays`-old straggler
   // could hide an entry.
-  type Lite = { id: string; parent_id: string | null; title: string; clocks: string; updated_at: string };
+  type Lite = {
+    id: string;
+    parent_id: string | null;
+    title: string;
+    clocks: string;
+    updated_at: string;
+  };
   const rows = db.all<Lite>(
     `SELECT id, parent_id, title, clocks, updated_at FROM items
      WHERE deleted = 1 AND updated_at >= ?`,
@@ -887,13 +1090,17 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   if (candidates.length === 0) return [];
 
   // One batched lookup for the parents, instead of a getItem() per candidate.
-  const parentIds = [...new Set(candidates.map((c) => c.row.parent_id).filter((p): p is string => !!p))];
+  const parentIds = [
+    ...new Set(
+      candidates.map((c) => c.row.parent_id).filter((p): p is string => !!p),
+    ),
+  ];
   const deletedParents = new Set<string>();
   const knownParents = new Set<string>();
   for (let i = 0; i < parentIds.length; i += SUBTREE_BATCH) {
     const chunk = parentIds.slice(i, i + SUBTREE_BATCH);
     for (const p of db.all<{ id: string; deleted: number }>(
-      `SELECT id, deleted FROM items WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      `SELECT id, deleted FROM items WHERE id IN (${chunk.map(() => "?").join(",")})`,
       chunk,
     )) {
       knownParents.add(p.id);
@@ -917,7 +1124,7 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   for (let i = 0; i < blank.length; i += SUBTREE_BATCH) {
     const chunk = blank.slice(i, i + SUBTREE_BATCH);
     for (const k of db.all<{ parent_id: string }>(
-      `SELECT DISTINCT parent_id FROM items WHERE parent_id IN (${chunk.map(() => '?').join(',')})`,
+      `SELECT DISTINCT parent_id FROM items WHERE parent_id IN (${chunk.map(() => "?").join(",")})`,
       chunk,
     )) {
       hasChildren.add(k.parent_id);
@@ -925,7 +1132,7 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   }
 
   const listed = roots
-    .filter((c) => c.row.title.trim() !== '' || hasChildren.has(c.row.id))
+    .filter((c) => c.row.title.trim() !== "" || hasChildren.has(c.row.id))
     .sort((a, b) => b.deletedAt - a.deletedAt);
   if (listed.length === 0) return [];
 
@@ -935,7 +1142,7 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   for (let i = 0; i < ids.length; i += SUBTREE_BATCH) {
     const chunk = ids.slice(i, i + SUBTREE_BATCH);
     for (const r of db.all<ItemRow>(
-      `${SELECT} WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      `${SELECT} WHERE id IN (${chunk.map(() => "?").join(",")})`,
       chunk,
     )) {
       full.set(r.id, rowToItem(r));
@@ -944,6 +1151,39 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
   return listed
     .map((c) => ({ item: full.get(c.row.id)!, deletedAt: c.deletedAt }))
     .filter((e) => !!e.item);
+}
+
+/**
+ * Count of tombstone roots within the trash window — the sidebar's badge.
+ * Much cheaper than `deletedRoots()` because it never materialises the rows.
+ */
+export function trashCount(db: Db, windowDays: number = TRASH_WINDOW_DAYS): number {
+  const cutoffIso = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+  // Count tombstones that are roots (parent is live or missing) within the window.
+  // We count ALL tombstones in the window and subtract those whose parent is also
+  // a tombstone in the window (they'd be listed under their parent).
+  const allTombstones = db.get<{ c: number }>(
+    'SELECT COUNT(*) AS c FROM items WHERE deleted = 1 AND updated_at >= ?',
+    [cutoffIso],
+  )?.c ?? 0;
+  if (allTombstones === 0) return 0;
+
+  // Find tombstones whose parent is also a tombstone (these are not roots).
+  // Use a subquery: a tombstone T is not a root if there exists a parent P
+  // that is also a tombstone within the window.
+  const nonRoots = db.get<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM items t
+     WHERE t.deleted = 1 AND t.updated_at >= ?
+       AND EXISTS (
+         SELECT 1 FROM items p
+         WHERE p.id = t.parent_id
+           AND p.deleted = 1
+           AND p.updated_at >= ?
+       )`,
+    [cutoffIso, cutoffIso],
+  )?.c ?? 0;
+
+  return allTombstones - nonRoots;
 }
 
 /**
@@ -956,7 +1196,7 @@ export function deletedRoots(db: Db, windowDays: number = TRASH_WINDOW_DAYS): De
  */
 export function restorableIds(db: Db, id: string): string[] {
   const root = db.get<{ deleted: number; clocks: string; updated_at: string }>(
-    'SELECT deleted, clocks, updated_at FROM items WHERE id = ?',
+    "SELECT deleted, clocks, updated_at FROM items WHERE id = ?",
     [id],
   );
   if (!root || !root.deleted) return [];
@@ -967,7 +1207,7 @@ export function restorableIds(db: Db, id: string): string[] {
     const chunk = ids.slice(i, i + SUBTREE_BATCH);
     const rows = db.all<{ id: string; clocks: string; updated_at: string }>(
       `SELECT id, clocks, updated_at FROM items
-       WHERE deleted = 1 AND id IN (${chunk.map(() => '?').join(',')})`,
+       WHERE deleted = 1 AND id IN (${chunk.map(() => "?").join(",")})`,
       chunk,
     );
     for (const r of rows) {
@@ -995,13 +1235,15 @@ export function restoreItem(db: Db, deviceId: string, id: string): number {
   const orphaned = !!parentId && !getItem(db, parentId);
   for (const rid of ids) {
     const patch: ItemPatch =
-      rid === id && orphaned ? { deleted: false, parent_id: null } : { deleted: false };
+      rid === id && orphaned
+        ? { deleted: false, parent_id: null }
+        : { deleted: false };
     recordOp(db, deviceId, rid, patch);
   }
   return ids.length;
 }
 
-export type CountScope = 'all' | 'direct';
+export type CountScope = "all" | "direct";
 
 interface ChildRow {
   id: string;
@@ -1015,9 +1257,12 @@ interface ChildRow {
  *  walk, regardless of subtree size or how many containers are queried). */
 function childrenByParent(db: Db): Map<string, ChildRow[]> {
   const kids = new Map<string, ChildRow[]>();
-  for (const r of db.all<{ id: string; parent_id: string | null; type: string; status: string }>(
-    'SELECT id, parent_id, type, status FROM items WHERE deleted = 0',
-  )) {
+  for (const r of db.all<{
+    id: string;
+    parent_id: string | null;
+    type: string;
+    status: string;
+  }>("SELECT id, parent_id, type, status FROM items WHERE deleted = 0")) {
     if (!r.parent_id) continue;
     const row = { id: r.id, type: r.type, status: r.status };
     const arr = kids.get(r.parent_id);
@@ -1034,17 +1279,18 @@ function leafTaskProgress(
   kids: Map<string, ChildRow[]>,
   rootId: string,
 ): { done: number; total: number } {
-  const taskKids = (id: string) => (kids.get(id) ?? []).filter((c) => c.type === 'task');
+  const taskKids = (id: string) =>
+    (kids.get(id) ?? []).filter((c) => c.type === "task");
   let done = 0;
   let total = 0;
   const queue = [...(kids.get(rootId) ?? [])];
   while (queue.length) {
     const c = queue.shift()!;
-    if (c.type !== 'task') continue;
+    if (c.type !== "task") continue;
     const tk = taskKids(c.id);
     if (tk.length === 0) {
       total++;
-      if (c.status === 'done') done++;
+      if (c.status === "done") done++;
     } else {
       queue.push(...tk);
     }
@@ -1062,9 +1308,12 @@ export function subtaskProgress(
   id: string,
   scope: CountScope,
 ): { done: number; total: number } {
-  if (scope === 'direct') {
-    const kids = getChildren(db, id).filter((c) => c.type === 'task');
-    return { done: kids.filter((c) => c.status === 'done').length, total: kids.length };
+  if (scope === "direct") {
+    const kids = getChildren(db, id).filter((c) => c.type === "task");
+    return {
+      done: kids.filter((c) => c.status === "done").length,
+      total: kids.length,
+    };
   }
   return leafTaskProgress(childrenByParent(db), id);
 }
@@ -1084,8 +1333,10 @@ export function openCountsByContainer(
   if (containerIds.length === 0) return out;
   const kids = childrenByParent(db);
   const remaining = (id: string): number => {
-    if (scope === 'direct') {
-      return (kids.get(id) ?? []).filter((c) => c.type === 'task' && c.status !== 'done').length;
+    if (scope === "direct") {
+      return (kids.get(id) ?? []).filter(
+        (c) => c.type === "task" && c.status !== "done",
+      ).length;
     }
     const { done, total } = leafTaskProgress(kids, id);
     return total - done;
@@ -1107,7 +1358,7 @@ export function inheritedPriority(db: Db, item: Item): number {
   while (pid && guard++ < 50) {
     const p = getItem(db, pid);
     if (!p || p.deleted) break;
-    if (p.type === 'task' && p.priority > 0) return p.priority;
+    if (p.type === "task" && p.priority > 0) return p.priority;
     pid = p.parent_id;
   }
   return 0;
@@ -1120,17 +1371,22 @@ export function projectEstimateMinutes(db: Db, id: string): number {
   for (const d of collectDescendants(db, id)) {
     if (d === id) continue;
     const it = getItem(db, d);
-    if (it && !it.deleted && it.type === 'task' && it.estimate_minutes) sum += it.estimate_minutes;
+    if (it && !it.deleted && it.type === "task" && it.estimate_minutes)
+      sum += it.estimate_minutes;
   }
   return sum;
 }
 
 /** Complete an item *and* every descendant task — the §7 "complete all sub-tasks"
  *  escape hatch for finishing a parent with unfinished children. */
-export function setCompletedCascade(db: Db, deviceId: string, id: string): void {
+export function setCompletedCascade(
+  db: Db,
+  deviceId: string,
+  id: string,
+): void {
   for (const d of collectDescendants(db, id)) {
     const it = getItem(db, d);
-    if (it && it.type === 'task' && it.status !== 'done') {
+    if (it && it.type === "task" && it.status !== "done") {
       setCompleted(db, deviceId, d, true);
     }
   }
@@ -1141,9 +1397,10 @@ function collectDescendants(db: Db, rootId: string): string[] {
   const queue = [rootId];
   while (queue.length) {
     const parent = queue.shift()!;
-    const kids = db.all<{ id: string }>('SELECT id FROM items WHERE parent_id = ?', [
-      parent,
-    ]);
+    const kids = db.all<{ id: string }>(
+      "SELECT id FROM items WHERE parent_id = ?",
+      [parent],
+    );
     for (const k of kids) {
       result.push(k.id);
       queue.push(k.id);
@@ -1164,7 +1421,7 @@ export function moveItem(
   recordOp(db, deviceId, id, patch);
   const moved = getItem(db, id);
   // An inert note child never reopens a completed parent; only an incomplete task does.
-  if (moved && moved.type !== 'note' && moved.status !== 'done')
+  if (moved && moved.type !== "note" && moved.status !== "done")
     reopenParentIfNeeded(db, deviceId, parentId);
 }
 
@@ -1174,7 +1431,12 @@ const orderedSiblings = (db: Db, parentId: string | null): Item[] =>
     .sort((a, b) => a.sort_order - b.sort_order);
 
 /** Move an item among its siblings: dir -1 = up, 1 = down. */
-export function reorderSibling(db: Db, deviceId: string, id: string, dir: -1 | 1): void {
+export function reorderSibling(
+  db: Db,
+  deviceId: string,
+  id: string,
+  dir: -1 | 1,
+): void {
   const it = getItem(db, id);
   if (!it) return;
   const sibs = orderedSiblings(db, it.parent_id);
@@ -1183,10 +1445,14 @@ export function reorderSibling(db: Db, deviceId: string, id: string, dir: -1 | 1
   if (idx < 0 || tgt < 0 || tgt >= sibs.length) return;
   let order: number;
   if (dir < 0) {
-    const before = tgt > 0 ? sibs[tgt - 1]!.sort_order : sibs[tgt]!.sort_order - 1;
+    const before =
+      tgt > 0 ? sibs[tgt - 1]!.sort_order : sibs[tgt]!.sort_order - 1;
     order = (before + sibs[tgt]!.sort_order) / 2;
   } else {
-    const after = tgt < sibs.length - 1 ? sibs[tgt + 1]!.sort_order : sibs[tgt]!.sort_order + 1;
+    const after =
+      tgt < sibs.length - 1
+        ? sibs[tgt + 1]!.sort_order
+        : sibs[tgt]!.sort_order + 1;
     order = (sibs[tgt]!.sort_order + after) / 2;
   }
   moveItem(db, deviceId, id, it.parent_id, order);
@@ -1204,7 +1470,12 @@ export function indentItem(db: Db, deviceId: string, id: string): void {
 
 /** Outdent: move the item up to its grandparent, right after its old parent.
  *  Won't move out past `stopAt` (e.g. the tree root). */
-export function outdentItem(db: Db, deviceId: string, id: string, stopAt: string | null): void {
+export function outdentItem(
+  db: Db,
+  deviceId: string,
+  id: string,
+  stopAt: string | null,
+): void {
   const it = getItem(db, id);
   if (!it || !it.parent_id || it.parent_id === stopAt) return;
   const parent = getItem(db, it.parent_id);
@@ -1213,7 +1484,9 @@ export function outdentItem(db: Db, deviceId: string, id: string, stopAt: string
   const gsibs = orderedSiblings(db, grand);
   const pidx = gsibs.findIndex((s) => s.id === parent.id);
   const after =
-    pidx >= 0 && pidx < gsibs.length - 1 ? gsibs[pidx + 1]!.sort_order : parent.sort_order + 1;
+    pidx >= 0 && pidx < gsibs.length - 1
+      ? gsibs[pidx + 1]!.sort_order
+      : parent.sort_order + 1;
   moveItem(db, deviceId, id, grand, (parent.sort_order + after) / 2);
 }
 
@@ -1229,11 +1502,22 @@ export function createSiblingAfter(
   const sibs = orderedSiblings(db, parentId);
   const idx = sibs.findIndex((s) => s.id === afterId);
   const cur = it?.sort_order ?? 0;
-  const next = idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1]!.sort_order : cur + 1;
-  return createItem(db, deviceId, { title: '', parentId, ownerId, sortOrder: (cur + next) / 2 });
+  const next =
+    idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1]!.sort_order : cur + 1;
+  return createItem(db, deviceId, {
+    title: "",
+    parentId,
+    ownerId,
+    sortOrder: (cur + next) / 2,
+  });
 }
 
-export function reorderItem(db: Db, deviceId: string, id: string, sortOrder: number): void {
+export function reorderItem(
+  db: Db,
+  deviceId: string,
+  id: string,
+  sortOrder: number,
+): void {
   recordOp(db, deviceId, id, { sort_order: sortOrder });
 }
 
@@ -1259,7 +1543,10 @@ export function deleteFolder(db: Db, deviceId: string, id: string): void {
     [id],
   );
   for (const m of members) {
-    recordOp(db, deviceId, m.id, { folder_id: null, sort_order: nextSortOrder(db, null) });
+    recordOp(db, deviceId, m.id, {
+      folder_id: null,
+      sort_order: nextSortOrder(db, null),
+    });
   }
   recordOp(db, deviceId, id, { deleted: true });
 }
@@ -1271,7 +1558,9 @@ export function markReviewed(db: Db, deviceId: string, id: string): void {
 /** Assign ownership of all currently-unowned items to a user (run once on first
  *  login so locally-captured items become the user's and sync correctly). */
 export function claimUnowned(db: Db, deviceId: string, userId: string): number {
-  const rows = db.all<{ id: string }>('SELECT id FROM items WHERE owner_id IS NULL');
+  const rows = db.all<{ id: string }>(
+    "SELECT id FROM items WHERE owner_id IS NULL",
+  );
   for (const r of rows) recordOp(db, deviceId, r.id, { owner_id: userId });
   return rows.length;
 }
@@ -1302,7 +1591,7 @@ function rowToTag(t: TagRow): Tag {
     id: t.id,
     name: t.name,
     color: t.color,
-    status: (t.status as TagStatus) || 'active',
+    status: (t.status as TagStatus) || "active",
     sort_order: t.sort_order ?? 0,
     geo: t.geo ?? null,
     created_at: t.created_at,
@@ -1316,56 +1605,61 @@ function rowToTag(t: TagRow): Tag {
 /** Split a tag path into its trimmed, non-empty segments. */
 export function tagSegments(name: string): string[] {
   return name
-    .split(':')
+    .split(":")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
 /** Canonical path form: trimmed segments rejoined, empties dropped. */
 export function normalizeTagName(name: string): string {
-  return tagSegments(name).join(':');
+  return tagSegments(name).join(":");
 }
 
 /** Parent path of a tag path ("" for a top-level tag). */
 export function tagParentPath(name: string): string {
   const segs = tagSegments(name);
-  return segs.slice(0, -1).join(':');
+  return segs.slice(0, -1).join(":");
 }
 
 /** The leaf (last) segment of a tag path. */
 export function tagLeaf(name: string): string {
   const segs = tagSegments(name);
-  return segs[segs.length - 1] ?? '';
+  return segs[segs.length - 1] ?? "";
 }
 
 /** Deterministic, content-addressed tag id so the same path converges across devices. */
 export function tagId(name: string): string {
-  return 't:' + normalizeTagName(name).toLowerCase();
+  return "t:" + normalizeTagName(name).toLowerCase();
 }
 
-const itemTagRowId = (itemId: string, tag: string): string => `it:${itemId}:${tag}`;
+const itemTagRowId = (itemId: string, tag: string): string =>
+  `it:${itemId}:${tag}`;
 
 export function listTags(db: Db): Tag[] {
   return db
-    .all<TagRow>('SELECT * FROM tags WHERE deleted = 0 ORDER BY sort_order, name')
+    .all<TagRow>(
+      "SELECT * FROM tags WHERE deleted = 0 ORDER BY sort_order, name",
+    )
     .map(rowToTag);
 }
 
 /** Next sort_order after the last sibling sharing the given parent path. */
 function nextTagSortOrder(db: Db, parentPath: string): number {
   const rows = db.all<{ name: string; sort_order: number }>(
-    'SELECT name, sort_order FROM tags WHERE deleted = 0',
+    "SELECT name, sort_order FROM tags WHERE deleted = 0",
   );
   let max = 0;
-  for (const r of rows) if (tagParentPath(r.name) === parentPath) max = Math.max(max, r.sort_order ?? 0);
+  for (const r of rows)
+    if (tagParentPath(r.name) === parentPath)
+      max = Math.max(max, r.sort_order ?? 0);
   return max + 1;
 }
 
 /** Emit a tag record-op from a fully-formed Tag (stamps a fresh updated_at from the
  *  causal clock, skew-safe like shareItem/setItemDepLink — see upsertTag's LWW merge). */
-function emitTag(db: Db, deviceId: string, tag: Omit<Tag, 'updated_at'>): Tag {
+function emitTag(db: Db, deviceId: string, tag: Omit<Tag, "updated_at">): Tag {
   const full: Tag = { ...tag, updated_at: causalNowIso(db) };
-  recordRecordOp(db, deviceId, 'tag', full.id, full);
+  recordRecordOp(db, deviceId, "tag", full.id, full);
   return full;
 }
 
@@ -1373,15 +1667,18 @@ function emitTag(db: Db, deviceId: string, tag: Omit<Tag, 'updated_at'>): Tag {
 function ensureAncestors(db: Db, deviceId: string, name: string): void {
   const segs = tagSegments(name);
   for (let i = 1; i < segs.length; i++) {
-    const path = segs.slice(0, i).join(':');
+    const path = segs.slice(0, i).join(":");
     const id = tagId(path);
-    const row = db.get<TagRow>('SELECT id FROM tags WHERE id = ? AND deleted = 0', [id]);
+    const row = db.get<TagRow>(
+      "SELECT id FROM tags WHERE id = ? AND deleted = 0",
+      [id],
+    );
     if (!row) {
       emitTag(db, deviceId, {
         id,
         name: path,
         color: null,
-        status: 'active',
+        status: "active",
         sort_order: nextTagSortOrder(db, tagParentPath(path)),
         geo: null,
         created_at: new Date().toISOString(),
@@ -1391,18 +1688,24 @@ function ensureAncestors(db: Db, deviceId: string, name: string): void {
   }
 }
 
-export function createTag(db: Db, deviceId: string, rawName: string, color: string | null = null): Tag {
+export function createTag(
+  db: Db,
+  deviceId: string,
+  rawName: string,
+  color: string | null = null,
+): Tag {
   const name = normalizeTagName(rawName);
   const id = tagId(name);
   ensureAncestors(db, deviceId, name);
-  const existing = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [id]);
+  const existing = db.get<TagRow>("SELECT * FROM tags WHERE id = ?", [id]);
   if (existing && !existing.deleted) return rowToTag(existing);
   return emitTag(db, deviceId, {
     id,
     name,
     color: color ?? existing?.color ?? null,
-    status: (existing?.status as TagStatus) || 'active',
-    sort_order: existing?.sort_order ?? nextTagSortOrder(db, tagParentPath(name)),
+    status: (existing?.status as TagStatus) || "active",
+    sort_order:
+      existing?.sort_order ?? nextTagSortOrder(db, tagParentPath(name)),
     geo: existing?.geo ?? null,
     created_at: existing?.created_at ?? new Date().toISOString(),
     deleted: false,
@@ -1413,15 +1716,20 @@ export function updateTag(
   db: Db,
   deviceId: string,
   id: string,
-  patch: { color?: string | null; status?: TagStatus; geo?: string | null; sort_order?: number },
+  patch: {
+    color?: string | null;
+    status?: TagStatus;
+    geo?: string | null;
+    sort_order?: number;
+  },
 ): void {
-  const existing = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [id]);
+  const existing = db.get<TagRow>("SELECT * FROM tags WHERE id = ?", [id]);
   if (!existing) return;
   emitTag(db, deviceId, {
     ...rowToTag(existing),
     color: patch.color !== undefined ? patch.color : existing.color,
-    status: patch.status ?? ((existing.status as TagStatus) || 'active'),
-    geo: patch.geo !== undefined ? patch.geo : existing.geo ?? null,
+    status: patch.status ?? ((existing.status as TagStatus) || "active"),
+    geo: patch.geo !== undefined ? patch.geo : (existing.geo ?? null),
     sort_order: patch.sort_order ?? existing.sort_order ?? 0,
     deleted: false,
   });
@@ -1429,7 +1737,12 @@ export function updateTag(
 
 /** Set a tag's position among its siblings (web computes the fractional midpoint,
  *  mirroring reorderItem). */
-export function reorderTag(db: Db, deviceId: string, id: string, sortOrder: number): void {
+export function reorderTag(
+  db: Db,
+  deviceId: string,
+  id: string,
+  sortOrder: number,
+): void {
   updateTag(db, deviceId, id, { sort_order: sortOrder });
 }
 
@@ -1439,8 +1752,16 @@ export function reorderTag(db: Db, deviceId: string, id: string, sortOrder: numb
  * new id, re-points all item links, and tombstones the old id. If the target path
  * already exists the subtrees merge (links union). No-op if the path is unchanged.
  */
-export function moveTag(db: Db, deviceId: string, id: string, newRawName: string): void {
-  const src = db.get<TagRow>('SELECT * FROM tags WHERE id = ? AND deleted = 0', [id]);
+export function moveTag(
+  db: Db,
+  deviceId: string,
+  id: string,
+  newRawName: string,
+): void {
+  const src = db.get<TagRow>(
+    "SELECT * FROM tags WHERE id = ? AND deleted = 0",
+    [id],
+  );
   if (!src) return;
   const newName = normalizeTagName(newRawName);
   if (!newName) return;
@@ -1451,36 +1772,43 @@ export function moveTag(db: Db, deviceId: string, id: string, newRawName: string
 
   // Subtree = the node plus every descendant (by path prefix), parents first.
   const subtree = db
-    .all<TagRow>('SELECT * FROM tags WHERE deleted = 0 ORDER BY name', [])
-    .filter((t) => t.id === id || t.id.startsWith(id + ':'));
+    .all<TagRow>("SELECT * FROM tags WHERE deleted = 0 ORDER BY name", [])
+    .filter((t) => t.id === id || t.id.startsWith(id + ":"));
 
   for (const node of subtree) {
     const targetName = newName + node.name.slice(oldName.length);
     const targetId = tagId(targetName);
     if (targetId === node.id) continue; // path unchanged for this node
 
-    const existingTarget = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [targetId]);
-    const liveTarget = existingTarget && !existingTarget.deleted ? existingTarget : null;
+    const existingTarget = db.get<TagRow>("SELECT * FROM tags WHERE id = ?", [
+      targetId,
+    ]);
+    const liveTarget =
+      existingTarget && !existingTarget.deleted ? existingTarget : null;
     // The dragged node itself lands at the end of its new sibling list; deeper
     // descendants keep their relative order.
     const sort_order =
       liveTarget?.sort_order ??
-      (node.id === id ? nextTagSortOrder(db, tagParentPath(targetName)) : node.sort_order ?? 0);
+      (node.id === id
+        ? nextTagSortOrder(db, tagParentPath(targetName))
+        : (node.sort_order ?? 0));
     emitTag(db, deviceId, {
       id: targetId,
       name: targetName,
       // Prefer a live target's own colour/status/geo; otherwise carry the node's.
       color: liveTarget ? liveTarget.color : node.color,
-      status: ((liveTarget ? liveTarget.status : node.status) as TagStatus) || 'active',
+      status:
+        ((liveTarget ? liveTarget.status : node.status) as TagStatus) ||
+        "active",
       sort_order,
-      geo: liveTarget ? liveTarget.geo ?? null : node.geo ?? null,
+      geo: liveTarget ? (liveTarget.geo ?? null) : (node.geo ?? null),
       created_at: existingTarget?.created_at ?? node.created_at,
       deleted: false,
     });
 
     // Re-point this node's item links onto the target id, tombstoning the old.
     for (const r of db.all<{ item_id: string }>(
-      'SELECT item_id FROM item_tags WHERE tag_id = ? AND deleted = 0',
+      "SELECT item_id FROM item_tags WHERE tag_id = ? AND deleted = 0",
       [node.id],
     )) {
       setItemTagLink(db, deviceId, r.item_id, targetId, false);
@@ -1496,9 +1824,9 @@ export function moveTag(db: Db, deviceId: string, id: string, newRawName: string
 
 /** Ids of all live descendants of a tag (excludes the tag itself). */
 export function descendantTagIds(db: Db, id: string): string[] {
-  const prefix = id + ':';
+  const prefix = id + ":";
   return db
-    .all<{ id: string }>('SELECT id FROM tags WHERE deleted = 0')
+    .all<{ id: string }>("SELECT id FROM tags WHERE deleted = 0")
     .map((r) => r.id)
     .filter((x) => x.startsWith(prefix));
 }
@@ -1518,7 +1846,7 @@ export function effectiveTagColor(db: Db, name: string): string | null {
   let path = normalizeTagName(name);
   while (path) {
     const row = db.get<{ color: string | null }>(
-      'SELECT color FROM tags WHERE id = ? AND deleted = 0',
+      "SELECT color FROM tags WHERE id = ? AND deleted = 0",
       [tagId(path)],
     );
     if (row && row.color) return row.color;
@@ -1533,7 +1861,9 @@ export function effectiveTagColor(db: Db, name: string): string | null {
 export function onHoldTagIds(db: Db): Set<string> {
   return new Set(
     db
-      .all<{ id: string }>("SELECT id FROM tags WHERE deleted = 0 AND status = 'on-hold'")
+      .all<{ id: string }>(
+        "SELECT id FROM tags WHERE deleted = 0 AND status = 'on-hold'",
+      )
       .map((r) => r.id),
   );
 }
@@ -1545,16 +1875,20 @@ export function heldTagIds(db: Db): Set<string> {
 
 /** True if `itemId` carries any tag in `held` (defaults to the live held set).
  *  Used to suppress reminders for tasks tagged on-hold. */
-export function itemHasHeldTag(db: Db, itemId: string, held?: Set<string>): boolean {
+export function itemHasHeldTag(
+  db: Db,
+  itemId: string,
+  held?: Set<string>,
+): boolean {
   const set = held ?? heldTagIds(db);
   if (set.size === 0) return false;
   return getItemTags(db, itemId).some((t) => set.has(t.id));
 }
 
 export function deleteTag(db: Db, deviceId: string, id: string): void {
-  const existing = db.get<TagRow>('SELECT * FROM tags WHERE id = ?', [id]);
+  const existing = db.get<TagRow>("SELECT * FROM tags WHERE id = ?", [id]);
   if (existing) {
-    recordRecordOp(db, deviceId, 'tag', id, {
+    recordRecordOp(db, deviceId, "tag", id, {
       ...rowToTag(existing),
       deleted: true,
       updated_at: causalNowIso(db),
@@ -1562,7 +1896,7 @@ export function deleteTag(db: Db, deviceId: string, id: string): void {
   }
   // Tombstone its links so the removal syncs too.
   for (const r of db.all<{ item_id: string }>(
-    'SELECT item_id FROM item_tags WHERE tag_id = ? AND deleted = 0',
+    "SELECT item_id FROM item_tags WHERE tag_id = ? AND deleted = 0",
     [id],
   )) {
     setItemTagLink(db, deviceId, r.item_id, id, true);
@@ -1611,25 +1945,40 @@ export function setItemTagLink(
   tag: string,
   deleted: boolean,
 ): void {
-  const row: ItemTag = { item_id: itemId, tag_id: tag, updated_at: causalNowIso(db), deleted };
-  recordRecordOp(db, deviceId, 'item_tag', itemTagRowId(itemId, tag), row);
+  const row: ItemTag = {
+    item_id: itemId,
+    tag_id: tag,
+    updated_at: causalNowIso(db),
+    deleted,
+  };
+  recordRecordOp(db, deviceId, "item_tag", itemTagRowId(itemId, tag), row);
 }
 
-export function setItemTags(db: Db, deviceId: string, itemId: string, tagIds: string[]): void {
+export function setItemTags(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  tagIds: string[],
+): void {
   const current = db
-    .all<{ tag_id: string }>('SELECT tag_id FROM item_tags WHERE item_id = ? AND deleted = 0', [
-      itemId,
-    ])
+    .all<{ tag_id: string }>(
+      "SELECT tag_id FROM item_tags WHERE item_id = ? AND deleted = 0",
+      [itemId],
+    )
     .map((r) => r.tag_id);
   const next = new Set(tagIds);
-  for (const tid of current) if (!next.has(tid)) setItemTagLink(db, deviceId, itemId, tid, true);
-  for (const tid of tagIds) if (!current.includes(tid)) setItemTagLink(db, deviceId, itemId, tid, false);
+  for (const tid of current)
+    if (!next.has(tid)) setItemTagLink(db, deviceId, itemId, tid, true);
+  for (const tid of tagIds)
+    if (!current.includes(tid))
+      setItemTagLink(db, deviceId, itemId, tid, false);
 }
 
 export function upsertTag(db: Db, tag: Tag): void {
-  const existing = db.get<{ updated_at: string }>('SELECT updated_at FROM tags WHERE id = ?', [
-    tag.id,
-  ]);
+  const existing = db.get<{ updated_at: string }>(
+    "SELECT updated_at FROM tags WHERE id = ?",
+    [tag.id],
+  );
   if (existing && existing.updated_at > tag.updated_at) return;
   db.run(
     `INSERT INTO tags (id, name, color, status, sort_order, geo, created_at, updated_at, deleted)
@@ -1642,7 +1991,7 @@ export function upsertTag(db: Db, tag: Tag): void {
       tag.id,
       tag.name,
       tag.color ?? null,
-      tag.status || 'active',
+      tag.status || "active",
       tag.sort_order ?? 0,
       tag.geo ?? null,
       tag.created_at,
@@ -1654,7 +2003,7 @@ export function upsertTag(db: Db, tag: Tag): void {
 
 export function upsertItemTag(db: Db, row: ItemTag): void {
   const existing = db.get<{ updated_at: string }>(
-    'SELECT updated_at FROM item_tags WHERE item_id = ? AND tag_id = ?',
+    "SELECT updated_at FROM item_tags WHERE item_id = ? AND tag_id = ?",
     [row.item_id, row.tag_id],
   );
   if (existing && existing.updated_at > row.updated_at) return;
@@ -1673,7 +2022,8 @@ export function upsertItemTag(db: Db, row: ItemTag): void {
 // available until pred is done/dropped. Synced row-level like item_tags, and
 // (like item_tags) stamped with the causal clock so LWW merge is skew-safe.
 
-const depRowId = (predId: string, succId: string): string => `dep:${predId}:${succId}`;
+const depRowId = (predId: string, succId: string): string =>
+  `dep:${predId}:${succId}`;
 
 /** Add or tombstone a single dependency edge (pred blocks succ) as a synced op. */
 export function setItemDepLink(
@@ -1683,13 +2033,18 @@ export function setItemDepLink(
   succId: string,
   deleted: boolean,
 ): void {
-  const row: ItemDep = { pred_id: predId, succ_id: succId, updated_at: causalNowIso(db), deleted };
-  recordRecordOp(db, deviceId, 'item_dep', depRowId(predId, succId), row);
+  const row: ItemDep = {
+    pred_id: predId,
+    succ_id: succId,
+    updated_at: causalNowIso(db),
+    deleted,
+  };
+  recordRecordOp(db, deviceId, "item_dep", depRowId(predId, succId), row);
 }
 
 export function upsertItemDep(db: Db, row: ItemDep): void {
   const existing = db.get<{ updated_at: string }>(
-    'SELECT updated_at FROM item_deps WHERE pred_id = ? AND succ_id = ?',
+    "SELECT updated_at FROM item_deps WHERE pred_id = ? AND succ_id = ?",
     [row.pred_id, row.succ_id],
   );
   if (existing && existing.updated_at > row.updated_at) return;
@@ -1732,7 +2087,7 @@ export function getSuccessors(db: Db, itemId: string): Item[] {
 function successorIds(db: Db, itemId: string): string[] {
   return db
     .all<{ succ_id: string }>(
-      'SELECT succ_id FROM item_deps WHERE pred_id = ? AND deleted = 0',
+      "SELECT succ_id FROM item_deps WHERE pred_id = ? AND deleted = 0",
       [itemId],
     )
     .map((r) => r.succ_id);
@@ -1776,19 +2131,25 @@ export function isLineage(db: Db, a: string, b: string): boolean {
 /** One-time emit of record-ops for pre-existing local tags & links so they sync. */
 export function backfillTagRecordOps(db: Db, deviceId: string): number {
   let n = 0;
-  for (const t of db.all<TagRow>('SELECT * FROM tags')) {
-    recordRecordOp(db, deviceId, 'tag', t.id, rowToTag(t));
+  for (const t of db.all<TagRow>("SELECT * FROM tags")) {
+    recordRecordOp(db, deviceId, "tag", t.id, rowToTag(t));
     n++;
   }
   for (const it of db.all<ItemTagRow>(
-    'SELECT item_id, tag_id, updated_at, deleted FROM item_tags',
+    "SELECT item_id, tag_id, updated_at, deleted FROM item_tags",
   )) {
-    recordRecordOp(db, deviceId, 'item_tag', itemTagRowId(it.item_id, it.tag_id), {
-      item_id: it.item_id,
-      tag_id: it.tag_id,
-      updated_at: it.updated_at,
-      deleted: !!it.deleted,
-    });
+    recordRecordOp(
+      db,
+      deviceId,
+      "item_tag",
+      itemTagRowId(it.item_id, it.tag_id),
+      {
+        item_id: it.item_id,
+        tag_id: it.tag_id,
+        updated_at: it.updated_at,
+        deleted: !!it.deleted,
+      },
+    );
     n++;
   }
   return n;
@@ -1820,7 +2181,7 @@ export function rowToTimeLog(r: TimeLogRow): TimeLog {
     note: r.note,
     created_at: r.created_at,
     updated_at: r.updated_at,
-    kind: (r.kind as TimeLog['kind']) ?? 'task',
+    kind: (r.kind as TimeLog["kind"]) ?? "task",
     session_id: r.session_id ?? null,
     deleted: !!r.deleted,
   };
@@ -1831,7 +2192,7 @@ export function rowToTimeLog(r: TimeLogRow): TimeLog {
  *  `updated_at` isn't newer than what's stored is dropped rather than clobbering it. */
 export function upsertTimeLog(db: Db, log: TimeLog): void {
   const existing = db.get<{ updated_at: string }>(
-    'SELECT updated_at FROM time_logs WHERE id = ?',
+    "SELECT updated_at FROM time_logs WHERE id = ?",
     [log.id],
   );
   if (existing && existing.updated_at > log.updated_at) return;
@@ -1851,7 +2212,7 @@ export function upsertTimeLog(db: Db, log: TimeLog): void {
       log.note ?? null,
       log.created_at,
       log.updated_at,
-      log.kind ?? 'task',
+      log.kind ?? "task",
       log.session_id ?? null,
       log.deleted ? 1 : 0,
     ],
@@ -1859,9 +2220,9 @@ export function upsertTimeLog(db: Db, log: TimeLog): void {
 }
 
 export function deleteTimeLog(db: Db, deviceId: string, id: string): void {
-  const r = db.get<TimeLogRow>('SELECT * FROM time_logs WHERE id = ?', [id]);
+  const r = db.get<TimeLogRow>("SELECT * FROM time_logs WHERE id = ?", [id]);
   if (!r) return;
-  recordRecordOp(db, deviceId, 'timelog', id, {
+  recordRecordOp(db, deviceId, "timelog", id, {
     ...rowToTimeLog(r),
     deleted: true,
     updated_at: causalNowIso(db),
@@ -1877,14 +2238,14 @@ export function deleteTimeLog(db: Db, deviceId: string, id: string): void {
  */
 export function saveTimeLog(db: Db, deviceId: string, log: TimeLog): TimeLog {
   const stamped: TimeLog = { ...log, updated_at: causalNowIso(db) };
-  recordRecordOp(db, deviceId, 'timelog', stamped.id, stamped);
+  recordRecordOp(db, deviceId, "timelog", stamped.id, stamped);
   return stamped;
 }
 
 export function getTimeLogs(db: Db, itemId: string): TimeLog[] {
   return db
     .all<TimeLogRow>(
-      'SELECT * FROM time_logs WHERE item_id = ? AND deleted = 0 ORDER BY start_time DESC',
+      "SELECT * FROM time_logs WHERE item_id = ? AND deleted = 0 ORDER BY start_time DESC",
       [itemId],
     )
     .map(rowToTimeLog);
@@ -1906,34 +2267,37 @@ export function startTimer(
     note: null,
     created_at: now,
     updated_at: causalNowIso(db),
-    kind: 'task',
+    kind: "task",
     session_id: null,
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'timelog', log.id, log);
+  recordRecordOp(db, deviceId, "timelog", log.id, log);
   return log;
 }
 
 export function stopTimer(db: Db, deviceId: string, logId: string): void {
-  const r = db.get<TimeLogRow>('SELECT * FROM time_logs WHERE id = ?', [logId]);
+  const r = db.get<TimeLogRow>("SELECT * FROM time_logs WHERE id = ?", [logId]);
   if (!r || r.end_time) return;
   const stopped: TimeLog = {
     ...rowToTimeLog(r),
     end_time: new Date().toISOString(),
     updated_at: causalNowIso(db),
   };
-  recordRecordOp(db, deviceId, 'timelog', stopped.id, stopped);
+  recordRecordOp(db, deviceId, "timelog", stopped.id, stopped);
 }
 
 /** The running (unfinished) timer, optionally for a specific user. */
-export function getRunningTimer(db: Db, userId?: string | null): TimeLog | undefined {
+export function getRunningTimer(
+  db: Db,
+  userId?: string | null,
+): TimeLog | undefined {
   const row = userId
     ? db.get<TimeLogRow>(
-        'SELECT * FROM time_logs WHERE end_time IS NULL AND user_id = ? ORDER BY start_time DESC LIMIT 1',
+        "SELECT * FROM time_logs WHERE end_time IS NULL AND user_id = ? ORDER BY start_time DESC LIMIT 1",
         [userId],
       )
     : db.get<TimeLogRow>(
-        'SELECT * FROM time_logs WHERE end_time IS NULL ORDER BY start_time DESC LIMIT 1',
+        "SELECT * FROM time_logs WHERE end_time IS NULL ORDER BY start_time DESC LIMIT 1",
       );
   return row ? rowToTimeLog(row) : undefined;
 }
@@ -1963,22 +2327,33 @@ const rowToShare = (r: ShareRow): Share => ({
 });
 
 export function upsertShare(db: Db, s: Share): void {
-  const existing = db.get<{ updated_at: string }>('SELECT updated_at FROM shares WHERE id = ?', [
-    s.id,
-  ]);
+  const existing = db.get<{ updated_at: string }>(
+    "SELECT updated_at FROM shares WHERE id = ?",
+    [s.id],
+  );
   if (existing && existing.updated_at > s.updated_at) return;
   db.run(
     `INSERT INTO shares (id, item_id, user_id, permission, created_at, updated_at, deleted)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET permission = excluded.permission,
        updated_at = excluded.updated_at, deleted = excluded.deleted`,
-    [s.id, s.item_id, s.user_id, s.permission ?? 'read', s.created_at, s.updated_at, s.deleted ? 1 : 0],
+    [
+      s.id,
+      s.item_id,
+      s.user_id,
+      s.permission ?? "read",
+      s.created_at,
+      s.updated_at,
+      s.deleted ? 1 : 0,
+    ],
   );
 }
 
 export function listSharesForItem(db: Db, itemId: string): Share[] {
   return db
-    .all<ShareRow>('SELECT * FROM shares WHERE item_id = ? AND deleted = 0', [itemId])
+    .all<ShareRow>("SELECT * FROM shares WHERE item_id = ? AND deleted = 0", [
+      itemId,
+    ])
     .map(rowToShare);
 }
 
@@ -1990,7 +2365,9 @@ export function shareItem(
   permission: Permission,
 ): Share {
   const now = causalNowIso(db);
-  const existing = db.get<ShareRow>('SELECT * FROM shares WHERE id = ?', [shareId(itemId, userId)]);
+  const existing = db.get<ShareRow>("SELECT * FROM shares WHERE id = ?", [
+    shareId(itemId, userId),
+  ]);
   const share: Share = {
     id: shareId(itemId, userId),
     item_id: itemId,
@@ -2000,15 +2377,26 @@ export function shareItem(
     updated_at: now,
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'share', share.id, share);
+  recordRecordOp(db, deviceId, "share", share.id, share);
   return share;
 }
 
-export function unshareItem(db: Db, deviceId: string, itemId: string, userId: string): void {
-  const existing = db.get<ShareRow>('SELECT * FROM shares WHERE id = ?', [shareId(itemId, userId)]);
+export function unshareItem(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  userId: string,
+): void {
+  const existing = db.get<ShareRow>("SELECT * FROM shares WHERE id = ?", [
+    shareId(itemId, userId),
+  ]);
   if (!existing) return;
-  const tombstone: Share = { ...rowToShare(existing), deleted: true, updated_at: causalNowIso(db) };
-  recordRecordOp(db, deviceId, 'share', tombstone.id, tombstone);
+  const tombstone: Share = {
+    ...rowToShare(existing),
+    deleted: true,
+    updated_at: causalNowIso(db),
+  };
+  recordRecordOp(db, deviceId, "share", tombstone.id, tombstone);
 }
 
 export interface EffectiveShare {
@@ -2064,9 +2452,16 @@ function ownsItemOrAncestor(db: Db, itemId: string, userId: string): boolean {
   return false;
 }
 
-export function hasWriteAccess(db: Db, itemId: string, userId: string): boolean {
+export function hasWriteAccess(
+  db: Db,
+  itemId: string,
+  userId: string,
+): boolean {
   if (ownsItemOrAncestor(db, itemId, userId)) return true;
-  return effectiveShares(db, itemId).find((e) => e.user_id === userId)?.permission === 'write';
+  return (
+    effectiveShares(db, itemId).find((e) => e.user_id === userId)
+      ?.permission === "write"
+  );
 }
 
 /** True if the user owns the item (or an ancestor), or has any effective share on it. */
@@ -2093,9 +2488,10 @@ const rowToAssignee = (r: AssigneeRow): Assignee => ({
 });
 
 export function upsertAssignee(db: Db, a: Assignee): void {
-  const existing = db.get<{ updated_at: string }>('SELECT updated_at FROM assignees WHERE id = ?', [
-    a.id,
-  ]);
+  const existing = db.get<{ updated_at: string }>(
+    "SELECT updated_at FROM assignees WHERE id = ?",
+    [a.id],
+  );
   if (existing && existing.updated_at > a.updated_at) return;
   db.run(
     `INSERT INTO assignees (id, item_id, user_id, created_at, updated_at, deleted)
@@ -2107,7 +2503,10 @@ export function upsertAssignee(db: Db, a: Assignee): void {
 
 export function listAssigneesForItem(db: Db, itemId: string): Assignee[] {
   return db
-    .all<AssigneeRow>('SELECT * FROM assignees WHERE item_id = ? AND deleted = 0', [itemId])
+    .all<AssigneeRow>(
+      "SELECT * FROM assignees WHERE item_id = ? AND deleted = 0",
+      [itemId],
+    )
     .map(rowToAssignee);
 }
 
@@ -2117,7 +2516,7 @@ export function listAssigneesForItem(db: Db, itemId: string): Assignee[] {
 // assignee variants also skip their query entirely when the table has no live
 // rows (the common single-user case), turning N per-item lookups into one.
 
-const inClause = (ids: string[]) => ids.map(() => '?').join(', ');
+const inClause = (ids: string[]) => ids.map(() => "?").join(", ");
 
 /** Ids in `itemIds` that have at least one non-deleted child. */
 export function itemsWithChildren(db: Db, itemIds: string[]): Set<string> {
@@ -2136,7 +2535,10 @@ export function itemsWithChildren(db: Db, itemIds: string[]): Set<string> {
  *  per-item query) when the comments table has no live rows. */
 export function itemsWithComments(db: Db, itemIds: string[]): Set<string> {
   const out = new Set<string>();
-  if (itemIds.length === 0 || !db.get('SELECT 1 AS x FROM comments WHERE deleted = 0 LIMIT 1')) {
+  if (
+    itemIds.length === 0 ||
+    !db.get("SELECT 1 AS x FROM comments WHERE deleted = 0 LIMIT 1")
+  ) {
     return out;
   }
   for (const r of db.all<{ item_id: string }>(
@@ -2150,7 +2552,10 @@ export function itemsWithComments(db: Db, itemIds: string[]): Set<string> {
 
 /** Live tags for each of `itemIds`, keyed by item id (a missing key means the item
  *  has no tags). Mirrors {@link getItemTags} per item, in one query. */
-export function getItemTagsBatch(db: Db, itemIds: string[]): Map<string, Tag[]> {
+export function getItemTagsBatch(
+  db: Db,
+  itemIds: string[],
+): Map<string, Tag[]> {
   const out = new Map<string, Tag[]>();
   if (itemIds.length === 0) return out;
   const rows = db.all<TagRow & { __item: string }>(
@@ -2170,9 +2575,15 @@ export function getItemTagsBatch(db: Db, itemIds: string[]): Map<string, Tag[]> 
 
 /** Live assignees for each of `itemIds`, keyed by item id. Empty map (no query)
  *  when no assignees exist. */
-export function listAssigneesForItems(db: Db, itemIds: string[]): Map<string, Assignee[]> {
+export function listAssigneesForItems(
+  db: Db,
+  itemIds: string[],
+): Map<string, Assignee[]> {
   const out = new Map<string, Assignee[]>();
-  if (itemIds.length === 0 || !db.get('SELECT 1 AS x FROM assignees WHERE deleted = 0 LIMIT 1')) {
+  if (
+    itemIds.length === 0 ||
+    !db.get("SELECT 1 AS x FROM assignees WHERE deleted = 0 LIMIT 1")
+  ) {
     return out;
   }
   for (const r of db.all<AssigneeRow>(
@@ -2186,9 +2597,14 @@ export function listAssigneesForItems(db: Db, itemIds: string[]): Map<string, As
   return out;
 }
 
-export function assignItem(db: Db, deviceId: string, itemId: string, userId: string): Assignee {
+export function assignItem(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  userId: string,
+): Assignee {
   const now = causalNowIso(db);
-  const existing = db.get<AssigneeRow>('SELECT * FROM assignees WHERE id = ?', [
+  const existing = db.get<AssigneeRow>("SELECT * FROM assignees WHERE id = ?", [
     assigneeId(itemId, userId),
   ]);
   const a: Assignee = {
@@ -2199,17 +2615,26 @@ export function assignItem(db: Db, deviceId: string, itemId: string, userId: str
     updated_at: now,
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'assignee', a.id, a);
+  recordRecordOp(db, deviceId, "assignee", a.id, a);
   return a;
 }
 
-export function unassignItem(db: Db, deviceId: string, itemId: string, userId: string): void {
-  const existing = db.get<AssigneeRow>('SELECT * FROM assignees WHERE id = ?', [
+export function unassignItem(
+  db: Db,
+  deviceId: string,
+  itemId: string,
+  userId: string,
+): void {
+  const existing = db.get<AssigneeRow>("SELECT * FROM assignees WHERE id = ?", [
     assigneeId(itemId, userId),
   ]);
   if (!existing) return;
-  const tombstone: Assignee = { ...rowToAssignee(existing), deleted: true, updated_at: causalNowIso(db) };
-  recordRecordOp(db, deviceId, 'assignee', tombstone.id, tombstone);
+  const tombstone: Assignee = {
+    ...rowToAssignee(existing),
+    deleted: true,
+    updated_at: causalNowIso(db),
+  };
+  recordRecordOp(db, deviceId, "assignee", tombstone.id, tombstone);
 }
 
 // ----- comments (sync as records) -------------------------------------------
@@ -2236,9 +2661,10 @@ const rowToComment = (r: CommentRow): Comment => ({
 });
 
 export function upsertComment(db: Db, c: Comment): void {
-  const existing = db.get<{ updated_at: string }>('SELECT updated_at FROM comments WHERE id = ?', [
-    c.id,
-  ]);
+  const existing = db.get<{ updated_at: string }>(
+    "SELECT updated_at FROM comments WHERE id = ?",
+    [c.id],
+  );
   if (existing && existing.updated_at > c.updated_at) return;
   db.run(
     `INSERT INTO comments (id, item_id, author_id, body, mentions, created_at, updated_at, deleted)
@@ -2249,7 +2675,7 @@ export function upsertComment(db: Db, c: Comment): void {
       c.id,
       c.item_id,
       c.author_id ?? null,
-      c.body ?? '',
+      c.body ?? "",
       JSON.stringify(c.mentions ?? []),
       c.created_at,
       c.updated_at,
@@ -2260,16 +2686,22 @@ export function upsertComment(db: Db, c: Comment): void {
 
 export function listComments(db: Db, itemId: string): Comment[] {
   return db
-    .all<CommentRow>('SELECT * FROM comments WHERE item_id = ? AND deleted = 0 ORDER BY created_at', [
-      itemId,
-    ])
+    .all<CommentRow>(
+      "SELECT * FROM comments WHERE item_id = ? AND deleted = 0 ORDER BY created_at",
+      [itemId],
+    )
     .map(rowToComment);
 }
 
 export function addComment(
   db: Db,
   deviceId: string,
-  input: { itemId: string; authorId: string | null; body: string; mentions?: string[] },
+  input: {
+    itemId: string;
+    authorId: string | null;
+    body: string;
+    mentions?: string[];
+  },
 ): Comment {
   const comment: Comment = {
     id: uuidv4(),
@@ -2281,19 +2713,19 @@ export function addComment(
     updated_at: causalNowIso(db), // causal: drives LWW merge (see Y2)
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'comment', comment.id, comment);
+  recordRecordOp(db, deviceId, "comment", comment.id, comment);
   return comment;
 }
 
 export function deleteComment(db: Db, deviceId: string, id: string): void {
-  const r = db.get<CommentRow>('SELECT * FROM comments WHERE id = ?', [id]);
+  const r = db.get<CommentRow>("SELECT * FROM comments WHERE id = ?", [id]);
   if (!r) return;
   const tombstone: Comment = {
     ...rowToComment(r),
     deleted: true,
     updated_at: causalNowIso(db),
   };
-  recordRecordOp(db, deviceId, 'comment', tombstone.id, tombstone);
+  recordRecordOp(db, deviceId, "comment", tombstone.id, tombstone);
 }
 
 // ----- attachments (metadata syncs as records; blobs move out-of-band) ------
@@ -2362,7 +2794,7 @@ export function listAttachmentsFor(
 ): Attachment[] {
   return db
     .all<AttachmentRow>(
-      'SELECT * FROM attachments WHERE parent_type = ? AND parent_id = ? AND deleted = 0 ORDER BY created_at',
+      "SELECT * FROM attachments WHERE parent_type = ? AND parent_id = ? AND deleted = 0 ORDER BY created_at",
       [parentType, parentId],
     )
     .map(rowToAttachment);
@@ -2379,7 +2811,11 @@ export interface AddAttachmentInput {
   createdBy: string | null;
 }
 
-export function addAttachment(db: Db, deviceId: string, input: AddAttachmentInput): Attachment {
+export function addAttachment(
+  db: Db,
+  deviceId: string,
+  input: AddAttachmentInput,
+): Attachment {
   const a: Attachment = {
     id: uuidv4(),
     parent_type: input.parentType,
@@ -2393,14 +2829,19 @@ export function addAttachment(db: Db, deviceId: string, input: AddAttachmentInpu
     created_at: new Date().toISOString(),
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'attachment', a.id, a);
+  recordRecordOp(db, deviceId, "attachment", a.id, a);
   return a;
 }
 
 export function deleteAttachment(db: Db, deviceId: string, id: string): void {
-  const r = db.get<AttachmentRow>('SELECT * FROM attachments WHERE id = ?', [id]);
+  const r = db.get<AttachmentRow>("SELECT * FROM attachments WHERE id = ?", [
+    id,
+  ]);
   if (!r) return;
-  recordRecordOp(db, deviceId, 'attachment', r.id, { ...rowToAttachment(r), deleted: true });
+  recordRecordOp(db, deviceId, "attachment", r.id, {
+    ...rowToAttachment(r),
+    deleted: true,
+  });
 }
 
 // ----- plan (Stage 2 — per-user curated focus list) -------------------------
@@ -2423,7 +2864,7 @@ const rowToPlan = (r: PlanRow): Plan => ({
 
 /** Deterministic id so the same (user, item) pair converges across devices. */
 export const planId = (userId: string | null, itemId: string): string =>
-  `p:${userId ?? 'local'}:${itemId}`;
+  `p:${userId ?? "local"}:${itemId}`;
 
 export function upsertPlan(db: Db, plan: Plan): void {
   db.run(
@@ -2432,38 +2873,70 @@ export function upsertPlan(db: Db, plan: Plan): void {
      ON CONFLICT(id) DO UPDATE SET
        user_id = excluded.user_id, item_id = excluded.item_id,
        added_at = excluded.added_at, deleted = excluded.deleted`,
-    [plan.id, plan.user_id ?? null, plan.item_id, plan.added_at, plan.deleted ? 1 : 0],
+    [
+      plan.id,
+      plan.user_id ?? null,
+      plan.item_id,
+      plan.added_at,
+      plan.deleted ? 1 : 0,
+    ],
   );
 }
 
-export function addToPlan(db: Db, deviceId: string, userId: string | null, itemId: string): Plan {
-  const existing = db.get<PlanRow>('SELECT * FROM plan WHERE id = ?', [planId(userId, itemId)]);
+export function addToPlan(
+  db: Db,
+  deviceId: string,
+  userId: string | null,
+  itemId: string,
+): Plan {
+  const existing = db.get<PlanRow>("SELECT * FROM plan WHERE id = ?", [
+    planId(userId, itemId),
+  ]);
   const plan: Plan = {
     id: planId(userId, itemId),
     user_id: userId,
     item_id: itemId,
-    added_at: existing && !existing.deleted ? existing.added_at : new Date().toISOString(),
+    added_at:
+      existing && !existing.deleted
+        ? existing.added_at
+        : new Date().toISOString(),
     deleted: false,
   };
-  recordRecordOp(db, deviceId, 'plan', plan.id, plan);
+  recordRecordOp(db, deviceId, "plan", plan.id, plan);
   return plan;
 }
 
-export function removeFromPlan(db: Db, deviceId: string, userId: string | null, itemId: string): void {
-  const r = db.get<PlanRow>('SELECT * FROM plan WHERE id = ?', [planId(userId, itemId)]);
+export function removeFromPlan(
+  db: Db,
+  deviceId: string,
+  userId: string | null,
+  itemId: string,
+): void {
+  const r = db.get<PlanRow>("SELECT * FROM plan WHERE id = ?", [
+    planId(userId, itemId),
+  ]);
   if (!r || r.deleted) return;
-  recordRecordOp(db, deviceId, 'plan', r.id, { ...rowToPlan(r), deleted: true });
+  recordRecordOp(db, deviceId, "plan", r.id, {
+    ...rowToPlan(r),
+    deleted: true,
+  });
 }
 
-export function isInPlan(db: Db, userId: string | null, itemId: string): boolean {
-  const r = db.get<PlanRow>('SELECT deleted FROM plan WHERE id = ?', [planId(userId, itemId)]);
+export function isInPlan(
+  db: Db,
+  userId: string | null,
+  itemId: string,
+): boolean {
+  const r = db.get<PlanRow>("SELECT deleted FROM plan WHERE id = ?", [
+    planId(userId, itemId),
+  ]);
   return !!r && !r.deleted;
 }
 
 /** A user's plan entries (non-deleted), oldest first. */
 export function listPlan(db: Db, userId: string | null): Plan[] {
   const rows = db.all<PlanRow>(
-    `SELECT * FROM plan WHERE deleted = 0 AND ${userId === null ? 'user_id IS NULL' : 'user_id = ?'} ORDER BY added_at`,
+    `SELECT * FROM plan WHERE deleted = 0 AND ${userId === null ? "user_id IS NULL" : "user_id = ?"} ORDER BY added_at`,
     userId === null ? [] : [userId],
   );
   return rows.map(rowToPlan);
@@ -2472,11 +2945,15 @@ export function listPlan(db: Db, userId: string | null): Plan[] {
 // ----- estimate-vs-actual stats ---------------------------------------------
 
 /** Total tracked task-segment time for an item (ms), optionally one user's. */
-export function taskActualMs(db: Db, itemId: string, userId?: string | null): number {
+export function taskActualMs(
+  db: Db,
+  itemId: string,
+  userId?: string | null,
+): number {
   const rows = db.all<{ start_time: string; end_time: string | null }>(
     `SELECT start_time, end_time FROM time_logs
      WHERE kind = 'task' AND deleted = 0 AND item_id = ?
-     ${userId != null ? 'AND user_id = ?' : ''}`,
+     ${userId != null ? "AND user_id = ?" : ""}`,
     userId != null ? [itemId, userId] : [itemId],
   );
   let ms = 0;
@@ -2491,25 +2968,25 @@ export function taskActualMs(db: Db, itemId: string, userId?: string | null): nu
 
 export function applyRecordOp(db: Db, op: RecordOp): void {
   switch (op.entity) {
-    case 'share':
+    case "share":
       return upsertShare(db, op.data as Share);
-    case 'assignee':
+    case "assignee":
       return upsertAssignee(db, op.data as Assignee);
-    case 'comment':
+    case "comment":
       return upsertComment(db, op.data as Comment);
-    case 'attachment':
+    case "attachment":
       return upsertAttachment(db, op.data as Attachment);
-    case 'timelog':
+    case "timelog":
       return upsertTimeLog(db, op.data as TimeLog);
-    case 'tag':
+    case "tag":
       return upsertTag(db, op.data as Tag);
-    case 'item_tag':
+    case "item_tag":
       return upsertItemTag(db, op.data as ItemTag);
-    case 'item_dep':
+    case "item_dep":
       return upsertItemDep(db, op.data as ItemDep);
-    case 'user':
+    case "user":
       return upsertUser(db, op.data as User);
-    case 'plan':
+    case "plan":
       return upsertPlan(db, op.data as Plan);
   }
 }
@@ -2547,7 +3024,9 @@ export function reapplyAllRecordOps(db: Db): void {
     ts: number;
     device_id: string;
     data: string;
-  }>('SELECT id, entity, row_id, ts, device_id, data FROM record_ops ORDER BY rowid');
+  }>(
+    "SELECT id, entity, row_id, ts, device_id, data FROM record_ops ORDER BY rowid",
+  );
   for (const r of rows) {
     // A legacy-shaped op already in the local log must not abort startup (this
     // runs from initDb) — skip it, like ingestRecordOps does.
@@ -2561,33 +3040,57 @@ export function reapplyAllRecordOps(db: Db): void {
         data: JSON.parse(r.data),
       });
     } catch (e) {
-      console.error(`[carbon] skipping unappliable ${r.entity} record-op ${r.id} on reapply:`, e);
+      console.error(
+        `[carbon] skipping unappliable ${r.entity} record-op ${r.id} on reapply:`,
+        e,
+      );
     }
   }
 }
 
-export function ingestRecordOps(db: Db, ops: RecordOp[], markSynced: boolean): RecordOp[] {
+export interface IngestRecordOpsResult {
+  /** Record ops that were genuinely new and applied. */
+  fresh: RecordOp[];
+  /** A4: ids of record ops that could not be ingested (see ingestOps). */
+  skipped: string[];
+}
+
+export function ingestRecordOps(
+  db: Db,
+  ops: RecordOp[],
+  markSynced: boolean,
+): IngestRecordOpsResult {
   const fresh: RecordOp[] = [];
+  const skipped: string[] = [];
   db.transaction(() => {
-    let maxTs = 0;
     for (const op of ops) {
-      if (op.ts > maxTs) maxTs = op.ts;
       if (recordOpExists(db, op.id)) continue;
-      // Mirror ingestOps: one malformed record-op (e.g. a legacy shape missing a
-      // field the upsert binds) must not throw and roll back the batch — the sync
-      // cursor never advances past it, so the device re-hits it every sync forever.
+      db.exec("SAVEPOINT ingest_record");
       try {
+        if (
+          !Number.isFinite(op.ts) ||
+          !Number.isFinite(new Date(op.ts).getTime())
+        ) {
+          throw new Error("Invalid record timestamp");
+        }
         insertRecordOp(db, op, markSynced);
         applyRecordOp(db, op);
+        observeTs(db, op.ts);
       } catch (e) {
-        console.error(`[carbon] skipping unappliable ${op.entity} record-op ${op.id}:`, e);
+        db.exec("ROLLBACK TO ingest_record");
+        db.exec("RELEASE ingest_record");
+        console.error(
+          `[carbon] skipping unappliable ${op.entity} record-op ${op.id}:`,
+          e,
+        );
+        skipped.push(op.id);
         continue;
       }
+      db.exec("RELEASE ingest_record");
       fresh.push(op);
     }
-    observeTs(db, maxTs);
   });
-  return fresh;
+  return { fresh, skipped };
 }
 
 /** Item ids a user may see: items they own (and all descendants), plus shared
@@ -2607,8 +3110,11 @@ function getItemsByIds(db: Db, ids: string[]): Map<string, Item> {
   const unique = [...new Set(ids)];
   for (let i = 0; i < unique.length; i += SUBTREE_BATCH) {
     const chunk = unique.slice(i, i + SUBTREE_BATCH);
-    const placeholders = chunk.map(() => '?').join(',');
-    for (const row of db.all<ItemRow>(`${SELECT} WHERE id IN (${placeholders})`, chunk)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    for (const row of db.all<ItemRow>(
+      `${SELECT} WHERE id IN (${placeholders})`,
+      chunk,
+    )) {
       out.set(row.id, rowToItem(row));
     }
   }
@@ -2617,7 +3123,7 @@ function getItemsByIds(db: Db, ids: string[]): Map<string, Item> {
 
 export function sharedRoots(db: Db, userId: string): Item[] {
   const rows = db.all<{ item_id: string }>(
-    'SELECT DISTINCT item_id FROM shares WHERE user_id = ? AND deleted = 0',
+    "SELECT DISTINCT item_id FROM shares WHERE user_id = ? AND deleted = 0",
     [userId],
   );
   const items = getItemsByIds(
@@ -2629,7 +3135,7 @@ export function sharedRoots(db: Db, userId: string): Item[] {
     const it = items.get(item_id);
     if (!it || it.deleted) continue;
     if (it.owner_id === userId) continue; // mine — shown normally
-    if (it.type !== 'task') continue; // shared projects appear in the projects list
+    if (it.type !== "task") continue; // shared projects appear in the projects list
     candidates.push(it);
   }
   // Batch-check parent existence (deleted or not — mirrors the old per-row
@@ -2639,7 +3145,9 @@ export function sharedRoots(db: Db, userId: string): Item[] {
     .filter((id): id is string => id !== null && !items.has(id));
   const parents = getItemsByIds(db, parentIds);
   const parentExists = (id: string) => items.has(id) || parents.has(id);
-  return candidates.filter((it) => !(it.parent_id && parentExists(it.parent_id)));
+  return candidates.filter(
+    (it) => !(it.parent_id && parentExists(it.parent_id)),
+  );
 }
 
 /**
@@ -2650,11 +3158,14 @@ export function sharedRoots(db: Db, userId: string): Item[] {
  */
 export function missingSharedItemIds(db: Db, userId: string): string[] {
   const ids = db
-    .all<{ item_id: string }>('SELECT DISTINCT item_id FROM shares WHERE user_id = ? AND deleted = 0', [
-      userId,
-    ])
+    .all<{ item_id: string }>(
+      "SELECT DISTINCT item_id FROM shares WHERE user_id = ? AND deleted = 0",
+      [userId],
+    )
     .map((r) => r.item_id);
-  return ids.filter((id) => !db.get('SELECT 1 AS x FROM items WHERE id = ?', [id]));
+  return ids.filter(
+    (id) => !db.get("SELECT 1 AS x FROM items WHERE id = ?", [id]),
+  );
 }
 
 /**
@@ -2667,14 +3178,17 @@ export function missingSharedItemIds(db: Db, userId: string): string[] {
  */
 export function itemsMissingCreate(db: Db, ids: string[]): string[] {
   return [...new Set(ids)].filter((id) => {
-    if (!db.get('SELECT 1 AS x FROM items WHERE id = ?', [id])) return false;
+    if (!db.get("SELECT 1 AS x FROM items WHERE id = ?", [id])) return false;
     // A create op is the only op that carries the `type` field. Parse the ops rather
     // than substring-matching the JSON text, which could false-positive on a field
     // value that happens to contain `"type":` and then suppress a needed backfill (M6).
-    const opRows = db.all<{ fields: string }>('SELECT fields FROM ops WHERE item_id = ?', [id]);
+    const opRows = db.all<{ fields: string }>(
+      "SELECT fields FROM ops WHERE item_id = ?",
+      [id],
+    );
     const hasCreate = opRows.some((o) => {
       try {
-        return 'type' in (JSON.parse(o.fields) as Record<string, unknown>);
+        return "type" in (JSON.parse(o.fields) as Record<string, unknown>);
       } catch {
         return false;
       }
@@ -2706,7 +3220,7 @@ export function subtreeIds(db: Db, roots: string[]): Set<string> {
     const next: string[] = [];
     for (let i = 0; i < frontier.length; i += SUBTREE_BATCH) {
       const chunk = frontier.slice(i, i + SUBTREE_BATCH);
-      const placeholders = chunk.map(() => '?').join(',');
+      const placeholders = chunk.map(() => "?").join(",");
       for (const k of db.all<{ id: string }>(
         `SELECT id FROM items WHERE parent_id IN (${placeholders})`,
         chunk,
@@ -2726,12 +3240,13 @@ export function visibleItemIds(db: Db, userId: string): Set<string> {
   // Owned items include their descendants: a collaborator-created child under an
   // owned project must still sync to the owner (same as shared-subtree visibility).
   const owned = db
-    .all<{ id: string }>('SELECT id FROM items WHERE owner_id = ?', [userId])
+    .all<{ id: string }>("SELECT id FROM items WHERE owner_id = ?", [userId])
     .map((r) => r.id);
   const shareRoots = db
-    .all<{ item_id: string }>('SELECT item_id FROM shares WHERE user_id = ? AND deleted = 0', [
-      userId,
-    ])
+    .all<{ item_id: string }>(
+      "SELECT item_id FROM shares WHERE user_id = ? AND deleted = 0",
+      [userId],
+    )
     .map((r) => r.item_id);
   return subtreeIds(db, [...owned, ...shareRoots]);
 }

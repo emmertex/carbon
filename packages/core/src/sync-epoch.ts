@@ -7,15 +7,19 @@
 // bootstrap log derived from current materialized tables. Callers bump
 // workspace sync_epoch afterward — this alone breaks incremental sync.
 
-import { v4 as uuidv4 } from 'uuid';
-import type { Db } from './db';
-import type { Item, ItemPatch, Op, User } from './types';
-import { createPatch, nextTs, insertOp } from './crdt';
-import { insertRecordOp, type RecordOp } from './records';
+import { v4 as uuidv4 } from "uuid";
+import type { Db } from "./db";
+import type { Item, ItemPatch, Op, User } from "./types";
+import { createPatch, nextTs, insertOp } from "./crdt";
+import { insertRecordOp, type RecordOp } from "./records";
 
-const EPOCH_DEVICE = 'epoch-reset';
+const EPOCH_DEVICE = "epoch-reset";
 
-function wins(opTs: number, opDev: string, cur: { ts: number; dev: string }): boolean {
+function wins(
+  opTs: number,
+  opDev: string,
+  cur: { ts: number; dev: string },
+): boolean {
   if (opTs !== cur.ts) return opTs > cur.ts;
   return opDev > cur.dev;
 }
@@ -29,10 +33,14 @@ export interface CompactSettingOptions {
  * Prune superseded `setting` record_ops. Keeps the LWW winner per (row_id, user_id).
  * Never deletes the row holding MAX(rowid) of `record_ops` (rowid-reuse guard).
  */
-export function compactSettingRecordOps(db: Db, opts: CompactSettingOptions = {}): number {
+export function compactSettingRecordOps(
+  db: Db,
+  opts: CompactSettingOptions = {},
+): number {
   const syncedOnly = opts.syncedOnly ?? false;
   const maxRowid =
-    db.get<{ m: number | null }>('SELECT MAX(rowid) AS m FROM record_ops')?.m ?? 0;
+    db.get<{ m: number | null }>("SELECT MAX(rowid) AS m FROM record_ops")?.m ??
+    0;
   interface Row {
     rowid: number;
     id: string;
@@ -48,37 +56,52 @@ export function compactSettingRecordOps(db: Db, opts: CompactSettingOptions = {}
   );
 
   // Key: `${row_id}\0${user_id}` — settings are per-user scopes.
-  const winners = new Map<string, { ts: number; dev: string; id: string; rowid: number }>();
+  const winners = new Map<
+    string,
+    { ts: number; dev: string; id: string; rowid: number }
+  >();
   const candidates: { id: string; rowid: number }[] = [];
 
   for (const r of rows) {
     if (syncedOnly && r.synced !== 1) continue;
-    let userId = '';
+    let userId = "";
     try {
       const data = JSON.parse(r.data) as { user_id?: string };
-      userId = data.user_id ?? '';
+      userId = data.user_id ?? "";
     } catch {
       continue;
     }
     const key = `${r.row_id}\0${userId}`;
     const cur = winners.get(key);
     if (!cur) {
-      winners.set(key, { ts: r.ts, dev: r.device_id, id: r.id, rowid: r.rowid });
+      winners.set(key, {
+        ts: r.ts,
+        dev: r.device_id,
+        id: r.id,
+        rowid: r.rowid,
+      });
     } else if (wins(r.ts, r.device_id, { ts: cur.ts, dev: cur.dev })) {
       candidates.push({ id: cur.id, rowid: cur.rowid });
-      winners.set(key, { ts: r.ts, dev: r.device_id, id: r.id, rowid: r.rowid });
+      winners.set(key, {
+        ts: r.ts,
+        dev: r.device_id,
+        id: r.id,
+        rowid: r.rowid,
+      });
     } else {
       candidates.push({ id: r.id, rowid: r.rowid });
     }
   }
 
-  const toDelete = candidates.filter((c) => c.rowid < maxRowid).map((c) => c.id);
+  const toDelete = candidates
+    .filter((c) => c.rowid < maxRowid)
+    .map((c) => c.id);
   if (toDelete.length === 0) return 0;
   const BATCH = 500;
   db.transaction(() => {
     for (let i = 0; i < toDelete.length; i += BATCH) {
       const chunk = toDelete.slice(i, i + BATCH);
-      const ph = chunk.map(() => '?').join(',');
+      const ph = chunk.map(() => "?").join(",");
       db.run(`DELETE FROM record_ops WHERE id IN (${ph})`, chunk);
     }
   });
@@ -104,11 +127,11 @@ function collectSettingWinners(db: Db): RecordOp[] {
   );
   const winners = new Map<string, RecordOp>();
   for (const r of rows) {
-    let userId = '';
+    let userId = "";
     let data: unknown = {};
     try {
       data = JSON.parse(r.data);
-      userId = (data as { user_id?: string }).user_id ?? '';
+      userId = (data as { user_id?: string }).user_id ?? "";
     } catch {
       continue;
     }
@@ -116,13 +139,16 @@ function collectSettingWinners(db: Db): RecordOp[] {
     const cur = winners.get(key);
     const next: RecordOp = {
       id: r.id,
-      entity: 'setting',
+      entity: "setting",
       row_id: r.row_id,
       ts: Number(r.ts),
       device_id: r.device_id,
       data,
     };
-    if (!cur || wins(next.ts, next.device_id, { ts: cur.ts, dev: cur.device_id })) {
+    if (
+      !cur ||
+      wins(next.ts, next.device_id, { ts: cur.ts, dev: cur.device_id })
+    ) {
       winners.set(key, next);
     }
   }
@@ -138,7 +164,10 @@ function bool(n: number | null | undefined): boolean {
  * Leaves items / entity tables unchanged. Emits fresh op ids; uses device_id
  * `epoch-reset`. Setting winners are preserved from the old log (no materialization).
  */
-export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult {
+export function rebuildSyncLogFromMaterialization(
+  db: Db,
+  onRebuilt?: () => void,
+): RebuildSyncLogResult {
   const settings = collectSettingWinners(db);
 
   // Include deleted rows so a wipe+re-pull client converges with server materialization
@@ -174,40 +203,38 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
       created_at: string;
       updated_at: string;
       deleted: number;
-    }>('SELECT * FROM items')
-    .map(
-      (r): Item => ({
-        id: r.id,
-        parent_id: r.parent_id,
-        type: r.type as Item['type'],
-        owner_id: r.owner_id,
-        title: r.title,
-        note: r.note,
-        status: r.status as Item['status'],
-        flagged: bool(r.flagged),
-        priority: r.priority,
-        defer_date: r.defer_date,
-        due_date: r.due_date,
-        reminder_at: r.reminder_at,
-        estimate_minutes: r.estimate_minutes,
-        completed_at: r.completed_at,
-        review_interval: r.review_interval,
-        reviewed_at: r.reviewed_at,
-        recurrence: r.recurrence,
-        geo: r.geo,
-        color: r.color,
-        notes_project: bool(r.notes_project),
-        thumb: r.thumb,
-        folder_id: r.folder_id,
-        sort_order: r.sort_order,
-        order_mode: (r.order_mode as Item['order_mode']) || 'parallel',
-        sys_kind: r.sys_kind,
-        metadata: r.metadata,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        deleted: bool(r.deleted),
-      }),
-    );
+    }>("SELECT * FROM items")
+    .map((r): Item => ({
+      id: r.id,
+      parent_id: r.parent_id,
+      type: r.type as Item["type"],
+      owner_id: r.owner_id,
+      title: r.title,
+      note: r.note,
+      status: r.status as Item["status"],
+      flagged: bool(r.flagged),
+      priority: r.priority,
+      defer_date: r.defer_date,
+      due_date: r.due_date,
+      reminder_at: r.reminder_at,
+      estimate_minutes: r.estimate_minutes,
+      completed_at: r.completed_at,
+      review_interval: r.review_interval,
+      reviewed_at: r.reviewed_at,
+      recurrence: r.recurrence,
+      geo: r.geo,
+      color: r.color,
+      notes_project: bool(r.notes_project),
+      thumb: r.thumb,
+      folder_id: r.folder_id,
+      sort_order: r.sort_order,
+      order_mode: (r.order_mode as Item["order_mode"]) || "parallel",
+      sys_kind: r.sys_kind,
+      metadata: r.metadata,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      deleted: bool(r.deleted),
+    }));
 
   // Prefer live non-deleted users for roster bootstrap; soft-deleted users still
   // needed if referenced — include all.
@@ -227,42 +254,40 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
       created_at: string;
       updated_at: string;
       deleted: number;
-    }>('SELECT * FROM users')
-    .map(
-      (r): User => ({
-        id: r.id,
-        username: r.username,
-        display_name: r.display_name,
-        role: r.role as User['role'],
-        is_bot: bool(r.is_bot),
-        avatar_color: r.avatar_color,
-        avatar_initial: r.avatar_initial,
-        plan_startup_min: r.plan_startup_min,
-        plan_default_estimate_min: r.plan_default_estimate_min,
-        is_remote: bool(r.is_remote),
-        home_server: r.home_server,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        deleted: bool(r.deleted),
-      }),
-    );
+    }>("SELECT * FROM users")
+    .map((r): User => ({
+      id: r.id,
+      username: r.username,
+      display_name: r.display_name,
+      role: r.role as User["role"],
+      is_bot: bool(r.is_bot),
+      avatar_color: r.avatar_color,
+      avatar_initial: r.avatar_initial,
+      plan_startup_min: r.plan_startup_min,
+      plan_default_estimate_min: r.plan_default_estimate_min,
+      is_remote: bool(r.is_remote),
+      home_server: r.home_server,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      deleted: bool(r.deleted),
+    }));
 
   type RecSpec = { entity: string; row_id: string; data: unknown };
   const records: RecSpec[] = [];
 
   for (const u of users) {
-    records.push({ entity: 'user', row_id: u.id, data: u });
+    records.push({ entity: "user", row_id: u.id, data: u });
   }
 
-  for (const t of db.all<Record<string, unknown>>('SELECT * FROM tags')) {
+  for (const t of db.all<Record<string, unknown>>("SELECT * FROM tags")) {
     records.push({
-      entity: 'tag',
+      entity: "tag",
       row_id: String(t.id),
       data: {
         id: t.id,
         name: t.name,
         color: t.color,
-        status: t.status || 'active',
+        status: t.status || "active",
         sort_order: t.sort_order ?? 0,
         geo: t.geo ?? null,
         created_at: t.created_at,
@@ -272,11 +297,14 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const it of db.all<{ item_id: string; tag_id: string; updated_at: string; deleted: number }>(
-    'SELECT * FROM item_tags',
-  )) {
+  for (const it of db.all<{
+    item_id: string;
+    tag_id: string;
+    updated_at: string;
+    deleted: number;
+  }>("SELECT * FROM item_tags")) {
     records.push({
-      entity: 'item_tag',
+      entity: "item_tag",
       row_id: `it:${it.item_id}:${it.tag_id}`,
       data: {
         item_id: it.item_id,
@@ -287,11 +315,14 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const d of db.all<{ pred_id: string; succ_id: string; updated_at: string; deleted: number }>(
-    'SELECT * FROM item_deps',
-  )) {
+  for (const d of db.all<{
+    pred_id: string;
+    succ_id: string;
+    updated_at: string;
+    deleted: number;
+  }>("SELECT * FROM item_deps")) {
     records.push({
-      entity: 'item_dep',
+      entity: "item_dep",
       row_id: `dep:${d.pred_id}:${d.succ_id}`,
       data: {
         pred_id: d.pred_id,
@@ -302,15 +333,15 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const s of db.all<Record<string, unknown>>('SELECT * FROM shares')) {
+  for (const s of db.all<Record<string, unknown>>("SELECT * FROM shares")) {
     records.push({
-      entity: 'share',
+      entity: "share",
       row_id: String(s.id),
       data: {
         id: s.id,
         item_id: s.item_id,
         user_id: s.user_id,
-        permission: s.permission ?? 'read',
+        permission: s.permission ?? "read",
         created_at: s.created_at,
         updated_at: s.updated_at,
         deleted: bool(s.deleted as number),
@@ -318,9 +349,9 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const a of db.all<Record<string, unknown>>('SELECT * FROM assignees')) {
+  for (const a of db.all<Record<string, unknown>>("SELECT * FROM assignees")) {
     records.push({
-      entity: 'assignee',
+      entity: "assignee",
       row_id: String(a.id),
       data: {
         id: a.id,
@@ -333,15 +364,15 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const c of db.all<Record<string, unknown>>('SELECT * FROM comments')) {
+  for (const c of db.all<Record<string, unknown>>("SELECT * FROM comments")) {
     let mentions: string[] = [];
     try {
-      mentions = JSON.parse(String(c.mentions ?? '[]')) as string[];
+      mentions = JSON.parse(String(c.mentions ?? "[]")) as string[];
     } catch {
       mentions = [];
     }
     records.push({
-      entity: 'comment',
+      entity: "comment",
       row_id: String(c.id),
       data: {
         id: c.id,
@@ -356,9 +387,11 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const a of db.all<Record<string, unknown>>('SELECT * FROM attachments')) {
+  for (const a of db.all<Record<string, unknown>>(
+    "SELECT * FROM attachments",
+  )) {
     records.push({
-      entity: 'attachment',
+      entity: "attachment",
       row_id: String(a.id),
       data: {
         id: a.id,
@@ -376,9 +409,9 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const t of db.all<Record<string, unknown>>('SELECT * FROM time_logs')) {
+  for (const t of db.all<Record<string, unknown>>("SELECT * FROM time_logs")) {
     records.push({
-      entity: 'timelog',
+      entity: "timelog",
       row_id: String(t.id),
       data: {
         id: t.id,
@@ -396,9 +429,9 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
     });
   }
 
-  for (const p of db.all<Record<string, unknown>>('SELECT * FROM plan')) {
+  for (const p of db.all<Record<string, unknown>>("SELECT * FROM plan")) {
     records.push({
-      entity: 'plan',
+      entity: "plan",
       row_id: String(p.id),
       data: {
         id: p.id,
@@ -411,15 +444,15 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
   }
 
   for (const s of settings) {
-    records.push({ entity: 'setting', row_id: s.row_id, data: s.data });
+    records.push({ entity: "setting", row_id: s.row_id, data: s.data });
   }
 
   const ops: Op[] = [];
   const recordOps: RecordOp[] = [];
 
   db.transaction(() => {
-    db.run('DELETE FROM ops');
-    db.run('DELETE FROM record_ops');
+    db.run("DELETE FROM ops");
+    db.run("DELETE FROM record_ops");
 
     for (const item of items) {
       const fields: ItemPatch = createPatch(item);
@@ -446,6 +479,7 @@ export function rebuildSyncLogFromMaterialization(db: Db): RebuildSyncLogResult 
       insertRecordOp(db, op, true);
       recordOps.push(op);
     }
+    onRebuilt?.(); // generation change shares the same transaction as both log rebuilds
   });
 
   return { opCount: ops.length, recordOpCount: recordOps.length };

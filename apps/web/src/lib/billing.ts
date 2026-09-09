@@ -27,7 +27,7 @@ export interface SquareConfig {
 }
 
 export interface BillingInfo {
-  provider: 'square' | 'simulate';
+  provider: 'square' | 'simulate' | 'unavailable';
   plans: BillingPlan[];
   expiresAt: string | null;
   locked: boolean;

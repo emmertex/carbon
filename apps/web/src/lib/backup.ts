@@ -1,59 +1,38 @@
-import { exportDb, openSnapshot, getDb, persist } from './db';
-import { exportBlobs, addImportedBlobs } from './blobs';
-import { ingestOps, ingestRecordOps, type Op, type RecordOp } from '@carbon/core';
+import { exportDb, openSnapshot, getDb, persist, commitImport } from './db';
+import { getBlob, addImportedBlobs } from './blobs';
+import { identityKey } from './identity';
+import { ingestOps, ingestRecordOps, blobReferenceInventory, buildBackupManifest,
+  decodeVerifiedBackup, sha256Hex, getSchemaVersion, LATEST_SCHEMA_VERSION, opShapeError, recordOpShapeError, planId, type Db, type Op, type RecordOp } from '@carbon/core';
 
-// A full local backup: the SQLite database plus every cached attachment blob,
-// base64-encoded into a single JSON file. Self-contained — no server required.
-
-const FORMAT = 'carbon-backup';
-const VERSION = 1;
-
-interface Bundle {
-  format: typeof FORMAT;
-  version: number;
-  exported_at: string;
-  db: string; // base64 SQLite bytes
-  blobs: Record<string, string>; // hash -> base64 bytes
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-/** Build the backup bundle and trigger a download. */
+/** A backup is complete or fails with the missing/corrupt hashes; no success download with holes. */
 export async function exportBackup(): Promise<void> {
+  const identity = identityKey();
   await persist();
-  const blobBufs = await exportBlobs();
-  const blobs: Record<string, string> = {};
-  for (const [hash, buf] of Object.entries(blobBufs)) {
-    blobs[hash] = bytesToBase64(new Uint8Array(buf));
-  }
-  const bundle: Bundle = {
-    format: FORMAT,
-    version: VERSION,
-    exported_at: new Date().toISOString(),
-    db: bytesToBase64(exportDb()),
-    blobs,
-  };
-  const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `carbon-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const bytes = exportDb();
+  const snap = await openSnapshot(bytes);
+  try {
+    const blobs: { hash: string; bytes: Uint8Array }[] = [];
+    const missing: string[] = [];
+    for (const hash of blobReferenceInventory(snap).byHash.keys()) {
+      if (identityKey() !== identity) throw new Error('Export cancelled: workspace changed.');
+      if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('Backup contains an invalid blob reference.');
+      const blob = await getBlob(hash, null);
+      const content = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+      if (!content || await sha256Hex(content) !== hash) missing.push(hash);
+      else blobs.push({ hash, bytes: content });
+    }
+    if (identityKey() !== identity) throw new Error('Export cancelled: workspace changed.');
+    if (missing.length) throw new Error(`Backup incomplete: ${missing.length} missing or corrupt blobs (${missing.slice(0, 3).join(', ')}). Reconnect or recover these files and retry.`);
+    const bundle = buildBackupManifest({ db: bytes, blobs, missing: [] });
+    bundle.db_checksum = await sha256Hex(bytes);
+    if (identityKey() !== identity) throw new Error('Export cancelled: workspace changed.');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(bundle)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `carbon-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } finally { snap.close(); }
 }
 
 // ----- smart import (user-remapping merge) ---------------------------------
@@ -81,20 +60,23 @@ export type UserMapping = Record<string, UserChoice>;
 
 /** Parse + validate a backup and list the users it contains, WITHOUT applying it. */
 export async function inspectBackup(file: File): Promise<ParsedBackup> {
-  const bundle = JSON.parse(await file.text()) as Partial<Bundle>;
-  if (bundle.format !== FORMAT || typeof bundle.db !== 'string') {
-    throw new Error('Not a Carbon backup file.');
-  }
-  const dbBytes = base64ToBytes(bundle.db);
-  const blobs: Record<string, ArrayBuffer> = {};
-  for (const [hash, b64] of Object.entries(bundle.blobs ?? {})) {
-    blobs[hash] = base64ToBytes(b64).buffer as ArrayBuffer;
-  }
+  const decoded = await decodeVerifiedBackup(JSON.parse(await file.text()));
+  const dbBytes = decoded.db;
+  const blobs = decoded.blobs;
   const snap = await openSnapshot(dbBytes);
-  const users = snap.all<BackupUser>(
-    'SELECT id, username, display_name FROM users WHERE deleted = 0 ORDER BY username',
-  );
-  return { dbBytes, blobs, users };
+  try {
+    if (getSchemaVersion(snap) !== LATEST_SCHEMA_VERSION) throw new Error('Unsupported database schema in backup.');
+    const integrity = snap.all<Record<string, string>>('PRAGMA integrity_check');
+    if (integrity.length !== 1 || Object.values(integrity[0]!)[0] !== 'ok') throw new Error('Corrupt backup database.');
+    // Include trash: restored deleted items must retain their files too.
+    for (const hash of blobReferenceInventory(snap).byHash.keys()) {
+      if (!blobs[hash]) throw new Error(`Backup incomplete: missing blob ${hash}`);
+    }
+    const users = snap.all<BackupUser>(
+      'SELECT id, username, display_name FROM users WHERE deleted = 0 ORDER BY username',
+    );
+    return { dbBytes, blobs, users };
+  } finally { snap.close(); }
 }
 
 /** Item ids in the snapshot owned by any dropped user, plus their descendants. */
@@ -124,8 +106,9 @@ function droppedItems(snap: ReturnType<typeof getDb>, droppedUserIds: Set<string
  * the account's existing data is kept (CRDT merge by op id).
  */
 export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): Promise<void> {
+  const identity = identityKey();
   const snap = await openSnapshot(parsed.dbBytes);
-  const db = getDb();
+  try {
 
   const droppedUserIds = new Set(
     Object.entries(mapping)
@@ -199,10 +182,13 @@ export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): P
       // tag / item_tag: no user references
     }
     if (skip) continue;
+    if (r.entity === 'share') data.id = `s:${data.item_id}:${data.user_id}`;
+    if (r.entity === 'assignee') data.id = `a:${data.item_id}:${data.user_id}`;
+    if (r.entity === 'plan') data.id = planId(data.user_id as string | null, data.item_id as string);
     recs.push({
       id: r.id,
       entity: r.entity,
-      row_id: r.row_id,
+      row_id: typeof data.id === 'string' ? data.id : r.row_id,
       ts: Number(r.ts),
       device_id: r.device_id,
       data,
@@ -210,10 +196,26 @@ export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): P
   }
 
   // Merge as unsynced so everything re-pushes to the current server.
-  if (ops.length) ingestOps(db, ops, false);
-  if (recs.length) ingestRecordOps(db, recs, false);
+  for (const op of ops) {
+    const error = opShapeError(op);
+    if (error) throw new Error(`Invalid imported task: ${error}`);
+  }
+  for (const op of recs) {
+    const error = recordOpShapeError(op);
+    if (error) throw new Error(`Invalid imported record: ${error}`);
+  }
+  const apply = (db: Db) => {
+    if (ops.length && ingestOps(db, ops, false).skipped.length) throw new Error('Import rejected: malformed task records.');
+    if (recs.length && ingestRecordOps(db, recs, false).skipped.length) throw new Error('Import rejected: malformed related records.');
+  };
+  // Preflight against a copy before staging any content. The durable commit repeats
+  // the merge against the latest state so concurrent-tab edits survive.
+  const preview = await openSnapshot(exportDb());
+  try { apply(preview); } finally { preview.close(); }
 
   // Bring attachment blobs along, queued for upload (skip dropped ones' files lazily).
+  if (identityKey() !== identity) throw new Error('Import cancelled: workspace changed.');
   await addImportedBlobs(parsed.blobs);
-  await persist();
+  await commitImport(apply, identity);
+  } finally { snap.close(); }
 }

@@ -45,6 +45,18 @@ export async function seed(page: Page, n: number): Promise<number> {
   return page.evaluate(async (v) => (window as any).__carbonSeed(v), n);
 }
 
+/** Seed the large workspace scenario (A6: 10k active + 90k historical). */
+export async function seedLargeWorkspace(
+  page: Page,
+  active: number,
+  historical: number,
+): Promise<{ active: number; historical: number }> {
+  return page.evaluate(
+    async ([a, h]) => (window as any).__carbonSeedLarge(a, h),
+    [active, historical] as [number, number],
+  );
+}
+
 /** Count of mutation samples with a given label (used as a settle signal). */
 async function mutationCount(page: Page, label: string): Promise<number> {
   return page.evaluate(

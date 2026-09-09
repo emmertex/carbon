@@ -250,6 +250,78 @@ describe('telegram dispatch into the NL loop', () => {
     assert.equal(getAgentUsage(db).byKind.telegram_command.calls, 1);
   });
 
+  test('share is parked with an ask; "yes" confirms it through the full bot flow', async () => {
+    const cdb = makeControlDb();
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('alice', 'pw');
+    const { id: rachelId } = addUser('rachel', 'pw');
+    const { listSharesForItem } = await import('@carbon/core');
+    makeAgentOn(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Plan trip', ownerId: uid });
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const deps = makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent });
+
+    const { code } = createTelegramCode(cdb, { tenantId: 'default', subdomain: null, userId: uid });
+    stubLLM([sayResp('linking')]); // not used during linking, but keep fetch stubbed
+    await handleTelegramUpdate({ message: { chat: { id: 6 }, text: '/start' } }, deps);
+    await handleTelegramUpdate({ message: { chat: { id: 6 }, text: code } }, deps);
+
+    // The model proposes a share → the bot parks it and asks; nothing is shared yet.
+    stubLLM([
+      toolResp('share', { query: 'plan trip', users: ['rachel'] }),
+      sayResp('Want me to share "Plan trip" with Rachel?'),
+    ]);
+    await handleTelegramUpdate({ message: { chat: { id: 6 }, text: 'share plan trip with rachel' } }, deps);
+    assert.match(sent.at(-1)!.text, /Reply "yes" to confirm/);
+    assert.equal(listSharesForItem(db, task.id).length, 0);
+
+    // "yes" re-runs the parked action verbatim → it executes.
+    stubLLM([
+      toolResp('share', { query: 'plan trip', users: ['rachel'] }),
+      sayResp('Shared "Plan trip" with Rachel.'),
+    ]);
+    await handleTelegramUpdate({ message: { chat: { id: 6 }, text: 'yes' } }, deps);
+    const shares = listSharesForItem(db, task.id);
+    assert.equal(shares.length, 1);
+    assert.equal(shares[0].user_id, rachelId);
+    assert.equal(sent.at(-1)!.text, 'Shared "Plan trip" with Rachel.');
+
+    // The pending is consumed: a later bare "yes" is just an ordinary message.
+    stubLLM([sayResp('Sure thing.')]);
+    await handleTelegramUpdate({ message: { chat: { id: 6 }, text: 'yes' } }, deps);
+    assert.equal(sent.at(-1)!.text, 'Sure thing.');
+  });
+
+  test('a non-confirm message drops the parked share — "yes" afterwards does nothing', async () => {
+    const cdb = makeControlDb();
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: uid } = addUser('alice', 'pw');
+    addUser('rachel', 'pw');
+    const { listSharesForItem } = await import('@carbon/core');
+    makeAgentOn(db);
+    const task = createItem(db, deviceId, { type: 'task', title: 'Plan trip', ownerId: uid });
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const deps = makeDeps({ controlDb: cdb, tenantDb: db, deviceId, sent });
+
+    const { code } = createTelegramCode(cdb, { tenantId: 'default', subdomain: null, userId: uid });
+    stubLLM([sayResp('linking')]);
+    await handleTelegramUpdate({ message: { chat: { id: 7 }, text: '/start' } }, deps);
+    await handleTelegramUpdate({ message: { chat: { id: 7 }, text: code } }, deps);
+
+    stubLLM([toolResp('share', { query: 'plan trip', users: ['rachel'] }), sayResp('Confirm?')]);
+    await handleTelegramUpdate({ message: { chat: { id: 7 }, text: 'share plan trip with rachel' } }, deps);
+    assert.equal(listSharesForItem(db, task.id).length, 0); // parked
+
+    // Any other message replaces the conversation and drops the parked action…
+    stubLLM([sayResp('Hi! What do you need?')]);
+    await handleTelegramUpdate({ message: { chat: { id: 7 }, text: 'hello there' } }, deps);
+    // …so a "yes" afterwards is just an ordinary message, never a confirmation.
+    stubLLM([sayResp('Sure thing.')]);
+    await handleTelegramUpdate({ message: { chat: { id: 7 }, text: 'yes' } }, deps);
+    assert.equal(sent.at(-1)!.text, 'Sure thing.');
+    assert.equal(listSharesForItem(db, task.id).length, 0); // never shared
+  });
+
   test('linked chat with no agent configured tells the user to set one up', async () => {
     const cdb = makeControlDb();
     const { db, deviceId, addUser } = makeTestDb();

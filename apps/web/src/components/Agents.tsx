@@ -39,7 +39,7 @@ interface FormState {
 const KIND_LABEL: Record<AgentKind, string> = {
   openai: 'OpenAI-compatible (OpenAI / OpenRouter / LM Studio)',
   anthropic: 'Anthropic',
-  webhook: 'Agentic webhook (Hermes / OpenClaw)',
+  webhook: 'External webhook',
 };
 
 /** Provider-specific fields, shared by the create and edit forms. */
@@ -74,7 +74,7 @@ function AgentFields({
             <span className="mb-1 block text-xs text-text-muted">Webhook URL (Carbon calls this on trigger)</span>
             <input
               className={inputCls}
-              placeholder="http://hermes.lan:8080/carbon-hook"
+              placeholder="https://example.com/carbon-hook"
               value={form.endpoint}
               onChange={(e) => set({ endpoint: e.target.value })}
             />
@@ -281,7 +281,7 @@ export function Agents() {
         <>
           Bot users you can <strong>assign</strong> or <strong>@mention</strong>. Two styles: a{' '}
           <strong>direct LLM</strong> (Carbon calls the model and posts the reply), or an{' '}
-          <strong>agentic webhook</strong> (Carbon notifies your framework — Hermes/OpenClaw — which
+          <strong>agentic webhook</strong> (Carbon notifies your framework — your external client — which
           acts back via the API with the token issued at creation).
         </>
       }

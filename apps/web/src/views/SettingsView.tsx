@@ -90,7 +90,7 @@ export function SettingsView() {
     { id: 'ha-person', group: 'notifications', show: (c) => c.signedIn && c.hasServer, render: () => <HaPerson /> },
     { id: 'integration-docs', group: 'integrations', show: () => true, render: () => <IntegrationsDocs /> },
     { id: 'telegram', group: 'integrations', show: (c) => c.hasServer, render: () => <Telegram /> },
-    { id: 'api-tokens', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <ApiTokens /> },
+    { id: 'api-tokens', group: 'integrations', show: (c) => c.hasServer, render: () => <ApiTokens /> },
     { id: 'agents', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <Agents /> },
     { id: 'nl-commands', group: 'integrations', show: (c) => c.isAdmin && c.hasServer, render: () => <NlCommands /> },
     { id: 'users', group: 'admin', show: (c) => c.isAdmin && c.hasServer, render: () => <AdminUsers /> },

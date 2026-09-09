@@ -229,8 +229,7 @@ export function TaskRow({
       data-title={item.title}
       data-status={item.status}
       onClick={() => {
-        // Collapsed → select (expands). Expanded card → tap opens the full detail.
-        // Desktop → select shows the docked pane.
+        // select() applies the shared first-tap preference.
         if (selected && compact) openDetail();
         else select(item.id);
       }}

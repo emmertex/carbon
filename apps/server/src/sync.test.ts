@@ -1,133 +1,83 @@
-import assert from 'node:assert/strict';
-import { test, describe } from 'node:test';
-import {
-  createItem,
-  ingestOps,
-  visibleItemIds,
-  listUsers,
-  type Op,
-  type RecordOp,
-} from '@carbon/core';
-import {
-  sanitizeOps,
-  sanitizeRecordOps,
-  oversizedSyncArray,
-  MAX_SYNC_BATCH,
-} from './sync-guard';
-import { getSyncEpoch } from './federation';
-import { makeTestDb, makeHono, appFetch, type TestDb } from './test-app';
+import assert from "node:assert/strict";
+import { test, describe } from "node:test";
+import { createItem, type Op, type RecordOp } from "@carbon/core";
+import { oversizedSyncArray, MAX_SYNC_BATCH } from "./sync-guard";
+import { makeTestDb, appFetch, type TestDb } from "./test-app";
+import type { FetchApp } from "./tenant";
+import type { DeliverToPeer } from "./federation";
 
-// ─── inline sync route (mirrors index.ts POST /api/sync) ─────────────────────
+/**
+ * Sync route tests — exercised through the REAL application factory (`buildTenantApp`
+ * in index.ts), i.e. the same per-tenant route table and middleware a production
+ * tenant app runs: the path-specific body-limit middleware, `basicAuth` (Basic is
+ * accepted only on `/login`; every other human call needs a session token minted
+ * post-MFA, or an API token; open mode is opt-in and only with no users), and the
+ * real `POST /api/sync` handler (sanitizeOps / sanitizeRecordOps / ingestOps /
+ * ingestRecordOps / visibleItemIds / getSyncEpoch). No handler is mirrored inline.
+ *
+ * index.ts is the server entry point; importing it for its factory is a guarded
+ * no-op beyond opening the default/control DBs (no port bind, no schedulers — see
+ * IS_ENTRY at the bottom of index.ts). We point those at a throwaway dir and
+ * disable autostart before the (lazy) import.
+ */
 
-interface OpRow {
-  seq: number;
-  id: string;
-  item_id: string;
-  ts: number;
-  device_id: string;
-  fields: string;
-}
+const TMP = `/tmp/carbon-a0-sync-${process.pid}`;
+process.env.DATABASE_PATH = `${TMP}/carbon.db`;
+process.env.CONTROL_DB_PATH = `${TMP}/control.db`;
+process.env.BLOBS_DIR = `${TMP}/blobs`;
+process.env.CARBON_NO_AUTOSTART = "1"; // never start the listener / schedulers from a test
+process.env.ALLOW_OPEN_MODE = "1"; // open mode applies only while userCount === 0
 
-interface RecRow {
-  seq: number;
-  id: string;
-  entity: string;
-  row_id: string;
-  ts: number;
-  device_id: string;
-  data: string;
-}
-
-function buildSyncApp(db: TestDb) {
-  const { deviceId } = db as unknown as { deviceId: string };
-  const app = makeHono(db); // allowOpen=true for single-user mode
-
-  app.post('/sync', async (c) => {
-    const userId = c.get('userId');
-    const open = userId === 'local';
-    const body = (await c.req.json().catch(() => ({}))) as {
-      since?: number;
-      rsince?: number;
-      ops?: Op[];
-      recordOps?: RecordOp[];
-      need?: string[];
-    };
-    const since = Number(body.since ?? 0);
-    const rsince = Number(body.rsince ?? 0);
-
-    if (!open && Array.isArray(body.ops)) body.ops = sanitizeOps(db, userId, body.ops);
-    if (Array.isArray(body.ops) && body.ops.length) ingestOps(db, body.ops, true);
-    if (!open && Array.isArray(body.recordOps))
-      body.recordOps = sanitizeRecordOps(db, userId, body.recordOps);
-
-    const visible = open ? null : visibleItemIds(db, userId);
-
-    const opRows = db.all<OpRow>(
-      `SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE rowid > ? ORDER BY rowid`,
-      [since],
-    );
-    const ops: Op[] = [];
-    let cursor = since;
-    for (const r of opRows) {
-      cursor = r.seq;
-      if (open || visible!.has(r.item_id)) {
-        ops.push({
-          id: r.id,
-          item_id: r.item_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          fields: JSON.parse(r.fields),
-        });
-      }
-    }
-
-    const recRows = db.all<RecRow>(
-      `SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE rowid > ? ORDER BY rowid`,
-      [rsince],
-    );
-    const recordOps: RecordOp[] = [];
-    let rcursor = rsince;
-    for (const r of recRows) {
-      rcursor = r.seq;
-      const data = JSON.parse(r.data) as { item_id?: string; user_id?: string };
-      const visibleRec =
-        open ||
-        r.entity === 'tag' ||
-        data.user_id === userId ||
-        (data.item_id ? visible!.has(data.item_id) : false);
-      if (visibleRec) {
-        recordOps.push({
-          id: r.id,
-          entity: r.entity,
-          row_id: r.row_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          data,
-        });
-      }
-    }
-
-    const users = listUsers(db);
-    return c.json({ ops, cursor, recordOps, rcursor, users, syncEpoch: getSyncEpoch(db) });
+// A stub peer-delivery seam — the sync handler only calls it for federated record
+// ops, which these tests never push, so the body is never exercised.
+const NO_DELIVERY: DeliverToPeer = async () =>
+  new Response(JSON.stringify({ error: "no delivery in test" }), {
+    status: 501,
   });
 
-  return app;
+// Lazy import of the real factory so the env above is set before index.ts loads.
+let _realBuild: typeof import("./index").buildTenantApp | null = null;
+async function realBuild(): Promise<typeof import("./index").buildTenantApp> {
+  if (!_realBuild) _realBuild = (await import("./index")).buildTenantApp;
+  return _realBuild;
 }
 
-// ─── open-mode sync ───────────────────────────────────────────────────────────
+/** Build the real per-tenant app (route table + middleware) around an in-memory db.
+ *  The sync route lives at /api/sync (the per-tenant `api` is mounted at /api). */
+async function realSyncApp(
+  db: TestDb,
+  deviceId: string,
+  vapidPublicKey: string,
+): Promise<FetchApp> {
+  const build = await realBuild();
+  return build(
+    {
+      id: "default",
+      subdomain: "",
+      db,
+      serverDeviceId: deviceId,
+      vapidPublicKey,
+      blobsDir: `${TMP}/blobs`,
+    },
+    NO_DELIVERY,
+  );
+}
 
-describe('POST /sync — open mode (no auth)', () => {
-  test('empty sync returns zero-cursors and empty op arrays', async () => {
-    const { db, deviceId } = makeTestDb();
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
-    const res = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+const SYNC_HEADERS = { "Content-Type": "application/json" };
+
+// ─── open-mode sync (no users → synthetic `local`) ────────────────────────────
+
+describe("POST /api/sync — open mode (no users)", () => {
+  test("empty sync returns zero-cursors and empty op arrays", async () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
+    const res = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
       body: JSON.stringify({}),
     });
     assert.equal(res.status, 200);
-    const body = await res.json() as {
+    const body = (await res.json()) as {
       ops: Op[];
       cursor: number;
       recordOps: RecordOp[];
@@ -143,222 +93,274 @@ describe('POST /sync — open mode (no auth)', () => {
     assert.equal(body.syncEpoch, 1);
   });
 
-  test('syncEpoch reflects bumped workspace setting', async () => {
-    const { db, deviceId } = makeTestDb();
-    const { bumpSyncEpoch } = await import('./federation');
+  test("syncEpoch reflects bumped workspace setting", async () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    const { bumpSyncEpoch } = await import("./federation");
     bumpSyncEpoch(db);
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
-    const res = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
+    const res = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
       body: JSON.stringify({}),
     });
     const body = (await res.json()) as { syncEpoch: number };
     assert.equal(body.syncEpoch, 2);
   });
 
-  test('ops pushed by client are returned in next sync', async () => {
-    const { db, deviceId } = makeTestDb();
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
+  test("ops pushed by client are returned in next sync", async () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
 
-    const itemId = 'sync-item-1';
+    const itemId = "sync-item-1";
     const now = Date.now();
     const ops: Op[] = [
       {
         id: `op-${now}`,
         item_id: itemId,
         ts: now,
-        device_id: 'client-A',
-        fields: { type: 'task', title: 'From Client', owner_id: null },
+        device_id: "client-A",
+        fields: { type: "task", title: "From Client", owner_id: null },
       },
     ];
 
-    // First sync: push ops
-    const pushRes = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ops }),
+    const pushRes = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, ops }),
     });
     assert.equal(pushRes.status, 200);
 
-    // Second sync from cursor=0: should get the ops back
-    const pullRes = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ since: 0 }),
+    const pullRes = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, since: 0 }),
     });
-    const pullBody = await pullRes.json() as { ops: Op[] };
-    assert.ok(pullBody.ops.some((o) => o.item_id === itemId), 'ingested op reflected');
+    const pullBody = (await pullRes.json()) as { ops: Op[] };
+    assert.ok(
+      pullBody.ops.some((o) => o.item_id === itemId),
+      "ingested op reflected",
+    );
   });
 
-  test('cursor advances — second pull from cursor gets only new ops', async () => {
-    const { db, deviceId } = makeTestDb();
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
+  test("cursor advances — second pull from cursor gets only new ops", async () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
 
     const now = Date.now();
-    // Push item A
-    await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
       body: JSON.stringify({
-        ops: [{
-          id: `op-A-${now}`,
-          item_id: 'item-A',
-          ts: now,
-          device_id: 'dev',
-          fields: { type: 'task', title: 'A', owner_id: null },
-        }],
+        syncEpoch: 1,
+        ops: [
+          {
+            id: `op-A-${now}`,
+            item_id: "item-A",
+            ts: now,
+            device_id: "dev",
+            fields: { type: "task", title: "A", owner_id: null },
+          },
+        ],
       }),
     });
 
-    // Pull from 0 — get cursor
-    const res1 = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ since: 0 }),
+    const res1 = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, since: 0 }),
     });
-    const { cursor } = await res1.json() as { cursor: number };
-    assert.ok(cursor > 0, 'cursor advanced');
+    const { cursor } = (await res1.json()) as { cursor: number };
+    assert.ok(cursor > 0, "cursor advanced");
 
-    // Push item B
-    await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
       body: JSON.stringify({
-        ops: [{
-          id: `op-B-${now + 1}`,
-          item_id: 'item-B',
-          ts: now + 1,
-          device_id: 'dev',
-          fields: { type: 'task', title: 'B', owner_id: null },
-        }],
+        syncEpoch: 1,
+        ops: [
+          {
+            id: `op-B-${now + 1}`,
+            item_id: "item-B",
+            ts: now + 1,
+            device_id: "dev",
+            fields: { type: "task", title: "B", owner_id: null },
+          },
+        ],
       }),
     });
 
-    // Pull from saved cursor — should only get item-B
-    const res2 = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ since: cursor }),
+    const res2 = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, since: cursor }),
     });
-    const { ops: newOps } = await res2.json() as { ops: Op[] };
-    assert.ok(!newOps.some((o) => o.item_id === 'item-A'), 'item-A not re-sent');
-    assert.ok(newOps.some((o) => o.item_id === 'item-B'), 'item-B is in delta');
+    const { ops: newOps } = (await res2.json()) as { ops: Op[] };
+    assert.ok(
+      !newOps.some((o) => o.item_id === "item-A"),
+      "item-A not re-sent",
+    );
+    assert.ok(
+      newOps.some((o) => o.item_id === "item-B"),
+      "item-B is in delta",
+    );
   });
 
-  test('users roster is always returned', async () => {
-    const { db, deviceId, addUser } = makeTestDb();
-    const { id: aliceId, basic: aliceBasic } = addUser('alice', 'pw');
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
-    // Use alice's credentials so the response is scoped to her visible items;
-    // listUsers always returns all non-deleted users regardless of scope.
-    const res = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { Authorization: aliceBasic, 'Content-Type': 'application/json' },
+  test("users roster is always returned (session bearer, not Basic)", async () => {
+    const { db, deviceId, vapidPublicKey, addUser } = makeTestDb();
+    const { id: aliceId, token: aliceToken } = addUser("alice", "pw");
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
+    // A session bearer (post-MFA human) — Basic is no longer accepted on /api/sync.
+    const res = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${aliceToken}`, ...SYNC_HEADERS },
       body: JSON.stringify({}),
     });
     assert.equal(res.status, 200);
-    const body = await res.json() as { users?: { username: string; id: string }[] };
-    assert.ok(Array.isArray(body.users), 'users array present');
-    assert.ok(body.users!.some((u) => u.id === aliceId), 'alice in roster');
+    const body = (await res.json()) as {
+      users?: { username: string; id: string }[];
+    };
+    assert.ok(Array.isArray(body.users), "users array present");
+    assert.ok(
+      body.users!.some((u) => u.id === aliceId),
+      "alice in roster",
+    );
   });
 });
 
 // ─── authenticated sync visibility scoping ────────────────────────────────────
 
-describe('POST /sync — visibility scoping (authenticated)', () => {
+describe("POST /api/sync — visibility scoping (session bearer)", () => {
   test("authenticated user only sees their own items in the op stream", async () => {
-    const { db, deviceId, addUser } = makeTestDb();
-    const { id: aliceId, basic: aliceBasic } = addUser('alice', 'pw');
-    const { id: bobId } = addUser('bob', 'pw');
+    const { db, deviceId, vapidPublicKey, addUser } = makeTestDb();
+    const { id: aliceId, token: aliceToken } = addUser("alice", "pw");
+    const { id: bobId } = addUser("bob", "pw");
 
-    // Create a task owned by Alice
-    createItem(db, deviceId, { type: 'task', title: 'Alice task', ownerId: aliceId });
-    // Create a task owned by Bob
-    createItem(db, deviceId, { type: 'task', title: 'Bob task', ownerId: bobId });
+    // Create a task owned by Alice and one by Bob.
+    createItem(db, deviceId, {
+      type: "task",
+      title: "Alice task",
+      ownerId: aliceId,
+    });
+    createItem(db, deviceId, {
+      type: "task",
+      title: "Bob task",
+      ownerId: bobId,
+    });
 
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
-
-    const res = await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { Authorization: aliceBasic, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ since: 0 }),
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
+    const res = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${aliceToken}`, ...SYNC_HEADERS },
+      body: JSON.stringify({ syncEpoch: 1, since: 0 }),
     });
     assert.equal(res.status, 200);
-    const { ops } = await res.json() as { ops: Op[] };
+    const { ops } = (await res.json()) as { ops: Op[] };
 
-    // Alice sees her own task
-    assert.ok(ops.some((o) => (o.fields as Record<string, unknown>).title === 'Alice task'));
-    // Alice does NOT see Bob's task
-    assert.ok(!ops.some((o) => (o.fields as Record<string, unknown>).title === 'Bob task'));
+    // Alice sees her own task but not Bob's.
+    assert.ok(
+      ops.some(
+        (o) => (o.fields as Record<string, unknown>).title === "Alice task",
+      ),
+    );
+    assert.ok(
+      !ops.some(
+        (o) => (o.fields as Record<string, unknown>).title === "Bob task",
+      ),
+    );
+  });
+
+  test("a raw password (Basic) cannot reach /api/sync — session required", async () => {
+    const { db, deviceId, vapidPublicKey, addUser } = makeTestDb();
+    const { basic } = addUser("alice", "pw");
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
+    const res = await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: { Authorization: basic, ...SYNC_HEADERS },
+      body: JSON.stringify({ syncEpoch: 1, since: 0 }),
+    });
+    assert.equal(
+      res.status,
+      401,
+      "Basic is only accepted on /login, not /api/sync",
+    );
   });
 });
 
 // ─── op ingestion idempotency ─────────────────────────────────────────────────
 
-describe('POST /sync — op ingestion idempotency', () => {
-  test('pushing the same op twice does not create duplicate items', async () => {
-    const { db, deviceId } = makeTestDb();
-    const testDb = Object.assign(db, { deviceId });
-    const app = buildSyncApp(testDb as TestDb & { deviceId: string });
+describe("POST /api/sync — op ingestion idempotency", () => {
+  test("pushing the same op twice does not create duplicate items", async () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    const app = await realSyncApp(db, deviceId, vapidPublicKey);
 
     const op: Op = {
-      id: 'idem-op-001',
-      item_id: 'idem-item',
+      id: "idem-op-001",
+      item_id: "idem-item",
       ts: 1_750_000_000_000,
-      device_id: 'dev',
-      fields: { type: 'task', title: 'Idempotent', owner_id: null },
+      device_id: "dev",
+      fields: { type: "task", title: "Idempotent", owner_id: null },
     };
 
-    await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ops: [op] }),
+    await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, ops: [op] }),
     });
-    await appFetch(app, '/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ops: [op] }),
+    await appFetch(app, "/api/sync", {
+      method: "POST",
+      headers: SYNC_HEADERS,
+      body: JSON.stringify({ syncEpoch: 1, ops: [op] }),
     });
 
-    const count = db.get<{ n: number }>(
-      `SELECT COUNT(DISTINCT id) AS n FROM ops WHERE id = ?`,
-      [op.id],
-    )?.n ?? 0;
-    assert.equal(count, 1, 'op stored exactly once');
+    const count =
+      db.get<{ n: number }>(
+        `SELECT COUNT(DISTINCT id) AS n FROM ops WHERE id = ?`,
+        [op.id],
+      )?.n ?? 0;
+    assert.equal(count, 1, "op stored exactly once");
   });
 });
 
 // ─── push batch ceiling ───────────────────────────────────────────────────────
 // The real /api/sync calls oversizedSyncArray before ingesting anything, so this
-// covers the guard itself rather than the mirrored route above.
+// covers the guard itself (pure function, no handler).
 
-describe('sync push batch ceiling', () => {
+describe("sync push batch ceiling", () => {
   const filled = (n: number) => Array.from({ length: n }, (_, i) => i);
 
-  test('a push within the cap passes', () => {
-    assert.equal(oversizedSyncArray({ ops: filled(3), recordOps: filled(3) }, 3), null);
+  test("a push within the cap passes", () => {
+    assert.equal(
+      oversizedSyncArray({ ops: filled(3), recordOps: filled(3) }, 3),
+      null,
+    );
     assert.equal(oversizedSyncArray({}, 3), null);
-    assert.equal(oversizedSyncArray({ ops: 'not-an-array' }, 3), null);
+    assert.equal(oversizedSyncArray({ ops: "not-an-array" }, 3), null);
   });
 
-  test('the oversized array is named, ops before recordOps', () => {
-    assert.equal(oversizedSyncArray({ ops: filled(4) }, 3), 'ops');
-    assert.equal(oversizedSyncArray({ recordOps: filled(4) }, 3), 'recordOps');
-    assert.equal(oversizedSyncArray({ need: filled(4) }, 3), 'need');
-    assert.equal(oversizedSyncArray({ ops: filled(4), recordOps: filled(4) }, 3), 'ops');
+  test("the oversized array is named, ops before recordOps", () => {
+    assert.equal(oversizedSyncArray({ ops: filled(4) }, 3), "ops");
+    assert.equal(oversizedSyncArray({ recordOps: filled(4) }, 3), "recordOps");
+    assert.equal(oversizedSyncArray({ need: filled(4) }, 3), "need");
+    assert.equal(
+      oversizedSyncArray({ ops: filled(4), recordOps: filled(4) }, 3),
+      "ops",
+    );
   });
 
-  test('arrays are capped independently, so a big need does not sink a normal push', () => {
-    assert.equal(oversizedSyncArray({ ops: filled(2), recordOps: filled(2), need: filled(2) }, 3), null);
+  test("arrays are capped independently, so a big need does not sink a normal push", () => {
+    assert.equal(
+      oversizedSyncArray(
+        { ops: filled(2), recordOps: filled(2), need: filled(2) },
+        3,
+      ),
+      null,
+    );
   });
 
-  test('the default ceiling leaves room for the client chunk size (2500)', () => {
-    assert.ok(MAX_SYNC_BATCH >= 2500, `MAX_SYNC_BATCH=${MAX_SYNC_BATCH} would reject a full client chunk`);
+  test("the default ceiling leaves room for the client chunk size (2500)", () => {
+    assert.ok(
+      MAX_SYNC_BATCH >= 2500,
+      `MAX_SYNC_BATCH=${MAX_SYNC_BATCH} would reject a full client chunk`,
+    );
   });
 });

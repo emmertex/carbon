@@ -1,17 +1,18 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { migrate, ensureDeviceId, type Db } from '@carbon/core';
-import { openDb } from './sqlite';
-import { ensureServerTables } from './auth';
-import { ensurePushTables, initVapid } from './push';
-import { ensureFcmTable } from './fcm';
-import { ensureAgentTables, ensureAgentUsageTables } from './agents';
-import { ensureCaldavTables } from './caldav';
-import { ensureUserPrefsTables } from './user-prefs';
-import { ensureNoticeTables } from './notices';
-import { ensureFederationTables, ensureGovernanceTables } from './federation';
-import { ensurePurgeNoticeTable } from './purge-notices';
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { ensureDeviceId, type Db } from "@carbon/core";
+import { openDb } from "./sqlite";
+import { migrateWithRepair, recoverPendingMigration } from "./migration-repair";
+import { ensureServerTables } from "./auth";
+import { ensurePushTables, initVapid } from "./push";
+import { ensureFcmTable } from "./fcm";
+import { ensureAgentTables, ensureAgentUsageTables } from "./agents";
+import { ensureCaldavTables } from "./caldav";
+import { ensureUserPrefsTables } from "./user-prefs";
+import { ensureNoticeTables } from "./notices";
+import { ensureFederationTables, ensureGovernanceTables } from "./federation";
+import { ensurePurgeNoticeTable } from "./purge-notices";
 
 /** Everything a single tenant's request handlers close over. One per family DB. */
 export interface TenantCtx {
@@ -21,6 +22,9 @@ export interface TenantCtx {
   serverDeviceId: string;
   vapidPublicKey: string;
   blobsDir: string;
+  /** On-disk path of the tenant DB (for size-quota stat). Absent for in-memory test
+   *  DBs, where the size quota check is skipped. */
+  dbPath?: string;
 }
 
 /** Minimal shape of a Hono app we forward requests into (avoids importing Env here). */
@@ -41,8 +45,13 @@ export function initTenantDb(opts: {
 }): TenantCtx {
   mkdirSync(dirname(opts.dbPath), { recursive: true });
   mkdirSync(opts.blobsDir, { recursive: true });
-  const db = openDb(opts.dbPath);
-  migrate(db);
+  recoverPendingMigration(opts.dbPath);
+  let db = openDb(opts.dbPath);
+  // A4: atomic schema/migration repair — snapshot the pre-migration file, run the
+  // pending migrations in one transaction, VERIFY the result before exposing it, and on
+  // any failure restore the snapshot (tenant left at the last known-good schema, retried
+  // on next load). The fast path (no pending migration) does no extra work.
+  db = migrateWithRepair(db, opts.dbPath, (p) => openDb(p));
   const serverDeviceId = ensureDeviceId(db);
   ensureServerTables(db);
   ensurePushTables(db);
@@ -63,6 +72,7 @@ export function initTenantDb(opts: {
     serverDeviceId,
     vapidPublicKey,
     blobsDir: opts.blobsDir,
+    dbPath: opts.dbPath,
   };
 }
 
@@ -97,6 +107,9 @@ export interface TenantRegistry {
   activeCtxs(): TenantCtx[];
   /** Drop a tenant from the cache and close its DB handle (suspend/delete). */
   evict(id: string): void;
+  /** A9: acquire a lease on a tenant DB for async background work. Prevents eviction
+   *  and DB close while the lease is held. Returns a release function. */
+  acquireDbLease(db: Db): () => void;
 }
 
 /**
@@ -120,16 +133,18 @@ export function createTenantRegistry(opts: {
   // Secondary index so a hot tenant can be found by subdomain without hitting the
   // control DB (resolveLoaded checks this before calling opts.resolve).
   const idBySubdomain = new Map<string, string>();
+  // A9: lease counts per DB — prevents eviction/close while background work is running.
+  const dbLeases = new WeakMap<Db, number>();
 
-  /** Close now if nothing is in-flight, otherwise let the last in-flight request's
-   *  wrapped fetch() close it when it finishes (see wrapApp). Never closes twice. */
+  /** A9: close now if nothing is in-flight AND no active leases, otherwise defer. */
   function closeOrDefer(entry: Loaded): void {
-    if (entry.inFlight > 0) {
+    if (entry.inFlight > 0 || (dbLeases.get(entry.ctx.db) ?? 0) > 0) {
       entry.pendingClose = true;
       return;
     }
     try {
       entry.ctx.db.raw.close();
+      dbLeases.delete(entry.ctx.db);
     } catch {
       /* already closed */
     }
@@ -188,7 +203,12 @@ export function createTenantRegistry(opts: {
       return cached;
     }
     const ctx = initTenantDb(loc);
-    const entry: Loaded = { ctx, app: opts.buildApp(ctx), inFlight: 0, pendingClose: false };
+    const entry: Loaded = {
+      ctx,
+      app: opts.buildApp(ctx),
+      inFlight: 0,
+      pendingClose: false,
+    };
     entry.app = wrapApp(entry, entry.app);
     idBySubdomain.set(loc.subdomain, loc.id);
     cache.set(loc.id, entry);
@@ -197,7 +217,13 @@ export function createTenantRegistry(opts: {
   }
 
   function resolveLoaded(subdomain: string | null): Loaded | null {
-    if (subdomain === null) return { ctx: opts.defaultCtx, app: opts.defaultApp, inFlight: 0, pendingClose: false };
+    if (subdomain === null)
+      return {
+        ctx: opts.defaultCtx,
+        app: opts.defaultApp,
+        inFlight: 0,
+        pendingClose: false,
+      };
     const cachedId = idBySubdomain.get(subdomain);
     if (cachedId) {
       const cached = cache.get(cachedId);
@@ -236,21 +262,30 @@ export function createTenantRegistry(opts: {
       idBySubdomain.delete(entry.ctx.subdomain);
       closeOrDefer(entry);
     },
+    acquireDbLease(db) {
+      const count = (dbLeases.get(db) ?? 0) + 1;
+      dbLeases.set(db, count);
+      return () => {
+        const remaining = Math.max(0, count - 1);
+        if (remaining > 0) dbLeases.set(db, remaining);
+        else dbLeases.delete(db);
+      };
+    },
   };
 }
 
 const RESERVED_SUBDOMAINS = new Set([
-  'www',
-  'api',
-  'admin',
-  'app',
-  'host',
-  'static',
-  'assets',
-  'mail',
-  'ns',
-  'ns1',
-  'ns2',
+  "www",
+  "api",
+  "admin",
+  "app",
+  "host",
+  "static",
+  "assets",
+  "mail",
+  "ns",
+  "ns1",
+  "ns2",
 ]);
 
 /**
@@ -259,15 +294,18 @@ const RESERVED_SUBDOMAINS = new Set([
  * (callers that need to recognise `app`, `admin`, etc. use this directly).
  * `89eb.carbon.etx.sx` + base `carbon.etx.sx` => `89eb`; `carbon.etx.sx` => null.
  */
-export function hostLabel(host: string | undefined, baseDomain: string | undefined): string | null {
+export function hostLabel(
+  host: string | undefined,
+  baseDomain: string | undefined,
+): string | null {
   if (!host || !baseDomain) return null;
-  const hostname = host.split(':')[0].toLowerCase();
+  const hostname = host.split(":")[0].toLowerCase();
   const base = baseDomain.toLowerCase();
   if (hostname === base) return null;
-  if (!hostname.endsWith('.' + base)) return null;
+  if (!hostname.endsWith("." + base)) return null;
   const label = hostname.slice(0, hostname.length - base.length - 1);
   // Only a single left-most label is meaningful (no nested subdomains).
-  if (!label || label.includes('.')) return null;
+  if (!label || label.includes(".")) return null;
   return label;
 }
 
@@ -276,7 +314,10 @@ export function hostLabel(host: string | undefined, baseDomain: string | undefin
  * (www, app, admin, …) / non-base hosts / unset base. Null routes to the default
  * tenant, which keeps single-tenant self-host working unchanged.
  */
-export function subdomainFromHost(host: string | undefined, baseDomain: string | undefined): string | null {
+export function subdomainFromHost(
+  host: string | undefined,
+  baseDomain: string | undefined,
+): string | null {
   const label = hostLabel(host, baseDomain);
   if (!label || RESERVED_SUBDOMAINS.has(label)) return null;
   return label;

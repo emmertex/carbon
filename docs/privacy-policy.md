@@ -65,6 +65,20 @@ Web Push on the web/desktop app, or Google Firebase Cloud Messaging on the Andro
 delivery passes through that service; keep sensitive detail out of notification text if this
 matters to you.
 
+## External images in notes
+
+Notes in Carbon can embed images from external URLs. When you view a note that contains an
+embedded image from an external URL (e.g. a publicly hosted image), your browser or device
+will send a request directly to that remote host to fetch the image bytes. Carbon is not
+involved in that request — it does not proxy, cache, or see the image content. The remote
+host receives your request just as it would if you had visited their site directly, with no
+Carbon authentication or identifiers attached.
+
+This means that if you embed an image from a third-party URL in a note, viewing that note
+causes a request to that third party. If you want to avoid sending requests to external
+hosts, use Carbon's attachment feature (which stores image bytes locally or on your sync
+server) instead of embedding external image URLs.
+
 ## Children
 
 Carbon is not directed at children and does not knowingly collect information from anyone.

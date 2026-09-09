@@ -202,7 +202,7 @@ const GROUPS: Group[] = [
         why: "The language agent runs server-side — a basic model is included on hosted plans under fair-use limits, or you supply your own key (self-hosted, or for higher limits) — so prompts and keys never reach the client. Without a server the in-app agent has nowhere to run.",
       },
       {
-        feature: "Agent API (Telegram, Hermes, bots)",
+        feature: "Agent API (Telegram, external clients, bots)",
         detail: "Add and manage tasks from external bots via scoped API tokens.",
         local: false,
         server: true,

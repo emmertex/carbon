@@ -316,7 +316,7 @@ function AppInner() {
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
     >
-      {/* Sidebar drawer backdrop (compact) */}
+      {/* Sidebar drawer backdrop (narrow and medium screens) */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/40 lg:hidden"
@@ -326,7 +326,7 @@ function AppInner() {
       <Sidebar />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Compact top bar */}
+        {/* Top bar — shown on narrow and medium screens, hidden on wide */}
         <header className="flex items-center gap-2 border-b border-border px-3 py-2 lg:hidden">
           <button
             className="rounded-lg p-2 hover:bg-surface-2"
@@ -340,7 +340,7 @@ function AppInner() {
 
         <TimerBar />
 
-        <div className="flex min-h-0 flex-1">
+        <div data-workspace-panes className="flex min-h-0 flex-1">
           <main className="min-w-0 flex-1 overflow-y-auto">
             <Suspense fallback={<Splash />}>
               <Routes>

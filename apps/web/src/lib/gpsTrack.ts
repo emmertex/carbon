@@ -22,6 +22,7 @@ import { mutate } from './mutate';
 import { readNoteMeta } from './noteMeta';
 import { storeFile } from './blobs';
 import { isCapacitor } from './platform';
+import { IS_PLAY_STORE } from './variant';
 import { watchPosition, type PositionWatch, type GeoPoint } from './location';
 import { useStore, getCurrentUserId } from './store';
 import {
@@ -65,6 +66,9 @@ export function setGpsTrackPref(on: boolean): void {
 }
 
 export function gpsTrackSupported(): boolean {
+  // The Play Store build ships without background GPS tracks (Play restricts
+  // background location); disable the recorder there.
+  if (IS_PLAY_STORE) return false;
   return isCapacitor || (typeof navigator !== 'undefined' && 'geolocation' in navigator);
 }
 

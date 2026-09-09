@@ -110,6 +110,10 @@ export function BillingPanel({ onChange }: { onChange?: () => void }) {
     );
   }
 
+  if (info.provider === 'unavailable') {
+    return <ErrorText>Billing is unavailable. Contact the host administrator to renew access.</ErrorText>;
+  }
+
   const sub = info.subscription;
   const status = sub?.status ?? 'none';
   const expiry = info.expiresAt ? new Date(info.expiresAt) : null;

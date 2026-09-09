@@ -95,6 +95,44 @@ function seedPerspectives(): void {
 }
 
 /**
+ * Build a large workspace matching the normal target: 10k active + 90k historical.
+ * Flat top-level tasks for speed — the perf benchmark cares about query/scaling,
+ * not workspace shape. Returns { active, historical } counts.
+ */
+async function seedLargeWorkspace(
+  active: number,
+  historical: number,
+): Promise<{ active: number; historical: number }> {
+  const db = getDb();
+  const dev = getDeviceId();
+
+  db.transaction(() => {
+    // Active first
+    for (let i = 0; i < active; i++) {
+      createItem(db, dev, { type: 'task', title: `Active ${i}` });
+    }
+    // Then historical (soft-deleted)
+    for (let i = 0; i < historical; i++) {
+      const item = createItem(db, dev, { type: 'task', title: `Historical ${i}` });
+      db.run('UPDATE items SET deleted = 1, updated_at = ? WHERE id = ?', [
+        new Date().toISOString(),
+        item.id,
+      ]);
+    }
+  });
+
+  useStore.getState().bump();
+  await flushPersist();
+
+  const activeRow = db.get<{ c: number }>('SELECT COUNT(*) AS c FROM items WHERE deleted = 0');
+  const histRow = db.get<{ c: number }>('SELECT COUNT(*) AS c FROM items WHERE deleted = 1');
+  const activeCount = activeRow?.c ?? 0;
+  const historicalCount = histRow?.c ?? 0;
+  perf.setTaskCount(activeCount);
+  return { active: activeCount, historical: historicalCount };
+}
+
+/**
  * Build a representative workspace of roughly `n` items in one transaction (one
  * persist + one React bump for the whole batch). Returns the new live item count.
  */
@@ -223,6 +261,7 @@ async function reset(): Promise<void> {
 export function registerDevSeed(): void {
   if (typeof window === 'undefined') return;
   window.__carbonSeed = seed;
+  window.__carbonSeedLarge = seedLargeWorkspace;
   window.__carbonReset = reset;
   window.__carbonFlushPersist = flushPersist;
   perf.setTaskCount(liveCount());

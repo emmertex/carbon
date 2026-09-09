@@ -20,6 +20,7 @@ export function SegmentedControl<T extends string>({
   className,
   segmentClassName,
   block,
+  wrap,
 }: {
   value: T | null;
   onChange: (value: T) => void;
@@ -29,19 +30,24 @@ export function SegmentedControl<T extends string>({
   segmentClassName?: string;
   /** Stretch to full width with equal-width segments. */
   block?: boolean;
+  /** Wrap independent pills instead of scrolling a joined group. */
+  wrap?: boolean;
 }) {
   const activeRef = useRef<HTMLButtonElement | null>(null);
 
   // Keep the selected segment visible when the group scrolls horizontally
   // (e.g. four Features presets on a narrow settings column).
   useEffect(() => {
+    if (wrap) return;
     activeRef.current?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
-  }, [value]);
+  }, [value, wrap]);
 
   return (
     <div
       className={cn(
-        'inline-flex max-w-full overflow-x-auto overflow-y-hidden rounded-full border border-border text-xs',
+        wrap
+          ? 'flex max-w-full flex-wrap gap-1.5 text-xs'
+          : 'inline-flex max-w-full overflow-x-auto overflow-y-hidden rounded-full border border-border text-xs',
         block && 'flex w-full',
         className,
       )}
@@ -60,7 +66,7 @@ export function SegmentedControl<T extends string>({
             className={cn(
               'shrink-0 whitespace-nowrap px-3 py-1 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40',
               block && 'flex-1',
-              i > 0 && 'border-l border-border',
+              wrap ? 'rounded-full border border-border' : i > 0 && 'border-l border-border',
               active
                 ? (opt.activeClassName ?? 'bg-accent-soft text-accent')
                 : 'text-text-muted hover:bg-surface-2 hover:text-text',

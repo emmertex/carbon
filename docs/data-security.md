@@ -212,36 +212,34 @@ files by hand.
   catch a database mid-write. The script instead opens each DB read-only and runs
   `VACUUM INTO`, which SQLite guarantees produces a single, self-consistent snapshot file —
   safe to run against a live server, no need to stop it first.
-- **Where backups land.** Snapshots are written under `BACKUP_DIR` (default: a `backups/`
-  folder next to your data directory), one timestamped `.db` file per source database, grouped
-  into `default/`, `control/`, and `tenants/<id>/` subfolders.
-- **Retention.** Old snapshots are pruned automatically after `BACKUP_RETENTION_DAYS` days
-  (default **14**). Each run backs up first, then prunes, so you always have at least one
-  fresh snapshot even if retention is set aggressively low.
-- **Running it.** `npm run backup -w @carbon/server`, or on a schedule via the systemd timer
-  example below. Exits non-zero if any individual database failed to back up, so a cron/timer
-  failure is easy to alert on; a missing file (e.g. a tenant that doesn't exist yet) is logged
-  and skipped, not treated as an error.
+- **Where backups land.** Each source gets a timestamped directory under
+  `BACKUP_DIR/default`, `control`, or `tenants/<id>`. It contains `carbon.db`,
+  `manifest.json` with SHA-256 checksums, and (for workspace DBs) `blobs/`.
+  Every referenced image/attachment, including comment images and trash, is verified.
+- **Failure handling.** Missing or corrupt content fails that backup. Staged output
+  is never published as complete. Retention runs only for sources backed up successfully.
+- **Retention.** Complete snapshots older than `BACKUP_RETENTION_DAYS` (default 14)
+  are removed after a successful replacement backup.
+- **Running it.** `npm run backup -w @carbon/server`. A failed source exits nonzero.
 
 ### Restore procedure
 
 1. **Stop the server** (`systemctl stop carbon` or equivalent) — restoring into a running
    server risks the live process immediately overwriting what you restore.
-2. **Copy the backup file back** over the live database path, e.g.:
-   ```
-   cp /path/to/backups/default/2026-07-08T12-00-00-000Z.db /path/to/data/carbon.db
-   ```
-   For a tenant DB, copy into `TENANTS_DIR/<id>/carbon.db`; for the control DB, into
-   `CONTROL_DB_PATH`.
-3. **Remove any stale WAL/SHM side-files** next to the path you restored (`carbon.db-wal`,
-   `carbon.db-shm`) if present, so the server doesn't try to replay a WAL from before the
-   restore.
-4. **Restart the server.**
+2. **Verify the snapshot.** Check each file against `manifest.json` (SHA-256 and
+   size). Keep the current database and blobs as a rollback copy.
+3. **Restore both parts.** Copy the snapshot's `carbon.db` to the configured database
+   path and its `blobs/` files to that workspace's blob directory. Remove the stopped
+   database's old `-wal` and `-shm` sidecars. Control-plane snapshots contain only a DB.
+4. **Reset the sync generation** using the documented `reset-sync-epoch` command before
+   allowing clients to write; follow the recovery negotiation instructions.
+5. **Restart the server.** Verify images and attachments before discarding rollback copies.
 
-Restoring only rewinds the database you copied — if you're restoring a tenant DB, its blob
-storage directory is untouched, so attachments referenced by data older than your backup may
-be missing (blobs are additive and rarely deleted, so this is usually only relevant if you're
-rolling back a long way).
+Browser exports fetch and verify every referenced blob. Missing/corrupt content produces
+an explicit incomplete-backup error instead of a successful download. Imports accept
+version 1 and 2 bundles with the current database schema, verify content and versions, and stage the merge before durable
+activation. Version 2 also checksums the database. Failed activation leaves existing
+records intact; safely staged content may remain cached for a retry.
 
 ### Example systemd timer
 

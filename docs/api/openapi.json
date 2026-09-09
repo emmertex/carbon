@@ -1,0 +1,362 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Carbon REST API",
+    "description": "Carbon task manager API — authentication, sync, tasks, projects, sharing, attachments, and integrations.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://carbon.example.com",
+      "description": "Self-hosted instance"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Human session bearer token. Scoped personal keys support only the task REST endpoints described in ../openapi.json; they cannot use sync, agent, blob, administration, or key-management endpoints. MFA challenge tokens are not general API credentials."
+      }
+    },
+    "schemas": {
+      "Item": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["task", "project", "note"] },
+          "title": { "type": "string" },
+          "note": { "type": "string", "nullable": true },
+          "status": { "type": "string", "enum": ["active", "done", "dropped"] },
+          "due_date": { "type": "string", "format": "date-time", "nullable": true },
+          "defer_date": { "type": "string", "format": "date-time", "nullable": true },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "owner_id": { "type": "string", "nullable": true },
+          "parent_id": { "type": "string", "nullable": true }
+        }
+      },
+      "ApiToken": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "user_id": { "type": "string" },
+          "name": { "type": "string" },
+          "scopes": { "type": "array", "items": { "type": "string" } },
+          "project_ids": { "type": "array", "nullable": true, "items": { "type": "string" }, "description": "Allowed project subtree roots; null allows all accessible tasks." },
+          "expires_at": { "type": "string", "format": "date-time", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_used_at": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "SyncResponse": {
+        "type": "object",
+        "properties": {
+          "ops": { "type": "array" },
+          "recordOps": { "type": "array" },
+          "users": { "type": "array" },
+          "serverSeq": { "type": "integer" },
+          "truncated": { "type": "boolean" },
+          "rejected": {
+            "type": "object",
+            "properties": {
+              "ops": { "type": "integer" },
+              "recordOps": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/me": {
+      "get": {
+        "summary": "Get current user profile",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "User profile" }
+        }
+      }
+    },
+    "/api/login": {
+      "post": {
+        "summary": "Sign in (start MFA flow)",
+        "security": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "device_id": { "type": "string" },
+                  "device_name": { "type": "string" },
+                  "device_token": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session token (if device trusted)" },
+          "401": { "description": "MFA required" }
+        }
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "summary": "Log out (revoke session)",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "Logged out" } }
+      }
+    },
+    "/api/sync": {
+      "post": {
+        "summary": "Sync operations",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ops": { "type": "array" },
+                  "recordOps": { "type": "array" },
+                  "need": { "type": "array" },
+                  "cursor": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sync response",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncResponse" } } }
+          },
+          "400": { "description": "Validation error" },
+          "429": { "description": "Rate limited" },
+          "507": { "description": "Storage quota exceeded" }
+        }
+      }
+    },
+    "/api/tasks": {
+      "get": {
+        "summary": "List tasks",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "perspective", "in": "query", "schema": { "type": "string" } },
+          { "name": "project", "in": "query", "schema": { "type": "string" } },
+          { "name": "tag", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "List of tasks" }
+        }
+      },
+      "post": {
+        "summary": "Create task",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "due_date": { "type": "string", "format": "date-time" },
+                  "note": { "type": "string" }
+                },
+                "required": ["title"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Task created" }
+        }
+      }
+    },
+    "/api/tasks/{id}": {
+      "get": {
+        "summary": "Get task by ID",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Task details" },
+          "404": { "description": "Not found" }
+        }
+      },
+      "patch": {
+        "summary": "Update task",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "status": { "type": "string" },
+                  "due_date": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Task updated" }
+        }
+      }
+    },
+    "/api/tasks/{id}/comments": {
+      "post": {
+        "summary": "Add comment to task",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "body": { "type": "string" }
+                },
+                "required": ["body"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Comment added" }
+        }
+      }
+    },
+    "/api/keys": {
+      "get": {
+        "summary": "List personal API tokens",
+        "description": "Requires a human session. Personal keys cannot manage keys. Member creation is subject to administrator policy.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "List of tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tokens": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/ApiToken" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create personal API token",
+        "description": "Requires a human session. Personal keys cannot manage keys. Member creation is subject to administrator policy.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string", "description": "Token name" },
+                  "scopes": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["tasks:read", "tasks:write", "inbox:write"] }
+                  },
+                  "projectIds": { "type": "array", "nullable": true, "minItems": 1, "maxItems": 100, "items": { "type": "string" }, "description": "Accessible project subtree roots; null allows all accessible tasks." },
+                  "expiresAt": { "type": "string", "format": "date-time", "nullable": true }
+                },
+                "required": ["name", "scopes"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Token created (secret shown once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiToken" },
+                    { "type": "object", "properties": { "token": { "type": "string" } } }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/keys/{id}": {
+      "delete": {
+        "summary": "Revoke personal API token",
+        "description": "Requires a human session. Personal keys cannot manage keys. Member creation is subject to administrator policy.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Token revoked" }
+        }
+      }
+    },
+    "/api/agent/items": {
+      "get": {
+        "summary": "Agent: list items",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "list", "in": "query", "schema": { "type": "string" } },
+          { "name": "tag", "in": "query", "schema": { "type": "string" } },
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "detail", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "List of items" }
+        }
+      }
+    },
+    "/api/agent/tasks/batch": {
+      "post": {
+        "summary": "Agent: add tasks in batch",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "list": { "type": "string" },
+                  "titles": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Tasks added" }
+        }
+      }
+    }
+  }
+}

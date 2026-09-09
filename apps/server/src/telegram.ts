@@ -23,6 +23,7 @@ import { buildAgentApiDeps } from './agent-ops';
 import { runAgentCommand } from './agent-command';
 import { getUserTimezone } from './user-prefs';
 import type { TenantRegistry } from './tenant';
+import { safeFetch } from './safe-fetch';
 
 const CODE_TTL_MS = 10 * 60 * 1000; // pairing codes are short-lived
 const CODE_MAX_ATTEMPTS = 5; // wrong-workspace / bad redemptions before a code is burned
@@ -54,6 +55,14 @@ export function ensureTelegramTables(db: Db): void {
       step       TEXT NOT NULL,
       subdomain  TEXT,
       updated_at TEXT NOT NULL
+    );
+    -- The parked share/assign a "yes" confirms: the original command text, the pending
+    -- actions verbatim, and the mutations the first turn already applied (so the confirm
+    -- re-run doesn't duplicate them). Replaced by each new pending ask; cleared otherwise.
+    CREATE TABLE IF NOT EXISTS telegram_pending (
+      chat_id    TEXT PRIMARY KEY,
+      payload    TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS telegram_codes (
       code_hash  TEXT PRIMARY KEY,
@@ -108,6 +117,52 @@ function getHistory(db: Db, chatId: string): Array<{ role: 'user' | 'assistant';
 
 function clearHistory(db: Db, chatId: string): void {
   db.run('DELETE FROM telegram_history WHERE chat_id = ?', [chatId]);
+}
+
+// ----- parked share/assign confirmations (one per chat) -----------------------
+
+/** What a "yes" confirms: the original command text, the parked share/assign actions verbatim,
+ *  and the mutating calls that turn already applied (the confirm re-run skips them). Saved
+ *  only when the ask was actually delivered — the user can only confirm what they saw. */
+export interface PendingConfirm {
+  text: string;
+  confirm: Array<{ tool: 'share' | 'assign'; args: Record<string, unknown> }>;
+  skip: Array<{ name: string; args: Record<string, unknown> }>;
+}
+
+function savePending(db: Db, chatId: string, p: PendingConfirm): void {
+  ensureTelegramTables(db);
+  db.run(
+    `INSERT INTO telegram_pending (chat_id, payload, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`,
+    [chatId, JSON.stringify(p), new Date().toISOString()],
+  );
+}
+function clearPending(db: Db, chatId: string): void {
+  ensureTelegramTables(db);
+  db.run('DELETE FROM telegram_pending WHERE chat_id = ?', [chatId]);
+}
+/** The parked ask a bare "yes" would confirm, or null. Payload is re-validated on read (it
+ *  round-trips through the DB as JSON) so a corrupt row can never smuggle an action through. */
+function getPending(db: Db, chatId: string): PendingConfirm | null {
+  ensureTelegramTables(db);
+  const row = db.get<{ payload: string }>('SELECT payload FROM telegram_pending WHERE chat_id = ?', [chatId]);
+  if (!row) return null;
+  try {
+    const p = JSON.parse(row.payload) as PendingConfirm;
+    if (typeof p?.text !== 'string' || !Array.isArray(p.confirm) || !Array.isArray(p.skip)) return null;
+    const confirm = p.confirm.filter(
+      (c): c is PendingConfirm['confirm'][number] =>
+        !!c && typeof c === 'object' && (c.tool === 'share' || c.tool === 'assign') && !!c.args && typeof c.args === 'object',
+    );
+    const skip = p.skip.filter(
+      (s): s is PendingConfirm['skip'][number] =>
+        !!s && typeof s === 'object' && typeof s.name === 'string' && !!s.args && typeof s.args === 'object',
+    );
+    return { text: p.text, confirm, skip };
+  } catch {
+    return null;
+  }
 }
 
 // ----- pairing codes ----------------------------------------------------------
@@ -230,6 +285,7 @@ export function unlinkTelegramUser(db: Db, tenantId: string, userId: string): nu
     [tenantId, userId],
   );
   for (const l of links) db.run('DELETE FROM telegram_state WHERE chat_id = ?', [l.chat_id]);
+  for (const l of links) db.run('DELETE FROM telegram_pending WHERE chat_id = ?', [l.chat_id]);
   db.run('DELETE FROM telegram_links WHERE tenant_id = ? AND user_id = ?', [tenantId, userId]);
   return links.length;
 }
@@ -239,7 +295,9 @@ export function unlinkTelegramUser(db: Db, tenantId: string, userId: string): nu
 const TG_API = 'https://api.telegram.org';
 
 async function tgCall(token: string, method: string, body: Record<string, unknown>): Promise<any> {
-  const res = await fetch(`${TG_API}/bot${token}/${method}`, {
+  // A2: safeFetch — api.telegram.org is a fixed public host (SSRF-safe), but this still
+  // applies the response-size cap + socket timeout + redirect policy.
+  const res = await safeFetch(`${TG_API}/bot${token}/${method}`, false, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -364,6 +422,7 @@ function completeLink(db: Db, deps: TelegramDeps, chatId: string, r: Extract<Red
   );
   clearState(db, chatId);
   clearHistory(db, chatId); // fresh conversation for a freshly-linked account
+  clearPending(db, chatId);
   return `✅ Linked as ${name} in ${workspaceLabel(r.subdomain)}.\n\n${HELP}`;
 }
 
@@ -419,11 +478,13 @@ export async function handleTelegramUpdate(update: unknown, deps: TelegramDeps):
     db.run('DELETE FROM telegram_links WHERE chat_id = ?', [chatId]);
     clearState(db, chatId);
     clearHistory(db, chatId);
+    clearPending(db, chatId);
     await reply('Unlinked. Send /start to connect again.');
     return;
   }
   if (lower === '/reset' || lower === '/clear') {
     clearHistory(db, chatId);
+    clearPending(db, chatId);
     await reply('Cleared our conversation context. The next message starts fresh.');
     return;
   }
@@ -464,6 +525,18 @@ export async function handleTelegramUpdate(update: unknown, deps: TelegramDeps):
 
   // ----- linked: run the natural-language command -----
   if (link) {
+    // A bare "yes"/"confirm" answers the last parked share/assign the bot asked about — and
+    // only that: the payload was saved when the user SAW the ask, so a yes can never apply
+    // to anything else. Any other message drops the parked action.
+    const parked = getPending(db, chatId);
+    if (parked?.confirm.length && /^(yes|y|confirm|ok)$/i.test(text)) {
+      await runLinkedCommand(deps, chatId, link, parked.text, reply, {
+        confirmed: parked.confirm,
+        alreadySucceeded: parked.skip,
+      });
+      return;
+    }
+    clearPending(db, chatId);
     await runLinkedCommand(deps, chatId, link, text, reply);
     return;
   }
@@ -524,6 +597,9 @@ async function runLinkedCommand(
   link: TelegramLink,
   text: string,
   reply: (t: string) => Promise<boolean>,
+  /** Set on the "yes" confirm re-run: the parked actions the user is confirming and the
+   *  mutations the first turn already applied (skipped on the re-run). */
+  extra?: { confirmed?: PendingConfirm['confirm']; alreadySucceeded?: PendingConfirm['skip'] },
 ): Promise<void> {
   const ctx = deps.registry.getCtx(link.subdomain);
   if (!ctx) {
@@ -557,6 +633,7 @@ async function runLinkedCommand(
     allowPrivate,
   });
   const history = getHistory(deps.controlDb, chatId);
+  const isConfirm = !!extra?.confirmed?.length;
   try {
     const r = await runAgentCommand(apiDeps, agent, link.user_id, text, allowPrivate, {
       conversational: true,
@@ -564,15 +641,34 @@ async function runLinkedCommand(
       timezone: getUserTimezone(ctx.db, link.user_id),
       requestKind: 'telegram_command',
       history,
+      ...(extra?.confirmed?.length ? { confirmed: extra.confirmed } : {}),
+      ...(extra?.alreadySucceeded?.length ? { alreadySucceeded: extra.alreadySucceeded } : {}),
     });
-    const out = r.reply || 'Done.';
+    // A parked share/assign asks the user to confirm; the reply the model narrated plus the
+    // standard hint (the pending descriptions are already in r.reply's deterministic lines…
+    // in conversational mode the model narrates, so spell the ask out for every surface).
+    const out = (r.reply || 'Done.') + (r.pending?.length ? '\n\nReply "yes" to confirm.' : '');
     const delivered = await reply(out);
     // Record the exchange for follow-up context only if the command succeeded AND the
     // reply actually reached the user — if delivery failed, the user never saw `out`, so
-    // replaying it as prior "assistant" context next turn would be misleading.
+    // replaying it as prior "assistant" context next turn would be misleading. The confirm
+    // re-run re-uses the original text (already recorded by the turn that proposed the share),
+    // so it isn't appended again.
     if (delivered) {
-      appendHistory(deps.controlDb, chatId, 'user', text);
+      if (!isConfirm) appendHistory(deps.controlDb, chatId, 'user', text);
       appendHistory(deps.controlDb, chatId, 'assistant', out);
+    }
+    // Park what a subsequent bare "yes" would apply — only if the ask actually reached the
+    // user (they can't consent to something they never saw). No pending (or a failed send)
+    // clears whatever was parked before: a "yes" only ever confirms the latest shown ask.
+    if (delivered && r.pending?.length) {
+      savePending(deps.controlDb, chatId, {
+        text,
+        confirm: r.pending.map((p) => ({ tool: p.tool, args: p.args })),
+        skip: r.executed.map((e) => ({ name: e.tool, args: e.args })),
+      });
+    } else {
+      clearPending(deps.controlDb, chatId);
     }
   } catch (e) {
     console.error('[telegram] command failed:', e);

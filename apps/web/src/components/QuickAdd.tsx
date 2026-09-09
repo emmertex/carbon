@@ -3,12 +3,15 @@ import { Plus, Sparkles, Loader2 } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { cn } from '@/lib/cn';
 import { firstWordIsCommand } from '@/lib/command';
-import { runCommand } from '@/lib/admin';
+import { runCommand, type CommandConfirm } from '@/lib/admin';
 import { scheduleSync } from '@/lib/sync';
 import { useTokenSuggest, SuggestionMenu } from './TokenSuggest';
 import { useFeature } from '@/hooks/useFeature';
 
-type Status = { kind: 'pending' | 'reply' | 'error'; text: string } | null;
+/** A parked share/assign the user can confirm: the echoed action(s) + already-applied
+ *  mutations, plus the original command text to re-send with them. */
+type ConfirmCtx = CommandConfirm & { text: string };
+type Status = { kind: 'pending' | 'reply' | 'error'; text: string; confirm?: ConfirmCtx } | null;
 
 export function QuickAdd({
   placeholder = 'Add a task…  (#tag @user !priority)',
@@ -61,11 +64,17 @@ export function QuickAdd({
     if (focusNonce > 0) inputRef.current?.focus();
   }, [focusNonce]);
 
-  async function runAsCommand(raw: string) {
+  async function runAsCommand(raw: string, confirmed?: CommandConfirm) {
     setStatus({ kind: 'pending', text: 'Thinking…' });
     try {
-      const { reply } = await runCommand(raw, currentProjectId);
-      setStatus({ kind: 'reply', text: reply });
+      const r = await runCommand(raw, currentProjectId, confirmed);
+      // A parked share/assign: show the ask with a Confirm button. Confirming re-sends the
+      // same text with the pending action + the already-applied mutations echoed back
+      // verbatim — the server only executes on an exact match with what was displayed.
+      const confirm: ConfirmCtx | undefined = r.pending?.length
+        ? { text: raw, confirm: r.pending, skip: r.executed ?? [] }
+        : undefined;
+      setStatus({ kind: 'reply', text: r.reply, confirm });
       scheduleSync(); // pull the new/changed items into the local DB
     } catch (e) {
       setStatus({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
@@ -170,6 +179,15 @@ export function QuickAdd({
           )}
         >
           {status.text}
+          {status.kind === 'reply' && status.confirm && (
+            <button
+              type="button"
+              onClick={() => void runAsCommand(status.confirm!.text, status.confirm)}
+              className="ml-2 font-medium text-accent underline hover:text-accent-fg"
+            >
+              confirm
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setStatus(null)}

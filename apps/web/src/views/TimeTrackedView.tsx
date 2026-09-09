@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Download, Plus, Trash2 } from 'lucide-react';
+import { Download, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import {
   listSessions,
   getSessionBlock,
@@ -32,12 +32,13 @@ import { BlockBarEditor, taskColor, HATCH, type SegPreview } from '@/components/
 import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { getCurrentUserId } from '@/lib/store';
-import { formatDuration, formatDay, toDateTimeInput, fromDateTimeInput, dateInputOffset } from '@/lib/date';
+import { formatDuration, formatDay, toDateTimeInput, fromDateTimeInput, dateInputOffset, toDateInput } from '@/lib/date';
 import { cn } from '@/lib/cn';
-import { inputCls as inputBase, chipCls } from '@/components/ui/controls';
+import { inputCls as inputBase, chipCls, btnPrimary, btnSecondary } from '@/components/ui/controls';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { Select } from '@/components/ui/Select';
 import { Chip } from '@/components/Chip';
+import { Modal } from '@/components/Modal';
 
 function startOfDay(d: Date) {
   const x = new Date(d);
@@ -48,7 +49,17 @@ const fmtDay = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+const fmtFull = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 const isoAt = (t: number) => new Date(t).toISOString();
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface Group {
   key: string;
@@ -57,20 +68,29 @@ interface Group {
   blocks: SessionBlock[];
 }
 
-/** Bucket session blocks by project or by day, with subtotals. */
-function groupBlocks(blocks: SessionBlock[], by: 'project' | 'day'): Group[] {
+/** Bucket session blocks by project or by local calendar day, with subtotals. */
+function groupBlocks(
+  blocks: SessionBlock[],
+  by: 'project' | 'day',
+  dayDir: 'asc' | 'desc' = 'asc',
+): Group[] {
   const map = new Map<string, Group>();
   for (const b of blocks) {
-    const key =
-      by === 'project' ? b.session.item_id : new Date(b.session.start_time).toISOString().slice(0, 10);
-    const label = by === 'project' ? b.project?.title || 'Untitled' : formatDay(key);
+    const key = by === 'project' ? b.session.item_id : toDateInput(b.session.start_time);
+    const label = by === 'project' ? b.project?.title || 'Untitled' : formatDay(b.session.start_time);
     const g = map.get(key) ?? { key, label, ms: 0, blocks: [] };
     g.ms += b.trackedMs;
     g.blocks.push(b);
     map.set(key, g);
   }
   const arr = [...map.values()];
-  arr.sort((a, b) => (by === 'day' ? a.key.localeCompare(b.key) : b.ms - a.ms));
+  arr.sort((a, b) =>
+    by === 'day'
+      ? dayDir === 'desc'
+        ? b.key.localeCompare(a.key)
+        : a.key.localeCompare(b.key)
+      : b.ms - a.ms,
+  );
   return arr;
 }
 
@@ -78,13 +98,14 @@ export function TimeTrackedView() {
   const uid = getCurrentUserId();
   // Local calendar days — toISOString().slice(0,10) is UTC and can be "yesterday"
   // in positive-offset timezones (e.g. Australia/Sydney before ~10:00).
-  const [fromStr, setFromStr] = useState(() => dateInputOffset(0));
+  // Last 7 local calendar days, including today.
+  const [fromStr, setFromStr] = useState(() => dateInputOffset(-6));
   const [toStr, setToStr] = useState(() => dateInputOffset(0));
   const [projectFilter, setProjectFilter] = useState('');
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [mode, setMode] = useState<'list' | 'timeline' | 'chart'>('list');
-  const [groupBy, setGroupBy] = useState<'none' | 'project' | 'day'>('none');
+  const [groupBy, setGroupBy] = useState<'none' | 'project' | 'day'>('day');
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Guard against an empty/invalid date input (don't let new Date(...).toISOString() throw).
@@ -119,10 +140,12 @@ export function TimeTrackedView() {
     [data?.blocks],
   );
 
-  // Subtotalled groups for list mode (per-project, ms desc; per-day, date asc).
+  // List mode always groups: by project when chosen, otherwise by local day
+  // (newest first). Chart still uses its own dimension below.
+  const listBy: 'project' | 'day' = groupBy === 'project' ? 'project' : 'day';
   const groups = useMemo(
-    () => (groupBy === 'none' ? null : groupBlocks(data?.blocks ?? [], groupBy)),
-    [data?.blocks, groupBy],
+    () => groupBlocks(data?.blocks ?? [], listBy, listBy === 'day' ? 'desc' : 'asc'),
+    [data?.blocks, listBy],
   );
   // Chart always groups (defaults to project when no grouping is chosen).
   const chartDim: 'project' | 'day' = groupBy === 'day' ? 'day' : 'project';
@@ -278,7 +301,7 @@ export function TimeTrackedView() {
                 </div>
               ))}
         </>
-      ) : groups ? (
+      ) : (
         <div className="space-y-5">
           {groups.map((g) => (
             <div key={g.key}>
@@ -299,12 +322,6 @@ export function TimeTrackedView() {
                 ))}
               </div>
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {blocks.map((b) => (
-            <Block key={b.session.id} block={b} onSetTimes={setTimes} onRemove={() => remove(b)} />
           ))}
         </div>
       )}
@@ -379,6 +396,187 @@ function BlockBar({ block }: { block: SessionBlock }) {
         );
       })}
     </div>
+  );
+}
+
+
+type TimePatch = Partial<Pick<TimeLog, 'start_time' | 'end_time'>>;
+
+function hoursDeltaLabel(fromIso: string, toIso: string): string {
+  const ms = new Date(toIso).getTime() - new Date(fromIso).getTime();
+  if (ms === 0) return 'unchanged';
+  const hours = Math.abs(ms) / 3_600_000;
+  const n = Number(hours.toFixed(1));
+  const shown = Number.isInteger(n) ? String(n) : n.toFixed(1);
+  const unit = n === 1 ? 'hour' : 'hours';
+  const dir = ms > 0 ? 'later' : 'earlier';
+  return `${shown} ${unit} ${dir}`;
+}
+
+function jumpedByADay(fromIso: string | null, toIso: string | null): boolean {
+  if (!fromIso || !toIso) return false;
+  const a = new Date(fromIso).getTime();
+  const b = new Date(toIso).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return Math.abs(a - b) >= DAY_MS;
+}
+
+/**
+ * Draft start/end times until Save. A jump of 24h+ requires an extra confirm so a
+ * date typo cannot silently move a block out of the current filter.
+ */
+function BlockTimesEditor({
+  startTime,
+  endTime,
+  onSave,
+}: {
+  startTime: string;
+  endTime: string | null;
+  onSave: (patch: TimePatch) => void;
+}) {
+  const [start, setStart] = useState(() => toDateTimeInput(startTime));
+  const [end, setEnd] = useState(() => toDateTimeInput(endTime));
+  const [pending, setPending] = useState<TimePatch | null>(null);
+
+  const origStart = toDateTimeInput(startTime);
+  const origEnd = toDateTimeInput(endTime);
+  const dirty = start !== origStart || end !== origEnd;
+  const parsedStart = fromDateTimeInput(start);
+  const parsedEnd = end ? fromDateTimeInput(end) : null;
+  const valid = !!parsedStart && (!end || !!parsedEnd);
+
+  function buildPatch(): TimePatch | null {
+    if (!parsedStart || (end && !parsedEnd)) return null;
+    const patch: TimePatch = {};
+    if (parsedStart !== startTime) patch.start_time = parsedStart;
+    const nextEnd = end ? parsedEnd : null;
+    if (nextEnd !== endTime) patch.end_time = nextEnd;
+    if (patch.start_time === undefined && patch.end_time === undefined) return null;
+    return patch;
+  }
+
+  function trySave() {
+    const patch = buildPatch();
+    if (!patch) return;
+    const nextStart = patch.start_time ?? startTime;
+    const nextEnd = patch.end_time === undefined ? endTime : patch.end_time;
+    if (jumpedByADay(startTime, nextStart) || jumpedByADay(endTime, nextEnd)) {
+      setPending(patch);
+      return;
+    }
+    onSave(patch);
+  }
+
+  function revert() {
+    setStart(origStart);
+    setEnd(origEnd);
+    setPending(null);
+  }
+
+  const pendingStart = pending?.start_time ?? startTime;
+  const pendingEnd = pending && pending.end_time !== undefined ? pending.end_time : endTime;
+
+  return (
+    <>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          trySave();
+        }}
+        className="flex flex-wrap items-center gap-2"
+      >
+        <label className="flex items-center gap-1 text-text-muted">
+          Start
+          <input
+            type="datetime-local"
+            className={inputCls}
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+          />
+        </label>
+        <label className="flex items-center gap-1 text-text-muted">
+          End
+          <input
+            type="datetime-local"
+            className={inputCls}
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={!dirty || !valid}
+          className="rounded border border-border px-2 py-0.5 font-medium text-text hover:bg-surface-2 disabled:opacity-40"
+        >
+          Save
+        </button>
+        {dirty && (
+          <button type="button" onClick={revert} className="text-text-muted hover:underline">
+            Cancel
+          </button>
+        )}
+      </form>
+      {pending && (
+        <Modal
+          labelledBy="time-jump-title"
+          onClose={() => setPending(null)}
+          panelClassName="w-full max-w-md p-6"
+        >
+          <div className="mb-3 flex items-start gap-2">
+            <TriangleAlert className="mt-0.5 shrink-0 text-danger" size={20} />
+            <div>
+              <h2 id="time-jump-title" className="text-lg font-semibold">
+                Large time change
+              </h2>
+              <p className="mt-1 text-sm text-text-muted">
+                This shift is more than 24 hours. The block may leave the current filter and
+                become hard to find.
+              </p>
+            </div>
+          </div>
+          <dl className="space-y-3 text-sm">
+            <div>
+              <dt className="font-medium">Start</dt>
+              <dd className="mt-0.5 text-text-muted">
+                <div>From {fmtFull(startTime)}</div>
+                <div>To {fmtFull(pendingStart)}</div>
+                <div className="mt-0.5 font-medium text-text">
+                  {hoursDeltaLabel(startTime, pendingStart)}
+                </div>
+              </dd>
+            </div>
+            <div>
+              <dt className="font-medium">End</dt>
+              <dd className="mt-0.5 text-text-muted">
+                <div>From {endTime ? fmtFull(endTime) : 'open'}</div>
+                <div>To {pendingEnd ? fmtFull(pendingEnd) : 'open'}</div>
+                {endTime && pendingEnd ? (
+                  <div className="mt-0.5 font-medium text-text">
+                    {hoursDeltaLabel(endTime, pendingEnd)}
+                  </div>
+                ) : null}
+              </dd>
+            </div>
+          </dl>
+          <div className="mt-6 flex justify-end gap-2">
+            <button type="button" onClick={() => setPending(null)} className={btnSecondary}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const patch = pending;
+                setPending(null);
+                onSave(patch);
+              }}
+              className={btnPrimary}
+            >
+              Confirm
+            </button>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 
@@ -524,27 +722,13 @@ function Block({
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1 text-text-muted">
-              Start
-              <input
-                type="datetime-local"
-                className={inputCls}
-                value={toDateTimeInput(s.start_time)}
-                onChange={(e) =>
-                  onSetTimes(s, { start_time: fromDateTimeInput(e.target.value) ?? s.start_time })
-                }
-              />
-            </label>
-            <label className="flex items-center gap-1 text-text-muted">
-              End
-              <input
-                type="datetime-local"
-                className={inputCls}
-                value={toDateTimeInput(s.end_time)}
-                onChange={(e) => onSetTimes(s, { end_time: fromDateTimeInput(e.target.value) })}
-              />
-            </label>
-            <button onClick={onRemove} className="ml-auto text-danger hover:underline">
+            <BlockTimesEditor
+              key={`${s.id}:${s.start_time}:${s.end_time ?? ''}`}
+              startTime={s.start_time}
+              endTime={s.end_time}
+              onSave={(patch) => onSetTimes(s, patch)}
+            />
+            <button type="button" onClick={onRemove} className="ml-auto text-danger hover:underline">
               Remove
             </button>
           </div>

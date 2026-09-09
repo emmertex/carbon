@@ -10,12 +10,18 @@
 #
 # All artifacts are copied (renamed where needed) into ./release/ at the repo root.
 # The Android APK is renamed to Carbon_<version>_android.apk to match the versioned
-# naming of the desktop bundles. In release mode the signed AAB (the Play Store
-# upload) is also collected as Carbon_<version>_android.aab.
+# naming of the desktop bundles. In release mode the signed sideload AAB (the
+# GitHub-release upload) is collected as Carbon_<version>_android.aab.
+#
+# Android ships in two flavors (see apps/mobile/android/app/build.gradle):
+#   sideload  — full feature set, distributed via GitHub Releases (default).
+#   playstore — Google Play variant (no background location). Build it with
+#               `playstore`, which collects Carbon_<version>_playstore_android.aab/.apk.
 #
 # Usage:
 #   ./build-all.sh                 # build everything for this OS (Android = debug)
-#   ./build-all.sh release         # Android signed APK + AAB (needs signing config)
+#   ./build-all.sh release         # Android signed sideload APK + AAB (needs signing config)
+#   ./build-all.sh playstore       # Android signed Play variant AAB + APK (needs signing config)
 #   ./build-all.sh --no-android    # desktop only
 #
 set -euo pipefail
@@ -31,8 +37,9 @@ for arg in "$@"; do
   case "$arg" in
     release)      ANDROID_MODE="release" ;;
     debug)        ANDROID_MODE="debug" ;;
+    playstore)    ANDROID_MODE="playstore" ;;
     --no-android) DO_ANDROID=0 ;;
-    *) echo "Unknown arg: $arg (use: release | debug | --no-android)" >&2; exit 1 ;;
+    *) echo "Unknown arg: $arg (use: release | playstore | debug | --no-android)" >&2; exit 1 ;;
   esac
 done
 
@@ -89,30 +96,41 @@ case "$OS" in
 esac
 
 # ---------------------------------------------------------------------------
-# 2. Android (Capacitor) — Linux/macOS only; needs Android SDK + Java 17
+# 2. Android (Capacitor) — Linux/macOS only; needs Android SDK + Java 21
 # ---------------------------------------------------------------------------
 if [[ "$DO_ANDROID" == 1 && "$OS" != "windows" ]]; then
   if [[ -x "$REPO_ROOT/apps/mobile/build-android.sh" ]]; then
-    echo "==> Building Android APK ($ANDROID_MODE)"
+    echo "==> Building Android ($ANDROID_MODE)"
     "$REPO_ROOT/apps/mobile/build-android.sh" "$ANDROID_MODE"
 
-    APK_SRC="$REPO_ROOT/apps/mobile/android/app/build/outputs/apk/$ANDROID_MODE"
-    # Grab the freshest APK gradle produced for this mode.
+    # Map mode -> (flavor, build type) for AGP's flavor-qualified output dirs.
+    case "$ANDROID_MODE" in
+      debug|install) AFLAVOR="sideload";  ABT="Debug" ;;
+      release)       AFLAVOR="sideload";  ABT="Release" ;;
+      playstore)     AFLAVOR="playstore"; ABT="Release" ;;
+    esac
+    AVARIANT="${AFLAVOR}${ABT}"
+    ABTL="$(echo "$ABT" | tr '[:upper:]' '[:lower:]')"
+    APK_SRC="$REPO_ROOT/apps/mobile/android/app/build/outputs/apk/$AVARIANT"
+
+    # Suffix Play artifacts so they don't collide with the sideload ones.
+    SUFFIX="$([[ "$AFLAVOR" == "playstore" ]] && echo "_playstore" || echo "")"
+
     APK_FILE="$(ls -t "$APK_SRC"/*.apk 2>/dev/null | head -n1 || true)"
     if [[ -n "$APK_FILE" ]]; then
-      DEST="$RELEASE_DIR/Carbon_${VERSION}_android.apk"
+      DEST="$RELEASE_DIR/Carbon_${VERSION}${SUFFIX}_android.apk"
       cp -f "$APK_FILE" "$DEST"
       echo "    + apk: $(basename "$DEST")"
     else
       echo "    ! apk: no APK found in $APK_SRC"
     fi
 
-    # In release mode build-android.sh also produces the signed AAB — the Play
-    # Store upload artifact. Collect it alongside the APK.
-    if [[ "$ANDROID_MODE" == "release" ]]; then
-      AAB_FILE="$REPO_ROOT/apps/mobile/android/app/build/outputs/bundle/release/app-release.aab"
+    # Release builds also produce the signed AAB. Sideload AAB = GitHub-release
+    # upload; Play AAB = Google Play upload (distinct name so both can coexist).
+    if [[ "$ANDROID_MODE" == "release" || "$ANDROID_MODE" == "playstore" ]]; then
+      AAB_FILE="$REPO_ROOT/apps/mobile/android/app/build/outputs/bundle/$AVARIANT/app-${AFLAVOR}-${ABTL}.aab"
       if [[ -f "$AAB_FILE" ]]; then
-        DEST="$RELEASE_DIR/Carbon_${VERSION}_android.aab"
+        DEST="$RELEASE_DIR/Carbon_${VERSION}${SUFFIX}_android.aab"
         cp -f "$AAB_FILE" "$DEST"
         echo "    + aab: $(basename "$DEST")"
       else

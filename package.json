@@ -13,6 +13,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:persistence": "npm run test:persistence --workspace=@carbon/web",
     "format": "prettier --write \"**/*.{ts,tsx,md,json,css}\"",
     "perf": "playwright test perf.spec.ts -c perf/playwright.config.ts",
     "perf:smallview": "playwright test smallview.spec.ts -c perf/playwright.config.ts",

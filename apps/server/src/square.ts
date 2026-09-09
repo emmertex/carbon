@@ -7,6 +7,7 @@
 // and fires invoice.payment_made webhooks, which extend the workspace expiry.
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { BILLING_PLANS } from './billing';
+import { safeFetch } from './safe-fetch';
 
 const ENV = (process.env.SQUARE_ENV || 'sandbox').toLowerCase();
 const ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN?.trim() || '';
@@ -53,7 +54,10 @@ interface SquareError {
 }
 
 async function squareFetch<T>(path: string, method: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
+  // A2: safeFetch — the Square API is a fixed public host (SSRF-safe), but this still
+  // applies the response-size cap + socket timeout + redirect policy. The Bearer token is
+  // stripped only if a redirect ever left the Square origin.
+  const res = await safeFetch(`${apiBase()}${path}`, false, {
     method,
     headers: {
       Authorization: `Bearer ${ACCESS_TOKEN}`,

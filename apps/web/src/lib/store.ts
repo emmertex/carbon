@@ -16,6 +16,11 @@ import {
   type UiPrefs,
 } from './config';
 import { notifySettingsChanged } from './settings-events';
+import { migrateLegacySettings, settingsKey } from './identity';
+
+// One-time: move pre-A3 global settings keys to their namespaced equivalents,
+// before any namespaced key below is read (see identity.migrateLegacySettings).
+migrateLegacySettings();
 
 export type SyncStatus = 'idle' | 'syncing' | 'error' | 'offline' | 'disabled';
 
@@ -154,6 +159,8 @@ interface AppState {
   setLastSyncedAt: (t: number) => void;
   setUiPrefs: (patch: Partial<UiPrefs>) => void;
   setSettingsSyncEnabled: (v: boolean) => void;
+  /** Re-read namespaced settings + current user after an identity rebind. */
+  reloadIdentitySettings: () => void;
   setSettingsHydrated: (v: boolean) => void;
   setUndoCounts: (undo: number, redo: number) => void;
   showToast: (t: Omit<Toast, 'id'>) => void;
@@ -162,8 +169,10 @@ interface AppState {
   setNlConfig: (c: { enabled: boolean; keywords: string[] }) => void;
 }
 
-const COLLAPSE_KEY = 'carbon.collapsed';
-const EXPAND_KEY = 'carbon.expanded';
+// Per-user settings: namespaced by the current identity's user part (A3) so
+// two accounts on one device keep independent UI state.
+const collapseKey = () => settingsKey('carbon.collapsed');
+const expandKey = () => settingsKey('carbon.expanded');
 function loadIdSet(key: string): Set<string> {
   try {
     return new Set(JSON.parse(localStorage.getItem(key) || '[]') as string[]);
@@ -180,8 +189,8 @@ export const useStore = create<AppState>((set, get) => ({
   selectedKind: 'item',
   detailOpen: false,
   sidebarOpen: false,
-  collapsed: loadIdSet(COLLAPSE_KEY),
-  expanded: loadIdSet(EXPAND_KEY),
+  collapsed: loadIdSet(collapseKey()),
+  expanded: loadIdSet(expandKey()),
   themeMode: getThemeMode(),
   lightTheme: getLightTheme(),
   darkTheme: getDarkTheme(),
@@ -238,12 +247,12 @@ export const useStore = create<AppState>((set, get) => ({
   bump: () => set(() => ({ dbRevision: bumpRevision() })),
   bumpSettings: () => set((s) => ({ settingsRevision: s.settingsRevision + 1 })),
   // Panes are mutually exclusive on compact screens: opening one closes the other.
-  // Selecting does NOT auto-open the overlay (mobile needs a 2nd tap); the docked
-  // desktop pane shows on selectedId regardless of detailOpen.
+  // Selection opens compact details only when first-tap opening is enabled.
+  // The docked pane shows on selectedId regardless of detailOpen.
   select: (id, kind = 'item') =>
     set(
       id
-        ? { selectedId: id, selectedKind: kind, sidebarOpen: false }
+        ? { selectedId: id, selectedKind: kind, sidebarOpen: false, ...(get().uiPrefs.firstTapDetails ? { detailOpen: true } : {}) }
         : { selectedId: null, detailOpen: false },
     ),
   openDetail: () => set({ detailOpen: true }),
@@ -255,7 +264,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const next = new Set(s.collapsed);
       next.has(id) ? next.delete(id) : next.add(id);
-      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      localStorage.setItem(collapseKey(), JSON.stringify([...next]));
       notifySettingsChanged('ui');
       return { collapsed: next };
     }),
@@ -263,7 +272,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const next = new Set(s.expanded);
       next.has(id) ? next.delete(id) : next.add(id);
-      localStorage.setItem(EXPAND_KEY, JSON.stringify([...next]));
+      localStorage.setItem(expandKey(), JSON.stringify([...next]));
       notifySettingsChanged('ui');
       return { expanded: next };
     }),
@@ -271,7 +280,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const next = new Set(s.collapsed);
       for (const id of ids) next.add(id);
-      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      localStorage.setItem(collapseKey(), JSON.stringify([...next]));
       notifySettingsChanged('ui');
       return { collapsed: next };
     }),
@@ -279,7 +288,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const next = new Set(s.collapsed);
       for (const id of ids) next.delete(id);
-      localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
+      localStorage.setItem(collapseKey(), JSON.stringify([...next]));
       notifySettingsChanged('ui');
       return { collapsed: next };
     }),
@@ -310,6 +319,16 @@ export const useStore = create<AppState>((set, get) => ({
       return { uiPrefs: next };
     }),
   setSettingsSyncEnabled: (v) => set({ settingsSyncEnabled: v }),
+  /** Re-read the namespaced settings + current user after an identity rebind, so
+   *  the UI reflects the (new) identity's own collapsed/expanded/uiPrefs, not the
+   *  previous identity's in-memory values. Called by `db.rebindIdentity`. */
+  reloadIdentitySettings: () =>
+    set(() => ({
+      collapsed: loadIdSet(collapseKey()),
+      expanded: loadIdSet(expandKey()),
+      uiPrefs: getUiPrefs(),
+      currentUser: getCurrentUser(),
+    })),
   setSettingsHydrated: (v) => set({ settingsHydrated: v }),
   setUndoCounts: (undo, redo) => set({ undoCount: undo, redoCount: redo }),
   showToast: (t) => set((s) => ({ toast: { ...t, id: (s.toast?.id ?? 0) + 1 } })),

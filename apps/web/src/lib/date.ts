@@ -39,10 +39,11 @@ export function dateInputOffset(n: number): string {
 }
 
 /** Date-input value (yyyy-MM-dd) for `iso` shifted by `n` days (negative = earlier).
- *  Returns '' when `iso` is empty/invalid. Drives the defer "-1 day / -1 week" chips. */
+ *  Falls back to today when `iso` is empty/invalid, so the +/- day/week chips work
+ *  even before a date is set. Drives the due/defer date shift chips. */
 export function dateInputShift(iso: string | null, n: number): string {
-  const d = safeDate(iso);
-  return d ? format(addDays(d, n), 'yyyy-MM-dd') : '';
+  const d = safeDate(iso) ?? new Date();
+  return format(addDays(d, n), 'yyyy-MM-dd');
 }
 
 /** Shift an ISO instant by `minutes` (negative = earlier), or null if invalid.

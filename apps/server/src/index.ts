@@ -1,12 +1,24 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync } from 'node:fs';
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { dirname, resolve, join } from 'node:path';
-import { serve } from '@hono/node-server';
-import { serveStatic } from '@hono/node-server/serve-static';
-import { Hono, type Context, type MiddlewareHandler } from 'hono';
-import { cors } from 'hono/cors';
-import { bodyLimit } from 'hono/body-limit';
-import { clientIp, CARBON_REAL_IP_HEADER } from './client-ip';
+import { taskPage } from "./tasks-page";
+import { isDeepStrictEqual } from "node:util";
+import { pullSyncPage, type BackfillCursor } from "./sync-pull";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  readdirSync,
+} from "node:fs";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { dirname, resolve, join } from "node:path";
+import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
+import { landingRoutes } from "./landing";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { buildCorsMw } from "./cors";
+import { bodyLimit } from "hono/body-limit";
+import { clientIp, CARBON_REAL_IP_HEADER } from "./client-ip";
 import {
   migrate,
   ensureDeviceId,
@@ -32,6 +44,7 @@ import {
   listAssigneesForItem,
   getItem,
   allItems,
+  blobReferenceInventory,
   inbox,
   today,
   flagged,
@@ -41,14 +54,30 @@ import {
   type RecordOp,
   type ItemPatch,
   type UserRole,
-} from '@carbon/core';
-import { openDb } from './sqlite';
+} from "@carbon/core";
+import { openDb } from "./sqlite";
 import {
   sanitizeOps,
   sanitizeRecordOps,
   oversizedSyncArray,
   MAX_SYNC_BATCH,
-} from './sync-guard';
+} from "./sync-guard";
+import { validateSyncBody } from "./sync-validate";
+import {
+  filterOpsByShape,
+  filterRecordOpsByShape,
+  REJECTED_DETAIL_CAP,
+} from "./sync-fields";
+import { ConcurrencyGate, KeyedConcurrency } from "./concurrency";
+import {
+  credentialFromVars,
+  canPushWrites,
+  hasScope,
+  checkDestination,
+  isDenied,
+  canReadItem,
+  sessionCredentialFor,
+} from "./authorize";
 import {
   ensureServerTables,
   bootstrapUsers,
@@ -80,7 +109,7 @@ import {
   DEVICE_STALE_MS,
   startGpsScheduler,
   type AuthVars,
-} from './auth';
+} from "./auth";
 import {
   getMfaStatus,
   mfaReady,
@@ -106,14 +135,14 @@ import {
   consumeMfaChallenge,
   bumpChallengeAttempts,
   validateMfaChallenge,
-} from './mfa';
+} from "./mfa";
 import {
   saveSubscription,
   removeSubscription,
   notifyTask,
   startReminderScheduler,
-} from './push';
-import { saveFcmToken, removeFcmToken } from './fcm';
+} from "./push";
+import { saveFcmToken, removeFcmToken } from "./fcm";
 import {
   listAgents,
   getAgent,
@@ -126,18 +155,18 @@ import {
   setNlSettings,
   getAgentUsage,
   isTimeoutError,
-} from './agents';
+} from "./agents";
 import {
   getHostLmConfig,
   buildHostAgentRow,
   resolveAgent as resolveNlAgent,
   isHostAgent,
   checkHostRateLimit,
-} from './host-lm';
-import { runAgentCommand } from './agent-command';
-import { runFilterCommand } from './agent-filter';
-import { runRecipeOptimise, type MeasureConvention } from './agent-recipe';
-import { getUserTimezone, setUserTimezone } from './user-prefs';
+} from "./host-lm";
+import { runAgentCommand, MUTATING_TOOLS } from "./agent-command";
+import { runFilterCommand } from "./agent-filter";
+import { runRecipeOptimise, type MeasureConvention } from "./agent-recipe";
+import { getUserTimezone, setUserTimezone } from "./user-prefs";
 import {
   ensureCaldavDeviceId,
   getCaldavConfigRow,
@@ -148,11 +177,16 @@ import {
   runSync,
   startCaldavScheduler,
   type CaldavConfigPatch,
-} from './caldav';
-import { registerAgentApi } from './agent-api';
-import { buildAgentApiDeps } from './agent-ops';
-import { listOpenNotices, getNotice, actOnNotice } from './notices';
-import { checkPurgeSuggestions } from './purge-notices';
+} from "./caldav";
+import { registerAgentApi } from "./agent-api";
+import { buildAgentApiDeps } from "./agent-ops";
+import {
+  listOpenNotices,
+  getNotice,
+  actOnNotice,
+  createSystemNotice,
+} from "./notices";
+import { checkPurgeSuggestions } from "./purge-notices";
 import {
   resolveHostCeiling,
   federationRoutes,
@@ -167,7 +201,7 @@ import {
   type DeliverToPeer,
   type BlobStore,
   type SameHostPeer,
-} from './federation';
+} from "./federation";
 import {
   ensureTelegramTables,
   startTelegramBot,
@@ -175,8 +209,8 @@ import {
   getTelegramLinkForUser,
   unlinkTelegramUser,
   type TelegramBot,
-} from './telegram';
-import { safeFetch } from './safe-fetch';
+} from "./telegram";
+import { safeFetch } from "./safe-fetch";
 import {
   initTenantDb,
   createTenantRegistry,
@@ -185,7 +219,7 @@ import {
   RESERVED_SUBDOMAINS,
   type TenantCtx,
   type FetchApp,
-} from './tenant';
+} from "./tenant";
 import {
   openControlDb,
   bootstrapHostAdmins,
@@ -200,6 +234,7 @@ import {
   setTenantExpiry,
   setTenantLock,
   setTenantBlobQuota,
+  setTenantDbQuota,
   setTenantMaxUsers,
   setTenantAdminEmail,
   setTenantAllowPrivate,
@@ -221,11 +256,13 @@ import {
   gcPendingDeletes,
   type HostVars,
   type TenantRecord,
-} from './control';
-import { sendOtcCode, sendBillingReceipt, sendDeleteOtcCode } from './email';
+} from "./control";
+import { personalKeyGuard } from "./personal-keys";
+import { billingProvider as resolveBillingProvider } from "./billing-provider";
+import { sendOtcCode, sendBillingReceipt, sendDeleteOtcCode } from "./email";
 // Version is single-sourced from the repo-root package.json. esbuild inlines this JSON
 // into the bundle at build time; tsx resolves it directly in dev.
-import rootPkg from '../../../package.json';
+import rootPkg from "../../../package.json";
 import {
   listPlans,
   getPlan,
@@ -235,7 +272,7 @@ import {
   setSubscriptionStatus,
   markBillingEvent,
   billingEventSeen,
-} from './billing';
+} from "./billing";
 import {
   isSquareConfigured,
   squareClientConfig,
@@ -247,30 +284,37 @@ import {
   retrieveSubscription,
   verifyWebhookSignature,
   planForVariation,
-} from './square';
+} from "./square";
 
 const PORT = Number(process.env.PORT ?? 3069);
-const DB_PATH = resolve(process.env.DATABASE_PATH ?? './data/carbon.db');
-const BLOBS_DIR = resolve(process.env.BLOBS_DIR ?? join(dirname(DB_PATH), 'blobs'));
-const STATIC_DIR = process.env.STATIC_DIR ?? '../web/dist';
+const DB_PATH = resolve(process.env.DATABASE_PATH ?? "./data/carbon.db");
+const BLOBS_DIR = resolve(
+  process.env.BLOBS_DIR ?? join(dirname(DB_PATH), "blobs"),
+);
+const STATIC_DIR = process.env.STATIC_DIR ?? "../web/dist";
 const VERSION = rootPkg.version;
 // Apex domain that enables subdomain-per-tenant routing (e.g. "carbon.etx.sx").
 // Unset => pure single-tenant self-host: every request hits the default tenant.
 // Normalised defensively: a scheme/path/port is stripped so BASE_DOMAIN=
 // "https://carbon.etx.sx/" still yields the bare host used for Host-header matching.
 const BASE_DOMAIN =
-  (process.env.BASE_DOMAIN?.trim() || '')
-    .replace(/^https?:\/\//, '')
-    .replace(/[/:].*$/, '')
+  (process.env.BASE_DOMAIN?.trim() || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/[/:].*$/, "")
     .toLowerCase() || undefined;
 // Dedicated offline/local-only host (no account, no sync): app.<BASE_DOMAIN>.
-const APP_HOST = process.env.APP_HOST?.trim() || 'app';
+const APP_HOST = process.env.APP_HOST?.trim() || "app";
 const CONTROL_DB_PATH = resolve(
-  process.env.CONTROL_DB_PATH ?? join(dirname(DB_PATH), 'control.db'),
+  process.env.CONTROL_DB_PATH ?? join(dirname(DB_PATH), "control.db"),
 );
-const TENANTS_DIR = resolve(process.env.TENANTS_DIR ?? join(dirname(DB_PATH), 'tenants'));
+const TENANTS_DIR = resolve(
+  process.env.TENANTS_DIR ?? join(dirname(DB_PATH), "tenants"),
+);
 // Days of access a self-service signup gets before the workspace locks (renew gate).
-const SIGNUP_TRIAL_DAYS = Math.max(1, Number(process.env.SIGNUP_TRIAL_DAYS) || 30);
+const SIGNUP_TRIAL_DAYS = Math.max(
+  1,
+  Number(process.env.SIGNUP_TRIAL_DAYS) || 30,
+);
 
 // Federation host ceiling (Gate 1). The maximum federation scope this host permits:
 //   off           — L1 only, no federation anywhere on this host (default)
@@ -278,9 +322,9 @@ const SIGNUP_TRIAL_DAYS = Math.max(1, Number(process.env.SIGNUP_TRIAL_DAYS) || 3
 //   cross_server  — L2 + L3 allowed
 // Per-tenant `federation_mode` (control DB) can pin a tenant below this. Single-tenant
 // self-host (BASE_DOMAIN unset / the 'default' tenant) has no peer, so it resolves to off.
-const FEDERATION_MODE_ENV: 'off' | 'intra_server' | 'cross_server' = (() => {
+const FEDERATION_MODE_ENV: "off" | "intra_server" | "cross_server" = (() => {
   const raw = process.env.FEDERATION_MODE?.trim().toLowerCase();
-  return raw === 'intra_server' || raw === 'cross_server' ? raw : 'off';
+  return raw === "intra_server" || raw === "cross_server" ? raw : "off";
 })();
 
 // ----- Telegram bot (optional, per-server) ----------------------------------
@@ -288,9 +332,12 @@ const FEDERATION_MODE_ENV: 'off' | 'intra_server' | 'cross_server' = (() => {
 // from Settings → Telegram, then drive the same NL agent over chat. Disabled when the token
 // is unset. The webhook is auto-registered at <TELEGRAM_WEBHOOK_URL>/telegram/webhook.
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined;
-const TELEGRAM_WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL?.trim() || undefined;
-const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || undefined;
-const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME?.trim() || undefined;
+const TELEGRAM_WEBHOOK_URL =
+  process.env.TELEGRAM_WEBHOOK_URL?.trim() || undefined;
+const TELEGRAM_WEBHOOK_SECRET =
+  process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || undefined;
+const TELEGRAM_BOT_USERNAME =
+  process.env.TELEGRAM_BOT_USERNAME?.trim() || undefined;
 // Assigned once the async startup (getMe + setWebhook) resolves; the webhook route reads it.
 let telegramBot: TelegramBot | null = null;
 
@@ -303,29 +350,136 @@ type Env = { Variables: AuthVars };
  * the tenant context here. The returned app is mounted/forwarded per request.
  */
 // Max attachment blob size. Override with BLOB_MAX_MB. Default 25 MB.
-const MAX_BLOB_BYTES = Math.max(1, Number(process.env.BLOB_MAX_MB) || 25) * 1024 * 1024;
+const MAX_BLOB_BYTES =
+  Math.max(1, Number(process.env.BLOB_MAX_MB) || 25) * 1024 * 1024;
 
 // JSON/text body cap for public unauth surfaces (signup, webhooks, federation JSON).
 // Blobs keep MAX_BLOB_BYTES separately.
-const JSON_BODY_LIMIT = Math.max(64, Number(process.env.JSON_BODY_LIMIT_KB) || 1024) * 1024;
+const JSON_BODY_LIMIT =
+  Math.max(64, Number(process.env.JSON_BODY_LIMIT_KB) || 1024) * 1024;
 const jsonBodyLimit = bodyLimit({
   maxSize: JSON_BODY_LIMIT,
-  onError: (c) => c.json({ error: 'body too large' }, 413),
+  onError: (c) => c.json({ error: "body too large" }, 413),
 });
 const blobBodyLimit = bodyLimit({
   maxSize: MAX_BLOB_BYTES,
-  onError: (c) => c.json({ error: 'blob too large' }, 413),
+  onError: (c) => c.json({ error: "blob too large" }, 413),
 });
 // A sync push carries everything a client did while offline, so it needs far more room
 // than an ordinary JSON call — but still a ceiling. Override with SYNC_BODY_LIMIT_MB.
-const SYNC_BODY_LIMIT = Math.max(1, Number(process.env.SYNC_BODY_LIMIT_MB) || 16) * 1024 * 1024;
+const SYNC_BODY_LIMIT =
+  Math.max(1, Number(process.env.SYNC_BODY_LIMIT_MB) || 16) * 1024 * 1024;
 const syncBodyLimit = bodyLimit({
   maxSize: SYNC_BODY_LIMIT,
-  onError: (c) => c.json({ error: 'sync body too large' }, 413),
+  onError: (c) => c.json({ error: "sync body too large" }, 413),
 });
 
+// ----- sync response bounds (A2) ------------------------------------------------
+// The PULL side is bounded the same way the push side is: a single /api/sync response
+// can carry at most SYNC_MAX_RESPONSE_OPS ops and SYNC_MAX_RESPONSE_BYTES of op/record
+// payloads, and each side's SQL scan reads at most SYNC_MAX_SCAN_ROWS rows. A client
+// that hits a cap gets `truncated: true` and a cursor that advances ONLY past what was
+// actually sent, so the next sync pulls the rest — the cursor is the resumption
+// point, never a loss point. The web sync loop re-syncs immediately on `truncated`
+// (see apps/web/src/lib/sync.ts). Sized for a normal 10k-active workspace; a 100k
+// stress workspace that exceeds these drains over more rounds (see the A2 notes on
+// the backfill item cap).
+const SYNC_MAX_RESPONSE_OPS = Math.max(
+  1,
+  Number(process.env.SYNC_MAX_RESPONSE_OPS) || 50_000,
+);
+const SYNC_MAX_RESPONSE_BYTES =
+  Math.max(1, Number(process.env.SYNC_MAX_RESPONSE_MB) || 16) * 1024 * 1024;
+const SYNC_MAX_SCAN_ROWS = Math.max(
+  100,
+  Number(process.env.SYNC_MAX_SCAN_ROWS) || 200_000,
+);
+// The backfill (`need`) expands each requested id to its whole subtree; cap the
+// MERGED item set at this many (deterministic prefix, need order preserved —
+// explicit missing items first, so progress is monotonic across rounds).
+const BACKFILL_MAX_ITEMS = Math.max(
+  1,
+  Number(process.env.BACKFILL_MAX_ITEMS) || 50_000,
+);
+
+// ----- REST list pagination (A4) -------------------------------------------------
+// A2 bounded the SYNC response (the hot convergence path) with lossless resume, but
+// deferred the full-list REST endpoints: `GET /api/tasks` returns every matching item,
+// so a very large workspace could exceed the response cap and 413 (A2 open question #2).
+// The list is now paged by item count: `limit` (default REST_PAGE_DEFAULT, hard-capped
+// at REST_PAGE_MAX so one page can never blow the response budget) + `offset`. The
+// response carries `total`, `has_more`, and `next_offset` so a client can walk the whole
+// set page by page. Offset paging (not keyset) because the perspective/project/status
+// filters are applied in JS; a concurrent create/delete between pages can shift an item
+// one page, which is acceptable for this read surface.
+const REST_PAGE_DEFAULT = Math.max(
+  1,
+  Number(process.env.REST_PAGE_DEFAULT) || 100,
+);
+const REST_PAGE_MAX = Math.max(
+  REST_PAGE_DEFAULT,
+  Number(process.env.REST_PAGE_MAX) || 1000,
+);
+
+/** Parse a non-negative integer query param, clamped to [0, max]; NaN/negative -> 0. */
+function parsePageParam(raw: string | undefined, max: number): number {
+  const n = raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(Math.min(n, max));
+}
+
+/** Parse the `limit` query param, defaulting to REST_PAGE_DEFAULT, capped at REST_PAGE_MAX. */
+function parseLimitParam(raw: string | undefined): number {
+  const n = raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(n) || n < 1) return REST_PAGE_DEFAULT;
+  return Math.floor(Math.min(n, REST_PAGE_MAX));
+}
+
+// ----- request concurrency (A2) -------------------------------------------------
+// Reject-on-full gates (429 + Retry-After) bound how many requests may be IN FLIGHT
+// simultaneously at three scopes, so a burst from one tenant can't exhaust the host:
+//  - global: the whole server (all tenants, /api + /host).
+//  - per-tenant: one gate per workspace — isolates a noisy tenant from its neighbors.
+//  - per-user: one counter per authenticated user within a tenant.
+// `<= 0` means unlimited (the self-host default is to keep the global cap on; set 0 to
+// disable a specific scope). Defaults sized for the hosted ~100-workspace target.
+const MAX_CONCURRENT_REQUESTS = Math.floor(
+  Number(process.env.MAX_CONCURRENT_REQUESTS) || 200,
+);
+const TENANT_MAX_CONCURRENT = Math.floor(
+  Number(process.env.TENANT_MAX_CONCURRENT) || 20,
+);
+const USER_MAX_CONCURRENT = Math.floor(
+  Number(process.env.USER_MAX_CONCURRENT) || 8,
+);
+// A2: time-based sync rate limit per credential (sliding 1-min window) — bounds how many
+// sync round-trips one user/token can make per minute, independent of how many are in
+// flight at once. A client that legitimately drains a backlog pushes in chunks (well under
+// this); reaching it means a stuck/retry-looping client or abuse. 0 = unlimited.
+const SYNC_MAX_PER_MIN = Math.floor(
+  Number(process.env.SYNC_MAX_PER_MIN) || 120,
+);
+
+// ----- per-workspace database size quota (A2) ------------------------------------
+// The ops/record-ops log is the dominant DB grower and is unbounded by the sync caps
+// above (which bound a single request, not the store). This caps the STORE: a sync
+// push that would land when the tenant DB already exceeds the quota is refused with
+// 507 db_quota_exceeded (the client keeps its ops unsynced and can be unblocked by a
+// host admin raising the cap or by the workspace pruning/archiving old items).
+// Per-workspace override lives in control.db (tenants.db_quota_bytes); 0 = unlimited.
+const DB_QUOTA_DEFAULT_BYTES =
+  Math.max(0, Number(process.env.DB_QUOTA_MB) || 2048) * 1024 * 1024;
+
+/** A2: per-workspace tag cap. Tags are shared vocabulary — a malicious push could
+ *  mint 10k new tags per sync and the full tag re-send would grow without bound. A
+ *  workspace may hold at most this many DISTINCT tags; new-tag ops beyond it are
+ *  dropped (the pusher is told via the rejected count). 0 = unlimited. */
+const TAGS_MAX_PER_WORKSPACE = Math.floor(
+  Number(process.env.TAGS_MAX_PER_WORKSPACE) || 10000,
+);
+
 /** Open mode (zero users → synthetic local admin) is opt-in; default deny. */
-const ALLOW_OPEN_MODE = process.env.ALLOW_OPEN_MODE === '1';
+const ALLOW_OPEN_MODE = process.env.ALLOW_OPEN_MODE === "1";
 
 function mfaEmailSendError(c: Context, e: unknown): Response | null {
   if (e instanceof MfaEmailSendLimitError) {
@@ -336,25 +490,55 @@ function mfaEmailSendError(c: Context, e: unknown): Response | null {
 
 // Default per-workspace blob storage cap (override with BLOB_QUOTA_MB, default 500 MB).
 // Host admins can override it per workspace; a tenant's null column uses this default.
-const BLOB_QUOTA_DEFAULT_BYTES = Math.max(0, Number(process.env.BLOB_QUOTA_MB) || 500) * 1024 * 1024;
+const BLOB_QUOTA_DEFAULT_BYTES =
+  Math.max(0, Number(process.env.BLOB_QUOTA_MB) || 500) * 1024 * 1024;
 
 /** Effective blob quota in bytes for a tenant: 0 = unlimited (self-host default tenant,
  *  or an explicit 0 override); a null column falls back to the server default. */
 function effectiveBlobQuota(rec: TenantRecord | null): number {
-  if (!rec || rec.id === 'default') return 0; // single-tenant self-host is uncapped
-  return rec.blob_quota_bytes == null ? BLOB_QUOTA_DEFAULT_BYTES : rec.blob_quota_bytes;
+  if (!rec || rec.id === "default") return 0; // single-tenant self-host is uncapped
+  return rec.blob_quota_bytes == null
+    ? BLOB_QUOTA_DEFAULT_BYTES
+    : rec.blob_quota_bytes;
 }
 
 // Default human-user cap per hosted workspace (override with MAX_WORKSPACE_USERS,
 // default 6). Host admins can override it per workspace; the single-tenant self-host
 // is always uncapped.
-const WORKSPACE_USERS_DEFAULT = Math.max(0, Number(process.env.MAX_WORKSPACE_USERS) || 6);
+const WORKSPACE_USERS_DEFAULT = Math.max(
+  0,
+  Number(process.env.MAX_WORKSPACE_USERS) || 6,
+);
 
 /** Effective human-user cap for a tenant: 0 = unlimited (self-host default tenant, or an
  *  explicit 0 override); a null column falls back to the server default. */
 function effectiveMaxUsers(rec: TenantRecord | null): number {
-  if (!rec || rec.id === 'default') return 0; // single-tenant self-host is uncapped
+  if (!rec || rec.id === "default") return 0; // single-tenant self-host is uncapped
   return rec.max_users == null ? WORKSPACE_USERS_DEFAULT : rec.max_users;
+}
+
+/** Effective database-size quota in bytes for a tenant: 0 = unlimited (self-host default
+ *  tenant, or an explicit 0 override); a null column falls back to the server default. */
+function effectiveDbQuota(rec: TenantRecord | null): number {
+  if (!rec || rec.id === "default") return 0; // single-tenant self-host is uncapped
+  return rec.db_quota_bytes == null
+    ? DB_QUOTA_DEFAULT_BYTES
+    : rec.db_quota_bytes;
+}
+
+/** Current on-disk size of a tenant DB in bytes (DB + WAL/SHM sidecar files, which are
+ *  real disk usage). Returns 0 when the path is absent (in-memory test DB). */
+function tenantDbSizeBytes(dbPath: string | undefined): number {
+  if (!dbPath || dbPath === ":memory:") return 0;
+  let total = 0;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      total += statSync(dbPath + suffix).size;
+    } catch {
+      /* sidecar absent */
+    }
+  }
+  return total;
 }
 
 /** Whether THIS tenant's agents may reach private/loopback/LAN endpoints (e.g. a
@@ -363,8 +547,8 @@ function effectiveMaxUsers(rec: TenantRecord | null): number {
  *  ALLOW_PRIVATE_AGENT_ENDPOINTS=1 forces the allow globally. */
 function agentsAllowPrivate(rec: TenantRecord | null): boolean {
   if (!BASE_DOMAIN) return true; // single-tenant self-host
-  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === '1') return true; // global override
-  if (!rec || rec.id === 'default') return true; // operator's own default tenant
+  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === "1") return true; // global override
+  if (!rec || rec.id === "default") return true; // operator's own default tenant
   return !!rec.allow_private_endpoints;
 }
 
@@ -378,7 +562,7 @@ function resolveFederationMode(rec: TenantRecord | null): FederationMode {
     override: rec?.federation_mode,
     envDefault: FEDERATION_MODE_ENV,
     // No peer for single-tenant self-host or the operator's own 'default' tenant.
-    isSelfHost: !BASE_DOMAIN || !rec || rec.id === 'default',
+    isSelfHost: !BASE_DOMAIN || !rec || rec.id === "default",
   });
 }
 
@@ -401,7 +585,14 @@ function blobsDirBytes(dir: string): number {
   return total;
 }
 
-function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp {
+// Exported (not just module-local) so tests can reach the REAL per-tenant route table —
+// the same handlers and middleware a production tenant app runs — without starting the
+// server (see IS_ENTRY at the bottom; importing index.ts for its factory is a no-op
+// beyond opening the default/control DBs, which the test can point at a temp dir).
+export function buildTenantApp(
+  ctx: TenantCtx,
+  deliverToPeer: DeliverToPeer,
+): FetchApp {
   const { db, serverDeviceId, vapidPublicKey } = ctx;
   const BLOBS_DIR = ctx.blobsDir;
   // The tenant's content-addressed blob store as a narrow capability, so federation's
@@ -418,11 +609,15 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   };
   // Per-request: may this workspace's agents reach private/LAN endpoints? (host-admin flag)
   const allowPrivate = (): boolean =>
-    agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id));
+    agentsAllowPrivate(
+      ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+    );
   // Per-request: may this workspace select the host-shared LM? Single-tenant self-host
   // (the 'default' tenant) always may — there's no control-DB row to gate it.
   const hostAvailable = (): boolean =>
-    ctx.id === 'default' ? true : !!getTenantById(controlDb, ctx.id)?.host_lm_available;
+    ctx.id === "default"
+      ? true
+      : !!getTenantById(controlDb, ctx.id)?.host_lm_available;
 
   const api = new Hono<Env>();
   // Cap every /api/* body before a handler can buffer it. Node reads the whole request
@@ -431,11 +626,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // of auth so an unauthenticated caller can't do it either. Two surfaces legitimately
   // exceed the JSON default and keep their own cap; /api/federation/* is already capped
   // where it's mounted (see buildTenantApp's tenantApp.use), so it passes through.
-  api.use('*', async (c, next) => {
+  api.use("*", async (c, next) => {
     const path = c.req.path;
-    if (path.includes('/federation/')) return next();
-    if (path.includes('/blobs/')) return blobBodyLimit(c, next);
-    if (path === '/api/sync' || path === '/sync') return syncBodyLimit(c, next);
+    if (path.includes("/federation/")) return next();
+    if (path.includes("/blobs/")) return blobBodyLimit(c, next);
+    if (path === "/api/sync" || path === "/sync") return syncBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
   // Open mode is opt-in (ALLOW_OPEN_MODE=1) and never available under BASE_DOMAIN:
@@ -443,32 +638,73 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // deleted would expose the whole workspace to anyone on the subdomain (A2).
   // Basic auth is only accepted on /login — all other human access needs a session
   // minted after MFA (or an API token for integrations).
-  api.use('*', basicAuth(db, {
-    allowOpen: !BASE_DOMAIN && ALLOW_OPEN_MODE,
-    basicPaths: ['/login'],
-  }));
+  api.use(
+    "*",
+    basicAuth(db, {
+      allowOpen: !BASE_DOMAIN && ALLOW_OPEN_MODE,
+      basicPaths: ["/login"],
+    }),
+  );
+  api.use("*", personalKeyGuard(db));
+  // A2: per-user concurrency bound WITHIN this tenant — one counter per authenticated
+  // user, so a single user's burst (e.g. a stuck client hammering sync) can't consume
+  // the whole tenant slice of the global pool. Runs after basicAuth, so only
+  // authenticated requests are counted; the map prunes keys back to zero so it can't
+  // grow with the roster. Rejects with 429 + Retry-After at the cap.
+  const userLoad = new KeyedConcurrency(USER_MAX_CONCURRENT);
+  api.use("*", async (c, next) => {
+    const uid = c.get("userId");
+    if (!uid) return next(); // unauthenticated — basicAuth already short-circuited
+    if (!userLoad.tryEnter(uid)) return rateLimited(c, "user", 1000);
+    try {
+      await next();
+    } finally {
+      userLoad.exit(uid);
+    }
+  });
 
-  api.get('/me', (c) => {
-    const id = c.get('userId');
+  // Shared storage admission for every mutating REST/agent route. Sync performs
+  // its own push-only check so negotiation and pull remain available at quota.
+  api.use("*", async (c, next) => {
+    const path = c.req.path.replace(/^\/api/, "");
+    if (
+      ["GET", "HEAD", "OPTIONS", "DELETE"].includes(c.req.method) ||
+      path === "/sync" ||
+      /^\/(login|logout|mfa)(\/|$)/.test(path)
+    )
+      return next();
+    const rec = ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
+    const quota = effectiveDbQuota(rec);
+    const size = tenantDbSizeBytes(ctx.dbPath);
+    if (quota > 0 && size >= quota)
+      return c.json(
+        { error: "db_quota_exceeded", current_bytes: size, limit_bytes: quota },
+        507,
+      );
+    return next();
+  });
+
+  api.get("/me", (c) => {
+    const id = c.get("userId");
     const user = getUser(db, id);
     const base = user
       ? publicUser(user)
       : {
           id,
-          username: c.get('username'),
+          username: c.get("username"),
           display_name: null,
-          role: c.get('role'),
+          role: c.get("role"),
           is_bot: false,
           avatar_color: null,
           avatar_initial: null,
           plan_startup_min: null,
           plan_default_estimate_min: null,
         };
-    const mfa = id === 'local' ? null : getMfaStatus(db, id);
+    const mfa = id === "local" ? null : getMfaStatus(db, id);
     return c.json({
       ...base,
-      open: id === 'local', // server has no accounts → running open (no login)
-      ha_person: id === 'local' ? null : getHaPerson(db, id),
+      open: id === "local", // server has no accounts → running open (no login)
+      ha_person: id === "local" ? null : getHaPerson(db, id),
       vapid: vapidPublicKey,
       mfa,
     });
@@ -481,107 +717,120 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     deviceId: string | undefined,
     deviceName: string | undefined,
     rotated?: string,
-  ): { token: string; user: ReturnType<typeof publicUser>; device_token?: string } {
+  ): {
+    token: string;
+    user: ReturnType<typeof publicUser>;
+    device_token?: string;
+  } {
     const user = getUser(db, userId)!;
-    const device_token = rotated ?? (deviceId ? trustDevice(db, userId, deviceId, deviceName) : undefined);
-    return { token: createSession(db, userId), user: publicUser(user), device_token };
+    const device_token =
+      rotated ??
+      (deviceId ? trustDevice(db, userId, deviceId, deviceName) : undefined);
+    return {
+      token: createSession(db, userId),
+      user: publicUser(user),
+      device_token,
+    };
   }
 
   // Password (Basic) → session if device trusted / MFA ready path; else challenge.
-  api.post('/login', async (c) => {
-    const method = c.get('authMethod');
-    if (method === 'open') return c.json({ open: true });
-    if (method !== 'basic') return c.json({ error: 'password auth required' }, 400);
-    const id = c.get('userId');
-    if (!getUser(db, id)) return c.json({ error: 'unauthorized' }, 401);
+  api.post("/login", async (c) => {
+    const method = c.get("authMethod");
+    if (method === "open") return c.json({ open: true });
+    if (method !== "basic")
+      return c.json({ error: "password auth required" }, 400);
+    const id = c.get("userId");
+    if (!getUser(db, id)) return c.json({ error: "unauthorized" }, 401);
     const body = (await c.req.json().catch(() => ({}))) as {
       device_id?: string;
       device_name?: string;
       device_token?: string;
     };
-    const deviceId = body.device_id?.trim() || '';
+    const deviceId = body.device_id?.trim() || "";
     const deviceName = body.device_name?.trim() || undefined;
-    const deviceToken = body.device_token?.trim() || '';
+    const deviceToken = body.device_token?.trim() || "";
 
     if (!mfaReady(db, id)) {
-      const challenge = createMfaChallenge(db, id, 'enroll');
+      const challenge = createMfaChallenge(db, id, "enroll");
       // Omit profile until MFA/enroll finishes — password-OK alone must not disclose it.
-      return c.json({ status: 'needs_enrollment', challenge });
+      return c.json({ status: "needs_enrollment", challenge });
     }
     // Skipping 2FA takes the device's secret, not just its (public) id. A missing
     // or stale secret is not an error — it just means this login does the 2FA.
     if (deviceId && deviceToken) {
       const rotated = useTrustedDevice(db, id, deviceId, deviceToken);
-      if (rotated) return c.json(completeLogin(id, deviceId, deviceName, rotated));
+      if (rotated)
+        return c.json(completeLogin(id, deviceId, deviceName, rotated));
     }
-    const challenge = createMfaChallenge(db, id, 'login');
+    const challenge = createMfaChallenge(db, id, "login");
     const factors = getMfaStatus(db, id).factors;
-    return c.json({ status: 'needs_2fa', challenge, factors });
+    return c.json({ status: "needs_2fa", challenge, factors });
   });
 
   // ----- MFA: enroll (challenge bearer) ------------------------------------
 
-  api.post('/mfa/enroll/email/start', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'enroll') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/enroll/email/start", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "enroll") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
-    const email = body.email?.trim() || '';
-    if (!isValidEmail(email)) return c.json({ error: 'valid email required' }, 400);
-    const challengeId = c.get('mfaChallengeId')!;
+    const email = body.email?.trim() || "";
+    if (!isValidEmail(email))
+      return c.json({ error: "valid email required" }, 400);
+    const challengeId = c.get("mfaChallengeId")!;
     try {
       await sendMfaEmailCode(db, challengeId, email);
     } catch (e) {
       const limited = mfaEmailSendError(c, e);
       if (limited) return limited;
-      console.error('[carbon] mfa email send failed:', e);
-      return c.json({ error: 'email_send_failed' }, 500);
+      console.error("[carbon] mfa email send failed:", e);
+      return c.json({ error: "email_send_failed" }, 500);
     }
     return c.json({ ok: true });
   });
 
-  api.post('/mfa/enroll/email/confirm', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'enroll') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/enroll/email/confirm", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "enroll") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
     const body = (await c.req.json().catch(() => ({}))) as { code?: string };
-    if (!body.code) return c.json({ error: 'code required' }, 400);
-    const challengeId = c.get('mfaChallengeId')!;
+    if (!body.code) return c.json({ error: "code required" }, 400);
+    const challengeId = c.get("mfaChallengeId")!;
     const result = verifyMfaEmailCode(db, challengeId, body.code);
     if (!result.ok) return c.json({ error: result.error }, 400);
-    setVerifiedEmail(db, c.get('userId'), result.email);
-    return c.json({ ok: true, mfa: getMfaStatus(db, c.get('userId')) });
+    setVerifiedEmail(db, c.get("userId"), result.email);
+    return c.json({ ok: true, mfa: getMfaStatus(db, c.get("userId")) });
   });
 
-  api.post('/mfa/enroll/totp/start', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'enroll') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/enroll/totp/start", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "enroll") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
-    const username = c.get('username');
+    const username = c.get("username");
     const label = ctx.subdomain ? `${username}@${ctx.subdomain}` : username;
-    const { secret, uri } = startTotpEnroll(db, c.get('userId'), label);
+    const { secret, uri } = startTotpEnroll(db, c.get("userId"), label);
     return c.json({ secret, uri });
   });
 
-  api.post('/mfa/enroll/totp/confirm', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'enroll') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/enroll/totp/confirm", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "enroll") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
     const body = (await c.req.json().catch(() => ({}))) as { code?: string };
-    if (!body.code) return c.json({ error: 'code required' }, 400);
-    if (!confirmTotpEnroll(db, c.get('userId'), body.code)) {
-      return c.json({ error: 'bad_code' }, 400);
+    if (!body.code) return c.json({ error: "code required" }, 400);
+    if (!confirmTotpEnroll(db, c.get("userId"), body.code)) {
+      return c.json({ error: "bad_code" }, 400);
     }
-    return c.json({ ok: true, mfa: getMfaStatus(db, c.get('userId')) });
+    return c.json({ ok: true, mfa: getMfaStatus(db, c.get("userId")) });
   });
 
-  api.post('/mfa/enroll/finish', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'enroll') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/enroll/finish", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "enroll") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
-    const userId = c.get('userId');
+    const userId = c.get("userId");
     if (!mfaReady(db, userId)) {
-      return c.json({ error: 'enroll at least one factor' }, 400);
+      return c.json({ error: "enroll at least one factor" }, 400);
     }
     const body = (await c.req.json().catch(() => ({}))) as {
       device_id?: string;
@@ -589,47 +838,47 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       issue_recovery_codes?: boolean;
     };
     const deviceId = body.device_id?.trim();
-    if (!deviceId) return c.json({ error: 'device_id required' }, 400);
-    consumeMfaChallenge(db, c.get('mfaChallengeId')!);
+    if (!deviceId) return c.json({ error: "device_id required" }, 400);
+    consumeMfaChallenge(db, c.get("mfaChallengeId")!);
     const result = completeLogin(userId, deviceId, body.device_name);
     const recovery_codes =
-      body.issue_recovery_codes !== false ? issueRecoveryCodes(db, userId, 'self') : undefined;
+      body.issue_recovery_codes !== false
+        ? issueRecoveryCodes(db, userId, "self")
+        : undefined;
     return c.json({ ...result, recovery_codes });
   });
 
   // ----- MFA: login challenge ----------------------------------------------
 
-  api.post('/mfa/login/email/send', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'login') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/login/email/send", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "login") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
-    const status = getMfaStatus(db, c.get('userId'));
+    const status = getMfaStatus(db, c.get("userId"));
     if (!status.email_verified || !status.email) {
-      return c.json({ error: 'email not enrolled' }, 400);
+      return c.json({ error: "email not enrolled" }, 400);
     }
     try {
-      await sendMfaEmailCode(db, c.get('mfaChallengeId')!, status.email);
+      await sendMfaEmailCode(db, c.get("mfaChallengeId")!, status.email);
     } catch (e) {
       const limited = mfaEmailSendError(c, e);
       if (limited) return limited;
-      console.error('[carbon] mfa login email send failed:', e);
-      return c.json({ error: 'email_send_failed' }, 500);
+      console.error("[carbon] mfa login email send failed:", e);
+      return c.json({ error: "email_send_failed" }, 500);
     }
     // Mask for the UI (show last domain-ish hint without full address).
-    const at = status.email.indexOf('@');
+    const at = status.email.indexOf("@");
     const hint =
-      at > 1
-        ? `${status.email[0]}•••${status.email.slice(at)}`
-        : '•••';
+      at > 1 ? `${status.email[0]}•••${status.email.slice(at)}` : "•••";
     return c.json({ ok: true, email_hint: hint });
   });
 
-  api.post('/mfa/login/verify', requireMfaChallenge, async (c) => {
-    if (c.get('mfaChallengePurpose') !== 'login') {
-      return c.json({ error: 'wrong challenge purpose' }, 400);
+  api.post("/mfa/login/verify", requireMfaChallenge, async (c) => {
+    if (c.get("mfaChallengePurpose") !== "login") {
+      return c.json({ error: "wrong challenge purpose" }, 400);
     }
-    const userId = c.get('userId');
-    const challengeId = c.get('mfaChallengeId')!;
+    const userId = c.get("userId");
+    const challengeId = c.get("mfaChallengeId")!;
     const body = (await c.req.json().catch(() => ({}))) as {
       device_id?: string;
       device_name?: string;
@@ -638,7 +887,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       recovery_code?: string;
     };
     const deviceId = body.device_id?.trim();
-    if (!deviceId) return c.json({ error: 'device_id required' }, 400);
+    if (!deviceId) return c.json({ error: "device_id required" }, 400);
 
     let ok = false;
     if (body.totp) {
@@ -649,11 +898,14 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     } else if (body.recovery_code) {
       ok = consumeRecoveryCode(db, userId, body.recovery_code);
     } else {
-      return c.json({ error: 'totp, email_code, or recovery_code required' }, 400);
+      return c.json(
+        { error: "totp, email_code, or recovery_code required" },
+        400,
+      );
     }
     if (!ok) {
       bumpChallengeAttempts(db, challengeId);
-      return c.json({ error: 'bad_code' }, 400);
+      return c.json({ error: "bad_code" }, 400);
     }
     consumeMfaChallenge(db, challengeId);
     return c.json(completeLogin(userId, deviceId, body.device_name));
@@ -661,9 +913,9 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
   // ----- MFA: session-authenticated settings --------------------------------
 
-  api.get('/mfa/status', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ open: true });
+  api.get("/mfa/status", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ open: true });
     return c.json({
       ...getMfaStatus(db, id),
       recovery_codes_remaining: countUnusedRecoveryCodes(db, id),
@@ -671,62 +923,68 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     });
   });
 
-  api.get('/mfa/devices', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ devices: [] });
+  api.get("/mfa/devices", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ devices: [] });
     return c.json({ devices: listTrustedDevices(db, id) });
   });
 
-  api.delete('/mfa/devices/:deviceId', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
-    const deviceId = decodeURIComponent(c.req.param('deviceId'));
-    if (!revokeTrustedDevice(db, id, deviceId)) return c.json({ error: 'not found' }, 404);
+  api.delete("/mfa/devices/:deviceId", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
+    const deviceId = decodeURIComponent(c.req.param("deviceId"));
+    if (!revokeTrustedDevice(db, id, deviceId))
+      return c.json({ error: "not found" }, 404);
     return c.json({ ok: true });
   });
 
-  api.post('/mfa/devices/reset', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
+  api.post("/mfa/devices/reset", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
     const n = revokeAllTrustedDevices(db, id);
     return c.json({ ok: true, revoked: n });
   });
 
-  api.post('/mfa/recovery-codes', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
-    if (!mfaReady(db, id)) return c.json({ error: 'enroll mfa first' }, 400);
-    const codes = issueRecoveryCodes(db, id, 'self');
+  api.post("/mfa/recovery-codes", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
+    if (!mfaReady(db, id)) return c.json({ error: "enroll mfa first" }, 400);
+    const codes = issueRecoveryCodes(db, id, "self");
     return c.json({ codes });
   });
 
   // Add a second factor while already signed in (session).
-  api.post('/mfa/settings/email/start', requireHumanSession, async (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
+  api.post("/mfa/settings/email/start", requireHumanSession, async (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
-    if (!isValidEmail(body.email ?? '')) return c.json({ error: 'valid email required' }, 400);
-    const challenge = createMfaChallenge(db, id, 'enroll');
+    if (!isValidEmail(body.email ?? ""))
+      return c.json({ error: "valid email required" }, 400);
+    const challenge = createMfaChallenge(db, id, "enroll");
     const ch = validateMfaChallenge(db, challenge)!;
     try {
       await sendMfaEmailCode(db, ch.id, body.email!);
     } catch (e) {
       const limited = mfaEmailSendError(c, e);
       if (limited) return limited;
-      console.error('[carbon] mfa settings email send failed:', e);
-      return c.json({ error: 'email_send_failed' }, 500);
+      console.error("[carbon] mfa settings email send failed:", e);
+      return c.json({ error: "email_send_failed" }, 500);
     }
     return c.json({ challenge });
   });
 
-  api.post('/mfa/settings/email/confirm', requireHumanSession, async (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
-    const body = (await c.req.json().catch(() => ({}))) as { challenge?: string; code?: string };
-    if (!body.challenge || !body.code) return c.json({ error: 'challenge and code required' }, 400);
+  api.post("/mfa/settings/email/confirm", requireHumanSession, async (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      challenge?: string;
+      code?: string;
+    };
+    if (!body.challenge || !body.code)
+      return c.json({ error: "challenge and code required" }, 400);
     const ch = validateMfaChallenge(db, body.challenge);
-    if (!ch || ch.userId !== id || ch.purpose !== 'enroll') {
-      return c.json({ error: 'invalid challenge' }, 400);
+    if (!ch || ch.userId !== id || ch.purpose !== "enroll") {
+      return c.json({ error: "invalid challenge" }, 400);
     }
     const result = verifyMfaEmailCode(db, ch.id, body.code);
     if (!result.ok) return c.json({ error: result.error }, 400);
@@ -735,26 +993,27 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     return c.json({ ok: true, mfa: getMfaStatus(db, id) });
   });
 
-  api.post('/mfa/settings/totp/start', requireHumanSession, (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
-    const username = c.get('username');
+  api.post("/mfa/settings/totp/start", requireHumanSession, (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
+    const username = c.get("username");
     const label = ctx.subdomain ? `${username}@${ctx.subdomain}` : username;
     return c.json(startTotpEnroll(db, id, label));
   });
 
-  api.post('/mfa/settings/totp/confirm', requireHumanSession, async (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
+  api.post("/mfa/settings/totp/confirm", requireHumanSession, async (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
     const body = (await c.req.json().catch(() => ({}))) as { code?: string };
-    if (!body.code) return c.json({ error: 'code required' }, 400);
-    if (!confirmTotpEnroll(db, id, body.code)) return c.json({ error: 'bad_code' }, 400);
+    if (!body.code) return c.json({ error: "code required" }, 400);
+    if (!confirmTotpEnroll(db, id, body.code))
+      return c.json({ error: "bad_code" }, 400);
     return c.json({ ok: true, mfa: getMfaStatus(db, id) });
   });
 
-  api.post('/mfa/sessions/revoke-all', requireHumanSession, async (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
+  api.post("/mfa/sessions/revoke-all", requireHumanSession, async (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
     const body = (await c.req.json().catch(() => ({}))) as {
       device_id?: string;
       device_name?: string;
@@ -764,24 +1023,26 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const deviceId = body.device_id?.trim();
     // Re-trusting the calling device issues it a fresh secret; the client must
     // store it, or the device it just kept would need 2FA on the next login.
-    const device_token = deviceId ? trustDevice(db, id, deviceId, body.device_name) : undefined;
+    const device_token = deviceId
+      ? trustDevice(db, id, deviceId, body.device_name)
+      : undefined;
     const token = createSession(db, id);
     return c.json({ ok: true, token, device_token });
   });
 
   // Revoke the current session token (sign out). Idempotent.
-  api.post('/logout', (c) => {
-    const header = c.req.header('Authorization');
-    if (header?.startsWith('Bearer ')) {
+  api.post("/logout", (c) => {
+    const header = c.req.header("Authorization");
+    if (header?.startsWith("Bearer ")) {
       const secret = header.slice(7).trim();
-      if (!secret.startsWith('mfac_')) revokeSession(db, secret);
+      if (!secret.startsWith("mfac_")) revokeSession(db, secret);
     }
     return c.json({ ok: true });
   });
 
-  api.patch('/me', async (c) => {
-    const id = c.get('userId');
-    if (id === 'local') return c.json({ error: 'no account' }, 400);
+  api.patch("/me", async (c) => {
+    const id = c.get("userId");
+    if (id === "local") return c.json({ error: "no account" }, 400);
     const body = (await c.req.json().catch(() => ({}))) as {
       ha_person?: string | null;
       display_name?: string | null;
@@ -790,28 +1051,39 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       plan_startup_min?: number | null;
       plan_default_estimate_min?: number | null;
     };
-    if ('ha_person' in body) setHaPerson(db, id, body.ha_person ?? null);
+    if ("ha_person" in body) setHaPerson(db, id, body.ha_person ?? null);
     // Self-service profile fields.
     const patch: Parameters<typeof updateUser>[2] = {};
-    if ('display_name' in body) patch.display_name = body.display_name?.trim() || null;
-    if ('avatar_color' in body) patch.avatar_color = body.avatar_color || null;
-    if ('avatar_initial' in body)
-      patch.avatar_initial = body.avatar_initial?.trim().slice(0, 2).toUpperCase() || null;
+    if ("display_name" in body)
+      patch.display_name = body.display_name?.trim() || null;
+    if ("avatar_color" in body) patch.avatar_color = body.avatar_color || null;
+    if ("avatar_initial" in body)
+      patch.avatar_initial =
+        body.avatar_initial?.trim().slice(0, 2).toUpperCase() || null;
     const clampMin = (v: number | null | undefined) =>
-      v == null || !Number.isFinite(v) ? null : Math.max(0, Math.min(600, Math.round(v)));
-    if ('plan_startup_min' in body) patch.plan_startup_min = clampMin(body.plan_startup_min);
-    if ('plan_default_estimate_min' in body)
-      patch.plan_default_estimate_min = clampMin(body.plan_default_estimate_min);
+      v == null || !Number.isFinite(v)
+        ? null
+        : Math.max(0, Math.min(600, Math.round(v)));
+    if ("plan_startup_min" in body)
+      patch.plan_startup_min = clampMin(body.plan_startup_min);
+    if ("plan_default_estimate_min" in body)
+      patch.plan_default_estimate_min = clampMin(
+        body.plan_default_estimate_min,
+      );
     if (Object.keys(patch).length) updateUser(db, id, patch);
     const u = getUser(db, id);
-    return c.json({ ok: true, ...(u ? publicUser(u) : {}), ha_person: getHaPerson(db, id) });
+    return c.json({
+      ok: true,
+      ...(u ? publicUser(u) : {}),
+      ha_person: getHaPerson(db, id),
+    });
   });
 
-  api.get('/users', (c) => c.json({ users: listUsers(db).map(publicUser) }));
+  api.get("/users", (c) => c.json({ users: listUsers(db).map(publicUser) }));
 
   // ----- admin: user management ----------------------------------------------
 
-  api.post('/admin/users', requireAdmin, async (c) => {
+  api.post("/admin/users", requireAdmin, async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       username?: string;
       password?: string;
@@ -821,40 +1093,47 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       email?: string | null;
     };
     if (!body.username || !body.password) {
-      return c.json({ error: 'username and password required' }, 400);
+      return c.json({ error: "username and password required" }, 400);
     }
     if (getUserByUsername(db, body.username)) {
-      return c.json({ error: 'username already exists' }, 409);
+      return c.json({ error: "username already exists" }, 409);
     }
     // Enforce the per-workspace human-user cap (hosted subscriptions). Bot/agent
     // accounts don't count toward the seat limit, and self-host is uncapped.
     const isBot = body.isBot ?? false;
-    if (!isBot && ctx.id !== 'default') {
+    if (!isBot && ctx.id !== "default") {
       const limit = effectiveMaxUsers(getTenantById(controlDb, ctx.id));
       if (limit > 0) {
         const humans = listUsers(db).filter((u) => !u.is_bot).length;
         if (humans >= limit) {
-          return c.json({ error: 'workspace_user_limit', limit }, 403);
+          return c.json({ error: "workspace_user_limit", limit }, 403);
         }
       }
     }
     if (body.email && !isValidEmail(body.email)) {
-      return c.json({ error: 'invalid email' }, 400);
+      return c.json({ error: "invalid email" }, 400);
     }
     const user = createUser(db, {
       username: body.username,
       displayName: body.displayName ?? body.username,
-      role: body.role ?? 'member',
+      role: body.role ?? "member",
       isBot,
     });
     setPassword(db, user.id, hashPassword(body.password));
     if (body.email) setUserEmail(db, user.id, body.email);
-    return c.json({ ...publicUser(user), email: body.email ?? null, mfa: getMfaStatus(db, user.id) }, 201);
+    return c.json(
+      {
+        ...publicUser(user),
+        email: body.email ?? null,
+        mfa: getMfaStatus(db, user.id),
+      },
+      201,
+    );
   });
 
-  api.patch('/admin/users/:id', requireAdmin, async (c) => {
-    const id = c.req.param('id');
-    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+  api.patch("/admin/users/:id", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!getUser(db, id)) return c.json({ error: "not found" }, 404);
     const body = (await c.req.json().catch(() => ({}))) as {
       displayName?: string;
       role?: UserRole;
@@ -863,7 +1142,9 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       email?: string | null;
     };
     updateUser(db, id, {
-      ...(body.displayName !== undefined ? { display_name: body.displayName } : {}),
+      ...(body.displayName !== undefined
+        ? { display_name: body.displayName }
+        : {}),
       ...(body.role !== undefined ? { role: body.role } : {}),
     });
     if (body.password) {
@@ -874,12 +1155,12 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     // Admins may map any user to their Home Assistant `person.*` entity (the
     // per-user PATCH /api/me only sets the caller's own mapping). This lets one
     // admin token wire up household members' geofence/GPS reminders.
-    if ('ha_person' in body) setHaPerson(db, id, body.ha_person ?? null);
-    if ('email' in body) {
+    if ("ha_person" in body) setHaPerson(db, id, body.ha_person ?? null);
+    if ("email" in body) {
       try {
         setUserEmail(db, id, body.email ?? null);
       } catch {
-        return c.json({ error: 'invalid email' }, 400);
+        return c.json({ error: "invalid email" }, 400);
       }
     }
     const mfa = getMfaStatus(db, id);
@@ -892,41 +1173,45 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   });
 
   /** Issue a single one-use recovery code for a locked-out user (shown once). */
-  api.post('/admin/users/:id/recovery-code', requireAdmin, (c) => {
-    const id = c.req.param('id');
-    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
-    const codes = issueRecoveryCodes(db, id, 'admin');
+  api.post("/admin/users/:id/recovery-code", requireAdmin, (c) => {
+    const id = c.req.param("id");
+    if (!getUser(db, id)) return c.json({ error: "not found" }, 404);
+    const codes = issueRecoveryCodes(db, id, "admin");
     return c.json({ code: codes[0] });
   });
 
   /** Clear MFA + trusts so the user must re-enroll on next login. */
-  api.post('/admin/users/:id/reset-mfa', requireAdmin, (c) => {
-    const id = c.req.param('id');
-    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+  api.post("/admin/users/:id/reset-mfa", requireAdmin, (c) => {
+    const id = c.req.param("id");
+    if (!getUser(db, id)) return c.json({ error: "not found" }, 404);
     resetMfa(db, id);
     revokeAllSessions(db, id);
     return c.json({ ok: true });
   });
 
   /** Revoke device trust only (user keeps enrolled factors). */
-  api.post('/admin/users/:id/reset-trust', requireAdmin, (c) => {
-    const id = c.req.param('id');
-    if (!getUser(db, id)) return c.json({ error: 'not found' }, 404);
+  api.post("/admin/users/:id/reset-trust", requireAdmin, (c) => {
+    const id = c.req.param("id");
+    if (!getUser(db, id)) return c.json({ error: "not found" }, 404);
     const n = revokeAllTrustedDevices(db, id);
     revokeAllSessions(db, id);
     return c.json({ ok: true, revoked: n });
   });
 
-  api.delete('/admin/users/:id', requireAdmin, (c) => {
-    const id = c.req.param('id');
-    if (id === c.get('userId')) return c.json({ error: 'cannot delete yourself' }, 400);
+  api.delete("/admin/users/:id", requireAdmin, (c) => {
+    const id = c.req.param("id");
+    if (id === c.get("userId"))
+      return c.json({ error: "cannot delete yourself" }, 400);
     const target = getUser(db, id);
-    if (!target) return c.json({ error: 'not found' }, 404);
+    if (!target) return c.json({ error: "not found" }, 404);
     // Refuse to delete the last admin — otherwise the workspace becomes unmanageable
     // (and in single-tenant mode would flip to open/no-auth). (A2)
-    if (target.role === 'admin') {
-      const admins = listUsers(db).filter((u) => u.role === 'admin' && !u.deleted).length;
-      if (admins <= 1) return c.json({ error: 'cannot delete the last admin' }, 400);
+    if (target.role === "admin") {
+      const admins = listUsers(db).filter(
+        (u) => u.role === "admin" && !u.deleted,
+      ).length;
+      if (admins <= 1)
+        return c.json({ error: "cannot delete the last admin" }, 400);
     }
     softDeleteUser(db, id);
     // Soft-delete alone leaves sessions/API tokens valid against getUser-by-id;
@@ -956,10 +1241,36 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     data: string;
   }
 
-  api.post('/sync', async (c) => {
-    const userId = c.get('userId');
-    const open = userId === 'local'; // no-auth single-user mode sees everything
+  // A2: per-credential sync rate limit — a sliding 1-minute window of sync hits per user
+  // (in-memory, pruned each call so it can't grow without bound). Returns the ms to wait
+  // before the next allowed sync, or 0 when allowed. 0 cap = unlimited (no-op).
+  const syncHits = new Map<string, number[]>();
+  const syncRate = (key: string): number => {
+    if (SYNC_MAX_PER_MIN <= 0) return 0;
+    const now = Date.now();
+    const win = now - 60_000;
+    let hits = syncHits.get(key) ?? [];
+    hits = hits.filter((t) => t > win);
+    if (hits.length >= SYNC_MAX_PER_MIN) {
+      const wait = hits[0] + 60_000 - now; // oldest hit slides out of the window
+      syncHits.set(key, hits);
+      return Math.max(1000, wait);
+    }
+    hits.push(now);
+    syncHits.set(key, hits);
+    if (syncHits.size > 10_000)
+      for (const k of [...syncHits.keys()])
+        if ((syncHits.get(k) ?? []).length === 0) syncHits.delete(k);
+    return 0;
+  };
+
+  api.post("/sync", async (c) => {
+    const userId = c.get("userId");
+    const open = userId === "local"; // no-auth single-user mode sees everything
     const body = (await c.req.json().catch(() => ({}))) as {
+      syncEpoch?: number;
+      backfill?: BackfillCursor;
+      rosterCursor?: number;
       since?: number;
       rsince?: number;
       ops?: Op[];
@@ -969,33 +1280,265 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const since = Number(body.since ?? 0);
     const rsince = Number(body.rsince ?? 0);
 
+    // A2: capture pushed entry counts BEFORE any gate/sanitize, so the `rejected` field in
+    // the response reports everything the server refused to ingest — a scope-denied write
+    // (read-only token) AND validation/authorization-dropped entries alike. A rejected
+    // push is never ingested, so the client's local copies stay unsynced and are re-pushed;
+    // the count makes a silent drop visible instead of a quiet loss of work.
+    const pushedOpsCount = Array.isArray(body.ops) ? body.ops.length : 0;
+    const pushedRecCount = Array.isArray(body.recordOps)
+      ? body.recordOps.length
+      : 0;
+    // A4: the ORIGINAL pushed entries, captured before any gate mutates `body`. A scope
+    // denial below reassigns `body.ops = []` (it does not mutate this reference), so this
+    // is the authoritative "everything the client pushed" set for the rejected-ids split —
+    // rejected ids = pushed ids − ingested ids, which covers scope denials (ALL pushed),
+    // shape rejections, and authorization drops in one computation.
+    const pushedOpsRaw = Array.isArray(body.ops) ? body.ops : [];
+    const pushedRecRaw = Array.isArray(body.recordOps) ? body.recordOps : [];
+
+    // A2: per-credential sync rate limit (time-based, complements the in-flight gates).
+    // A 429 here is actionable — it carries retry_after_ms, the sync is NOT ingested,
+    // and the client re-syncs on that delay with its ops still unsynced.
+    const waitMs = syncRate(userId ?? "anon");
+    if (waitMs > 0) return rateLimited(c, "sync", waitMs);
+
     // Bound the work one push can queue, independently of its byte size.
     const oversized = oversizedSyncArray(body);
     if (oversized) {
       return c.json(
-        { error: 'too many entries in one sync', field: oversized, max: MAX_SYNC_BATCH },
+        {
+          error: "too many entries in one sync",
+          field: oversized,
+          max: MAX_SYNC_BATCH,
+        },
         413,
       );
     }
+
+    // A2: structural validation of the body (shape/types, not just byte length).
+    // A malformed push is rejected with 400 BEFORE any ingest, so nothing is
+    // partially applied. The client keeps its unsynced ops and retries (a rejected
+    // push is never ingested — see ./sync-validate).
+    const shapeError = validateSyncBody(body);
+    if (shapeError) {
+      return c.json({ error: "invalid_sync_body", detail: shapeError }, 400);
+    }
+
+    // A2: per-workspace DB size quota — reject a PUSH before any ingest when the tenant
+    // DB already exceeds its cap. A pull (no writes) never grows the store, so it is
+    // unaffected. The refused push is not ingested, so the client keeps its ops
+    // unsynced; a host admin unblocks it by raising the cap (or the workspace prunes).
+    const pushing =
+      (Array.isArray(body.ops) && body.ops.length > 0) ||
+      (Array.isArray(body.recordOps) && body.recordOps.length > 0);
+    if (pushing && body.syncEpoch !== getSyncEpoch(db)) {
+      return c.json(
+        {
+          error: "sync_epoch_mismatch",
+          syncEpoch: getSyncEpoch(db),
+          detail:
+            "Negotiate the current server generation before sending pending work",
+        },
+        409,
+      );
+    }
+    if (pushing) {
+      const rec =
+        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
+      const quota = effectiveDbQuota(rec);
+      if (quota > 0) {
+        const size = tenantDbSizeBytes(ctx.dbPath);
+        if (size >= quota) {
+          return c.json(
+            {
+              error: "db_quota_exceeded",
+              current_bytes: size,
+              limit_bytes: quota,
+            },
+            507,
+          );
+        }
+      }
+    }
+
+    // A1: credential-level authorization (shared module). Unknown auth methods are
+    // denied outright. A token's own scopes bind: a read-only token (no write scope)
+    // may still pull, but cannot push any writes — the read-only-token-via-sync
+    // bypass exploited exactly this hole. Human sessions (session/open/basic) act as
+    // their full user and push as before. Open mode (single trusted user) skips the gate.
+    let mayPull = open;
+    if (!open) {
+      const cred = credentialFromVars({
+        authMethod: c.get("authMethod"),
+        userId,
+        role: c.get("role"),
+        scopes: c.get("scopes"),
+      });
+      if (isDenied(cred)) return c.json({ error: "forbidden" }, 403);
+      mayPull = hasScope(cred, "tasks:read");
+      if (!canPushWrites(cred)) {
+        body.ops = [];
+        body.recordOps = [];
+      }
+    }
+
+    // A4: per-entry field-shape validation (every auth mode — a data contract, not an
+    // access decision): a well-shaped but mistyped / unknown-field / bad-timestamp entry
+    // is dropped with an actionable reason and is never ingested — it leaves no row in
+    // the shared log and is never echoed to peers (see ./sync-fields). The rest of the
+    // push still ingests (per-entry model, matching A2's `rejected` counts).
+    const conflicts = <T extends { id: string }>(entries: T[]): Set<string> => {
+      const seen = new Map<string, T>();
+      const rejected = new Set<string>();
+      for (const entry of entries) {
+        if (seen.has(entry.id) && !isDeepStrictEqual(seen.get(entry.id), entry))
+          rejected.add(entry.id);
+        else seen.set(entry.id, entry);
+      }
+      return rejected;
+    };
+    const conflictingOps = conflicts(body.ops ?? []);
+    const conflictingRecords = conflicts(body.recordOps ?? []);
+    body.ops = body.ops?.filter((op) => !conflictingOps.has(op.id));
+    body.recordOps = body.recordOps?.filter(
+      (op) => !conflictingRecords.has(op.id),
+    );
+    const opShape = filterOpsByShape(Array.isArray(body.ops) ? body.ops : []);
+    const recShape = filterRecordOpsByShape(
+      Array.isArray(body.recordOps) ? body.recordOps : [],
+    );
 
     // Validate/stamp client-pushed ops before applying (S1). Items first so that a
     // share/assignee pushed alongside a brand-new item sees that item already ingested.
     // Deliberately skipped in open mode: no-auth single-user has exactly one trusted
     // caller, so author_id/user_id/ownership spoofing isn't a threat to guard against.
-    if (!open && Array.isArray(body.ops)) body.ops = sanitizeOps(db, userId, body.ops);
+    if (!open) body.ops = sanitizeOps(db, userId, opShape.ops);
+    else body.ops = opShape.ops;
     const pushedOps = Array.isArray(body.ops) ? body.ops : [];
     // Creates in this push (type is only set on create) — share/tag copies onto a
     // recurrence spawn need this when ownership was preserved as the series owner.
     const justCreatedIds = new Set(
-      pushedOps.filter((o) => o.fields && 'type' in o.fields).map((o) => o.item_id),
+      pushedOps
+        .filter((o) => o.fields && "type" in o.fields)
+        .map((o) => o.item_id),
     );
-    if (pushedOps.length) ingestOps(db, pushedOps, true);
-    if (!open && Array.isArray(body.recordOps))
-      body.recordOps = sanitizeRecordOps(db, userId, body.recordOps, Date.now(), justCreatedIds);
-    if (Array.isArray(body.recordOps) && body.recordOps.length) {
-      const fresh = ingestRecordOps(db, body.recordOps, true);
-      triggerAgents(ctx.id, db, serverDeviceId, fresh, allowPrivate()); // @mention / assignment -> agent run
+    // A4: per-op atomic ingest — an op that cannot be applied is reported in `skipped`
+    // (and leaves no log row), never silently lost.
+    const opIngest = pushedOps.length
+      ? ingestOps(db, pushedOps, true)
+      : { fresh: [] as Op[], skipped: [] as string[] };
+
+    if (!open)
+      body.recordOps = sanitizeRecordOps(
+        db,
+        userId,
+        recShape.ops,
+        Date.now(),
+        justCreatedIds,
+      );
+    else body.recordOps = recShape.ops;
+    const recIngest =
+      Array.isArray(body.recordOps) && body.recordOps.length
+        ? ingestRecordOps(db, body.recordOps, true)
+        : { fresh: [] as RecordOp[], skipped: [] as string[] };
+    if (recIngest.fresh.length)
+      triggerAgents(
+        ctx.id,
+        db,
+        serverDeviceId,
+        recIngest.fresh,
+        allowPrivate(),
+      ); // @mention / assignment -> agent run
+
+    // A2 + A4: what the server refused to ingest — shape-rejected entries (with actionable
+    // reasons in `detail`), authorization-dropped entries, and (defensively) ops that
+    // could not be applied at ingest. The counts keep A2's semantics; `ops_ids` /
+    // `record_ops_ids` carry the exact ids so the client marks ONLY the accepted entries
+    // synced — a rejection is never a silent loss of work.
+    const acceptedOps = Array.isArray(body.ops) ? body.ops : [];
+    const acceptedRecs = Array.isArray(body.recordOps) ? body.recordOps : [];
+    // Every id the client pushed that the server did NOT ingest: scope denials (all of
+    // them), shape rejections, authorization drops, and ops that failed to apply. The
+    // client marks only the complement (the accepted ids) synced.
+    const acceptedOpIdSet = new Set(acceptedOps.map((o) => o.id));
+    for (const op of pushedOpsRaw) {
+      const stored = db.get<{
+        item_id: string;
+        device_id: string;
+        fields: string;
+      }>("SELECT item_id, device_id, fields FROM ops WHERE id = ?", [op.id]);
+      if (
+        !conflictingOps.has(op.id) &&
+        stored &&
+        stored.item_id === op.item_id &&
+        stored.device_id === op.device_id
+      ) {
+        const fields = JSON.parse(stored.fields);
+        if (!("owner_id" in (op.fields ?? {})) && fields.owner_id === userId)
+          delete fields.owner_id;
+        if (isDeepStrictEqual(fields, op.fields ?? {}))
+          acceptedOpIdSet.add(op.id);
+      }
     }
+    // A skipped op (passed shape but failed to apply) is still in acceptedOps, so add its
+    // ids explicitly: it was pushed but is not actually ingested.
+    const rejectedOpIds = [
+      ...new Set([
+        ...pushedOpsRaw
+          .map((o) => o.id)
+          .filter((x): x is string => typeof x === "string")
+          .filter((id) => !acceptedOpIdSet.has(id)),
+        ...opIngest.skipped,
+      ]),
+    ];
+    const acceptedRecIdSet = new Set(
+      acceptedRecs
+        .filter((o) => {
+          const stored = db.get<{
+            entity: string;
+            row_id: string;
+            device_id: string;
+            data: string;
+          }>(
+            "SELECT entity, row_id, device_id, data FROM record_ops WHERE id = ?",
+            [o.id],
+          );
+          return (
+            stored &&
+            stored.entity === o.entity &&
+            stored.row_id === o.row_id &&
+            stored.device_id === o.device_id &&
+            isDeepStrictEqual(JSON.parse(stored.data), o.data)
+          );
+        })
+        .map((o) => o.id),
+    );
+    const rejectedRecordOpIds = [
+      ...new Set([
+        ...pushedRecRaw
+          .map((o) => o.id)
+          .filter((x): x is string => typeof x === "string")
+          .filter((id) => !acceptedRecIdSet.has(id)),
+        ...recIngest.skipped,
+      ]),
+    ];
+    const acknowledged = {
+      ops: [...acceptedOpIdSet].filter((id) => !opIngest.skipped.includes(id)),
+      recordOps: [...acceptedRecIdSet].filter(
+        (id) => !recIngest.skipped.includes(id),
+      ),
+    };
+    const rejected = {
+      ops: rejectedOpIds.length,
+      recordOps: rejectedRecordOpIds.length,
+      ops_ids: rejectedOpIds,
+      record_ops_ids: rejectedRecordOpIds,
+      detail: [...opShape.rejected, ...recShape.rejected].slice(
+        0,
+        REJECTED_DETAIL_CAP,
+      ),
+    };
 
     // Prune superseded note-only ops (see compactNoteOps' safety argument). Runs
     // BEFORE building the outgoing scan so a just-pruned loser is never sent, and
@@ -1009,176 +1552,136 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const pushedNoteItemIds = [
       ...new Set(
         pushedOps
-          .filter((o) => o.fields && 'note' in o.fields)
+          .filter((o) => o.fields && "note" in o.fields)
           .map((o) => o.item_id),
       ),
     ];
-    if (pushedNoteItemIds.length) compactNoteOps(db, { itemIds: pushedNoteItemIds });
+    if (pushedNoteItemIds.length)
+      compactNoteOps(db, { itemIds: pushedNoteItemIds });
     // Same guard model as notes: prune superseded setting blobs when this push
     // carried a setting op (settings rewrite often and bloat record_ops).
     const pushedSettings = Array.isArray(body.recordOps)
-      ? body.recordOps.some((o) => o.entity === 'setting')
+      ? body.recordOps.some((o) => o.entity === "setting")
       : false;
     if (pushedSettings) compactSettingRecordOps(db);
 
-    const visible = open ? null : visibleItemIds(db, userId);
-
-    // Item ops scoped to items the user can see. cursor advances past scanned rows
-    // (even filtered) so the client never re-fetches them.
-    const opRows = db.all<OpRow>(
-      `SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE rowid > ? ORDER BY rowid`,
-      [since],
+    if (!mayPull)
+      return c.json({
+        ops: [],
+        recordOps: [],
+        users: [],
+        cursor: since,
+        rcursor: rsince,
+        syncEpoch: getSyncEpoch(db),
+        truncated: false,
+        rejected,
+        acknowledged,
+      });
+    const users: NonNullable<ReturnType<typeof getUser>>[] = [];
+    let rosterCursor = body.rosterCursor ?? 0;
+    const roster = db.all<{ seq: number; id: string }>(
+      "SELECT rowid AS seq, id FROM users WHERE deleted = 0 AND rowid > ? ORDER BY rowid LIMIT 129",
+      [rosterCursor],
     );
-    const ops: Op[] = [];
-    let cursor = since;
-    for (const r of opRows) {
-      cursor = r.seq;
-      if (open || visible!.has(r.item_id)) {
-        ops.push({
-          id: r.id,
-          item_id: r.item_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          fields: JSON.parse(r.fields),
-        });
+    let rosterBytes = 0;
+    for (const row of roster.slice(0, 128)) {
+      const user = getUser(db, row.id);
+      if (!user) {
+        rosterCursor = row.seq;
+        continue;
       }
+      const size = Buffer.byteLength(JSON.stringify(user)) + 1;
+      if (rosterBytes + size > SYNC_MAX_RESPONSE_BYTES / 4) break;
+      users.push(user);
+      rosterBytes += size;
+      rosterCursor = row.seq;
     }
-
-    // Record ops (shares/assignees) for visible items, or those addressed to the user.
-    const recRows = db.all<RecRow>(
-      `SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE rowid > ? ORDER BY rowid`,
-      [rsince],
-    );
-    const recordOps: RecordOp[] = [];
-    let rcursor = rsince;
-    for (const r of recRows) {
-      rcursor = r.seq;
-      const data = JSON.parse(r.data) as { item_id?: string; user_id?: string };
-      const visibleRec =
-        open ||
-        r.entity === 'tag' || // tags are shared vocabulary — visible to everyone
-        data.user_id === userId ||
-        (data.item_id ? visible!.has(data.item_id) : false);
-      if (visibleRec) {
-        recordOps.push({
-          id: r.id,
-          entity: r.entity,
-          row_id: r.row_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          data,
-        });
-      }
+    const rosterMore = roster.some((row) => row.seq > rosterCursor);
+    const envelope = {
+      users,
+      rosterCursor: rosterMore ? rosterCursor : 0,
+      rosterMore,
+      syncEpoch: getSyncEpoch(db),
+      rejected,
+      acknowledged,
+    };
+    const available =
+      SYNC_MAX_RESPONSE_BYTES -
+      Buffer.byteLength(JSON.stringify(envelope)) -
+      1024;
+    if (available < 1024)
+      return c.json(
+        {
+          error: "sync_response_too_large",
+          detail: "Reduce the push batch size",
+        },
+        413,
+      );
+    try {
+      const page = pullSyncPage(
+        db,
+        userId,
+        since,
+        rsince,
+        body.need ?? [],
+        body.backfill,
+        {
+          count: SYNC_MAX_RESPONSE_OPS,
+          bytes: available,
+          scan: Math.min(SYNC_MAX_SCAN_ROWS, 2000),
+        },
+      );
+      return c.json({ ...page, ...envelope });
+    } catch (error) {
+      return c.json(
+        {
+          error: "sync_record_requires_repair",
+          detail: error instanceof Error ? error.message : String(error),
+        },
+        413,
+      );
     }
-
-    // Backfill: the client reports shared items it has no content for (access granted
-    // after it synced past those ops). Send the full subtree regardless of cursor —
-    // applyOp/record merge are idempotent, so re-sent ops are harmless.
-    if (!open && Array.isArray(body.need) && body.need.length) {
-      const roots = body.need.filter((id) => typeof id === 'string' && visible!.has(id));
-      const subtree = subtreeIds(db, roots);
-      if (subtree.size) {
-        // Filter by item_id in SQL (chunked IN batches under the ~999-param limit) rather
-        // than scanning the whole table and filtering in JS (DB-3). Each chunk is ordered
-        // by rowid; we re-sort the merged rows by rowid to preserve the exact global order
-        // the single ORDER BY rowid scan produced, then dedup in JS as before.
-        const BACKFILL_CHUNK = 500;
-        const subtreeArr = [...subtree];
-        // `ops.item_id` is a real column → filter directly.
-        const opRows: OpRow[] = [];
-        for (let i = 0; i < subtreeArr.length; i += BACKFILL_CHUNK) {
-          const batch = subtreeArr.slice(i, i + BACKFILL_CHUNK);
-          const ph = batch.map(() => '?').join(',');
-          opRows.push(
-            ...db.all<OpRow>(
-              `SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE item_id IN (${ph}) ORDER BY rowid`,
-              batch,
-            ),
-          );
-        }
-        opRows.sort((a, b) => a.seq - b.seq);
-        const seenOps = new Set(ops.map((o) => o.id));
-        for (const r of opRows) {
-          if (seenOps.has(r.id)) continue;
-          ops.push({
-            id: r.id,
-            item_id: r.item_id,
-            ts: Number(r.ts),
-            device_id: r.device_id,
-            fields: JSON.parse(r.fields),
-          });
-        }
-        // `record_ops` carry the owning item only in JSON `data.item_id`; match it via the
-        // indexed json_extract expression (idx_record_ops_item_id) instead of scanning.
-        const recRowsBackfill: RecRow[] = [];
-        for (let i = 0; i < subtreeArr.length; i += BACKFILL_CHUNK) {
-          const batch = subtreeArr.slice(i, i + BACKFILL_CHUNK);
-          const ph = batch.map(() => '?').join(',');
-          recRowsBackfill.push(
-            ...db.all<RecRow>(
-              `SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE json_extract(data, '$.item_id') IN (${ph}) ORDER BY rowid`,
-              batch,
-            ),
-          );
-        }
-        recRowsBackfill.sort((a, b) => a.seq - b.seq);
-        const seenRecs = new Set(recordOps.map((o) => o.id));
-        for (const r of recRowsBackfill) {
-          if (seenRecs.has(r.id)) continue;
-          const data = JSON.parse(r.data) as { item_id?: string };
-          // json_extract already matched item_id; re-check keeps the shape identical to the
-          // prior JS filter (and guards the theoretical NULL-item_id row the index skips).
-          if (data.item_id && subtree.has(data.item_id)) {
-            recordOps.push({
-              id: r.id,
-              entity: r.entity,
-              row_id: r.row_id,
-              ts: Number(r.ts),
-              device_id: r.device_id,
-              data,
-            });
-          }
-        }
-      }
-    }
-
-    // Tags are global shared vocabulary — always send the full set, ignoring the
-    // cursor, so every client converges regardless of sync history (cheap: few tags,
-    // and dedup avoids re-sending ones already included above).
-    if (!open) {
-      const seen = new Set(recordOps.map((o) => o.id));
-      for (const r of db.all<RecRow>(
-        "SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE entity = 'tag' ORDER BY rowid",
-      )) {
-        if (seen.has(r.id)) continue;
-        recordOps.push({
-          id: r.id,
-          entity: r.entity,
-          row_id: r.row_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          data: JSON.parse(r.data),
-        });
-      }
-    }
-
-    // Full user rows (already exclude password_hash) so peers can materialize the roster.
-    const users = listUsers(db);
-    return c.json({ ops, cursor, recordOps, rcursor, users, syncEpoch: getSyncEpoch(db) });
   });
 
   // ----- content-addressed blob storage ---------------------------------------
 
   const isHash = (h: string) => /^[a-f0-9]{64}$/.test(h);
 
+  // A4: a stored blob file whose bytes do not hash to its name is DIVERGED (corruption /
+  // operator error). It is never trusted: the read path quarantines it (renames it to
+  // `<hash>.diverged-<ts>` so it is kept for forensics but can never be served) and the
+  // read 404s; re-uploading the correct content repairs the reference. `true` when the
+  // file at BLOBS_DIR/hash exists AND its sha256 equals hash.
+  function storedBlobMatches(hash: string): boolean {
+    const path = join(BLOBS_DIR, hash);
+    if (!existsSync(path)) return false;
+    return (
+      createHash("sha256").update(readFileSync(path)).digest("hex") === hash
+    );
+  }
+
+  // A4: move a diverged blob file aside under a timestamped name. Returns true if a file
+  // was quarantined. Safe to call when the file is already gone (no-op).
+  function quarantineDivergedBlob(hash: string): boolean {
+    const path = join(BLOBS_DIR, hash);
+    if (!existsSync(path)) return false;
+    const quarantined = `${path}.diverged-${Date.now()}`;
+    renameSync(path, quarantined);
+    return true;
+  }
+
   // A blob is content-addressed, so the hash alone grants no access — gate reads on
   // whether the caller can see an item that references it. Otherwise any signed-in
   // user could fetch any other user's attachment by hash. Bots/open see everything
   // (matches `canSee`); a blob no live attachment references is treated as absent.
   function canReadBlob(userId: string, hash: string): boolean {
-    if (userId === 'local' || isBot(userId)) return true;
-    const rows = db.all<{ item_id: string | null; parent_type: string; parent_id: string }>(
-      'SELECT item_id, parent_type, parent_id FROM attachments WHERE hash = ? AND deleted = 0',
+    if (userId === "local" || isBot(userId)) return true;
+    const rows = db.all<{
+      item_id: string | null;
+      parent_type: string;
+      parent_id: string;
+    }>(
+      "SELECT item_id, parent_type, parent_id FROM attachments WHERE hash = ? AND deleted = 0",
       [hash],
     );
     const visible = visibleItemIds(db, userId);
@@ -1186,10 +1689,12 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       // item_id is denormalized (migration 4); resolve it for older rows.
       const itemId =
         r.item_id ??
-        (r.parent_type === 'item'
+        (r.parent_type === "item"
           ? r.parent_id
-          : db.get<{ item_id: string }>('SELECT item_id FROM comments WHERE id = ?', [r.parent_id])
-              ?.item_id);
+          : db.get<{ item_id: string }>(
+              "SELECT item_id FROM comments WHERE id = ?",
+              [r.parent_id],
+            )?.item_id);
       if (itemId && visible.has(itemId)) return true;
     }
     // Images embedded in a note body reference their blob only via Markdown
@@ -1214,11 +1719,12 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     return thumbRefs.some((r) => visible.has(r.id));
   }
 
-  api.get('/blobs/:hash', async (c) => {
-    const hash = c.req.param('hash');
-    if (!isHash(hash)) return c.json({ error: 'bad hash' }, 400);
+  api.get("/blobs/:hash", async (c) => {
+    const hash = c.req.param("hash");
+    if (!isHash(hash)) return c.json({ error: "bad hash" }, 400);
     // 404 (not 403) on no-access so the response never confirms a blob exists.
-    if (!canReadBlob(c.get('userId'), hash)) return c.json({ error: 'not found' }, 404);
+    if (!canReadBlob(c.get("userId"), hash))
+      return c.json({ error: "not found" }, 404);
     const path = join(BLOBS_DIR, hash);
     // Fetch-from-peer fallback (Phase 5): the blob is absent locally but the caller can
     // see a referencing item. If that hash belongs to a FEDERATED attachment (referenced
@@ -1227,208 +1733,395 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     // NON-federated missing blob has no such link, so `fetchFederatedBlob` returns null
     // and we fall through to the unchanged 404 — the local path is byte-for-byte the same.
     if (!existsSync(path)) {
-      const fetched = await fetchFederatedBlob(db, deliverToPeer, blobStore, hash);
+      const fetched = await fetchFederatedBlob(
+        db,
+        deliverToPeer,
+        blobStore,
+        hash,
+      );
       if (fetched) {
         return new Response(new Uint8Array(fetched), {
-          headers: { 'Content-Type': 'application/octet-stream' },
+          headers: { "Content-Type": "application/octet-stream" },
         });
       }
-      return c.json({ error: 'not found' }, 404);
+      return c.json({ error: "not found" }, 404);
     }
-    return new Response(new Uint8Array(readFileSync(path)), {
-      headers: { 'Content-Type': 'application/octet-stream' },
+    const buf = readFileSync(path);
+    // A4: verify the stored bytes actually hash to the claimed name before serving. A
+    // diverged (corrupt) file is NEVER served — it is quarantined and this read 404s;
+    // the reconcile reports it and a re-upload of the correct content repairs the reference.
+    if (createHash("sha256").update(buf).digest("hex") !== hash) {
+      quarantineDivergedBlob(hash);
+      return c.json({ error: "not found" }, 404);
+    }
+    return new Response(new Uint8Array(buf), {
+      headers: { "Content-Type": "application/octet-stream" },
     });
   });
 
-  api.on('HEAD', '/blobs/:hash', (c) => {
-    const hash = c.req.param('hash');
+  api.on("HEAD", "/blobs/:hash", (c) => {
+    const hash = c.req.param("hash");
     if (!isHash(hash)) return c.body(null, 400);
-    if (!canReadBlob(c.get('userId'), hash)) return c.body(null, 404);
+    if (!canReadBlob(c.get("userId"), hash)) return c.body(null, 404);
     return c.body(null, existsSync(join(BLOBS_DIR, hash)) ? 200 : 404);
   });
 
-  api.post('/blobs/:hash', async (c) => {
-    const hash = c.req.param('hash');
-    if (!isHash(hash)) return c.json({ error: 'bad hash' }, 400);
+  api.post("/blobs/:hash", async (c) => {
+    const hash = c.req.param("hash");
+    if (!isHash(hash)) return c.json({ error: "bad hash" }, 400);
     // Reject oversized uploads up front (Content-Length) to avoid buffering a huge
     // body, then again after reading (a client can lie about the header) (A4).
-    const declared = Number(c.req.header('content-length') ?? 0);
-    if (declared && declared > MAX_BLOB_BYTES) return c.json({ error: 'blob too large' }, 413);
+    const declared = Number(c.req.header("content-length") ?? 0);
+    if (declared && declared > MAX_BLOB_BYTES)
+      return c.json({ error: "blob too large" }, 413);
     const path = join(BLOBS_DIR, hash);
-    if (!existsSync(path)) {
-      const buf = Buffer.from(await c.req.arrayBuffer());
-      if (buf.length > MAX_BLOB_BYTES) return c.json({ error: 'blob too large' }, 413);
-      // Content addressing is only sound if the bytes actually hash to the claimed
-      // name — otherwise a client can poison a hash another client will later read.
-      const actual = createHash('sha256').update(buf).digest('hex');
-      if (actual !== hash) return c.json({ error: 'content does not match hash' }, 400);
-      // Per-workspace storage cap: reject a NEW blob that would push the workspace over
-      // its quota. Content-addressed dedup means an already-stored hash never gets here,
-      // so re-uploads don't count twice. 507 (not 413) so the client keeps it pending and
-      // retries once space frees up / the admin raises the cap — 413 is treated permanent.
-      const quota = effectiveBlobQuota(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id));
+    // A4: an existing file that is NOT diverged is a dedup no-op — don't buffer the body.
+    // A file that IS diverged (bytes don't hash to the name) is replaced below, so a
+    // re-upload of the correct content always lands and repairs the reference.
+    if (storedBlobMatches(hash)) return c.json({ ok: true });
+
+    const buf = Buffer.from(await c.req.arrayBuffer());
+    if (buf.length > MAX_BLOB_BYTES)
+      return c.json({ error: "blob too large" }, 413);
+    // Content addressing is only sound if the bytes actually hash to the claimed
+    // name — otherwise a client can poison a hash another client will later read.
+    const actual = createHash("sha256").update(buf).digest("hex");
+    if (actual !== hash)
+      return c.json({ error: "content does not match hash" }, 400);
+    // Per-workspace storage cap: reject a NEW blob that would push the workspace over
+    // its quota. Content-addressed dedup means an already-stored (correct) hash never
+    // gets here, so re-uploads don't count twice. 507 (not 413) so the client keeps it
+    // pending and retries once space frees up / the admin raises the cap — 413 is
+    // treated permanent. A diverged-file replacement is a repair (same reference), so it
+    // is not gated on the quota.
+    const isNew = !existsSync(path);
+    if (isNew) {
+      const quota = effectiveBlobQuota(
+        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+      );
       if (quota > 0) {
         const used = blobsDirBytes(BLOBS_DIR);
         if (used + buf.length > quota) {
-          return c.json({ error: 'workspace_storage_full', used, quota }, 507);
+          return c.json({ error: "workspace_storage_full", used, quota }, 507);
         }
       }
-      writeFileSync(path, buf);
     }
+    writeFileSync(path, buf);
     return c.json({ ok: true });
+  });
+
+  // A4 (A5-extended): admin reconcile of content-addressed blobs against EVERY
+  // reference that points at them — note images, row thumbnails, and attachments
+  // (blobReferenceInventory), not just attachments. For each live-referenced hash,
+  // report whether its content is (a) MISSING (metadata synced, content never
+  // uploaded) or (b) DIVERGED (stored bytes don't hash to the name). A problem is
+  // NEVER a silent 404: for each affected item owner without a pending notice, drop a
+  // `blob_content_missing` system notice carrying the recovery path (the device that
+  // still holds the bytes re-uploads). Returns the two hash lists.
+  api.post("/admin/blobs/reconcile", requireAdmin, (c) => {
+    // A5: verify EVERY reference the workspace has — note images, thumbnails, and
+    // attachments (blobReferenceInventory), not just attachments. Live refs only
+    // (includeDeleted:false): a trashed reference is protected by the trash retention
+    // window and is reconciled once its item is fully purged.
+    const { refs } = blobReferenceInventory(db, { includeDeleted: false });
+    const itemIdsByHash = new Map<string, Set<string>>();
+    for (const r of refs) {
+      const set = itemIdsByHash.get(r.hash) ?? new Set<string>();
+      set.add(r.itemId);
+      itemIdsByHash.set(r.hash, set);
+    }
+    const hashes = [...itemIdsByHash.keys()];
+    const missing: string[] = [];
+    const diverged: string[] = [];
+    const problemOwners = new Map<string, string[]>(); // owner -> problem hashes
+    const quarantinedNames = readdirSync(BLOBS_DIR, { withFileTypes: true })
+      .filter((d) => d.isFile())
+      .map((d) => d.name);
+    for (const hash of hashes) {
+      const path = join(BLOBS_DIR, hash);
+      if (!existsSync(path)) {
+        // No content file. A quarantined `<hash>.diverged-*` file is evidence the content
+        // WAS stored but diverged (and was set aside on read) → report as diverged, not
+        // missing. Otherwise it was never uploaded → missing (content-pending).
+        if (quarantinedNames.some((n) => n.startsWith(`${hash}.diverged-`)))
+          diverged.push(hash);
+        else missing.push(hash);
+      } else if (!storedBlobMatches(hash)) {
+        diverged.push(hash);
+      } else {
+        continue; // healthy — referenced and verified
+      }
+      // Resolve the owners of the live items that reference this hash (all kinds).
+      const owners = new Set<string>();
+      for (const itemId of itemIdsByHash.get(hash) ?? []) {
+        const owner = db.get<{ owner_id: string | null }>(
+          "SELECT owner_id FROM items WHERE id = ?",
+          [itemId],
+        )?.owner_id;
+        if (owner) owners.add(owner);
+      }
+      for (const owner of owners) {
+        const list = problemOwners.get(owner) ?? [];
+        list.push(hash);
+        problemOwners.set(owner, list);
+      }
+    }
+    // One `blob_content_missing` notice per owner (idempotent: skip if one is already
+    // pending), so a repeated reconcile doesn't spam the owner.
+    for (const [owner, ownerHashes] of problemOwners) {
+      const already = db.get<{ x: number }>(
+        `SELECT 1 AS x FROM system_notices WHERE user_id = ? AND kind = 'blob_content_missing' AND state = 'pending' LIMIT 1`,
+        [owner],
+      );
+      if (already) continue;
+      createSystemNotice(db, ctx.serverDeviceId, owner, {
+        kind: "blob_content_missing",
+        title: "Attachment content is missing or corrupted",
+        body:
+          `Some file you attached could not be served: ${ownerHashes.join(", ")}. ` +
+          `The file's metadata is present but its content is ${diverged.length ? "corrupted or " : ""}not stored. ` +
+          `Re-upload the file from a device that still has it (open the attachment and re-save it) to restore it.`,
+        actions: [{ label: "Open attachments", url: "/tasks" }],
+      });
+    }
+    return c.json({ missing, diverged });
   });
 
   // ----- integration REST API (token- or human-authed) -----------------------
 
   function isBot(userId: string): boolean {
-    return userId !== 'local' && !!getUser(db, userId)?.is_bot;
+    return userId !== "local" && !!getUser(db, userId)?.is_bot;
   }
-  // Bots read everything; humans see only what they own or are shared on.
+  // Bots read everything; a human sees only what they can read (owned/ancestor or a share).
+  // The shared module's canReadItem is the single source of truth for read visibility (it is
+  // exactly equivalent to visibleItemIds.has for a human, and full access for local/bot).
   function canSee(userId: string, itemId: string): boolean {
-    return userId === 'local' || isBot(userId) || visibleItemIds(db, userId).has(itemId);
+    return canReadItem(db, sessionCredentialFor(userId), itemId);
   }
   function botAssigned(userId: string, itemId: string): boolean {
     return listAssigneesForItem(db, itemId).some((a) => a.user_id === userId);
   }
   function botMentioned(userId: string, itemId: string): boolean {
-    return listComments(db, itemId).some((c) => (c.mentions ?? []).includes(userId));
+    return listComments(db, itemId).some((c) =>
+      (c.mentions ?? []).includes(userId),
+    );
   }
 
-  api.get('/tasks', requireScope('tasks:read'), (c) => {
-    const userId = c.get('userId');
-    const visible = userId === 'local' || isBot(userId) ? null : visibleItemIds(db, userId);
-    let items = allItems(db).filter((i) => i.type === 'task' && (!visible || visible.has(i.id)));
-    switch (c.req.query('perspective')) {
-      case 'inbox':
-        items = inbox(items);
-        break;
-      case 'today':
-        items = today(items);
-        break;
-      case 'flagged':
-        items = flagged(items);
-        break;
+  api.get("/tasks", requireScope("tasks:read"), (c) => {
+    const userId = c.get("userId");
+    try {
+      return c.json(
+        taskPage(db, userId, userId === "local" || isBot(userId), {
+          projectIds: c.get("tokenProjectIds"),
+          perspective: c.req.query("perspective"),
+          project: c.req.query("project"),
+          status: c.req.query("status"),
+          limit: parseLimitParam(c.req.query("limit")),
+          offset: parsePageParam(
+            c.req.query("offset"),
+            Number.MAX_SAFE_INTEGER,
+          ),
+        }),
+      );
+    } catch (error) {
+      return c.json(
+        { error: "task_response_too_large", detail: String(error) },
+        413,
+      );
     }
-    const project = c.req.query('project');
-    if (project) items = items.filter((i) => i.parent_id === project);
-    const status = c.req.query('status');
-    if (status) items = items.filter((i) => i.status === status);
-    return c.json({ tasks: items });
   });
 
-  api.post('/tasks', requireScope('inbox:write'), async (c) => {
-    const userId = c.get('userId');
+  api.post("/tasks", requireScope("inbox:write"), async (c) => {
+    const userId = c.get("userId");
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!b.title || typeof b.title !== 'string') return c.json({ error: 'title required' }, 400);
+    if (!b.title || typeof b.title !== "string")
+      return c.json({ error: "title required" }, 400);
+    const createFields = {
+      title: b.title,
+      note: b.note ?? null,
+      parent_id: b.project_id ?? null,
+      due_date: b.due_date ?? null,
+      flagged: b.flagged ?? false,
+      priority: b.priority ?? 0,
+      metadata: b.metadata ?? null,
+    };
+    const shape = filterOpsByShape([
+      {
+        id: "rest",
+        item_id: "new",
+        ts: Date.now(),
+        device_id: "rest",
+        fields: createFields as ItemPatch,
+      },
+    ]);
+    if (shape.rejected.length)
+      return c.json({ error: "invalid_fields", detail: shape.rejected }, 400);
+    if (
+      checkDestination(db, sessionCredentialFor(userId), {
+        itemId: "new",
+        type: "task",
+        parentId: createFields.parent_id as string | null,
+      }) !== "ok"
+    )
+      return c.json({ error: "invalid_destination" }, 403);
     const item = createItem(db, serverDeviceId, {
       title: b.title,
       note: (b.note as string) ?? null,
       parentId: (b.project_id as string) ?? null,
-      ownerId: userId === 'local' ? null : userId,
+      ownerId: userId === "local" ? null : userId,
       dueDate: (b.due_date as string) ?? null,
       flagged: !!b.flagged,
-      priority: typeof b.priority === 'number' ? b.priority : 0,
+      priority: typeof b.priority === "number" ? b.priority : 0,
       metadata:
-        'metadata' in b
+        "metadata" in b
           ? ((b.metadata as string | Record<string, unknown> | null) ?? null)
           : undefined,
     });
     return c.json(item, 201);
   });
 
-  api.get('/tasks/:id', requireScope('tasks:read'), (c) => {
-    const item = getItem(db, c.req.param('id'));
-    if (!item || item.deleted || !canSee(c.get('userId'), item.id)) {
-      return c.json({ error: 'not found' }, 404);
+  api.get("/tasks/:id", requireScope("tasks:read"), (c) => {
+    const item = getItem(db, c.req.param("id"));
+    if (!item || item.deleted || !canSee(c.get("userId"), item.id)) {
+      return c.json({ error: "not found" }, 404);
     }
     return c.json(item);
   });
 
-  api.patch('/tasks/:id', requireScope('tasks:write'), async (c) => {
-    const id = c.req.param('id');
-    const userId = c.get('userId');
+  api.patch("/tasks/:id", requireScope("tasks:write"), async (c) => {
+    const id = c.req.param("id");
+    const userId = c.get("userId");
     const item = getItem(db, id);
-    if (!item || item.deleted || !canSee(userId, id)) return c.json({ error: 'not found' }, 404);
-    if (userId !== 'local' && !hasWriteAccess(db, id, userId)) {
-      return c.json({ error: 'forbidden' }, 403);
+    if (!item || item.deleted || !canSee(userId, id))
+      return c.json({ error: "not found" }, 404);
+    if (userId !== "local" && !hasWriteAccess(db, id, userId)) {
+      return c.json({ error: "forbidden" }, 403);
     }
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const patch: ItemPatch = {};
     const fields = [
-      'title',
-      'note',
-      'status',
-      'due_date',
-      'defer_date',
-      'flagged',
-      'priority',
-      'parent_id',
-      'geo',
-      'color',
-      'recurrence',
-      'review_interval',
-      'metadata',
+      "title",
+      "note",
+      "status",
+      "due_date",
+      "defer_date",
+      "flagged",
+      "priority",
+      "parent_id",
+      "geo",
+      "color",
+      "recurrence",
+      "review_interval",
+      "metadata",
     ] as const;
-    for (const k of fields) if (k in b) (patch as Record<string, unknown>)[k] = b[k];
-    if ('metadata' in patch) {
+    for (const k of fields)
+      if (k in b) (patch as Record<string, unknown>)[k] = b[k];
+    const shape = filterOpsByShape([
+      {
+        id: "rest",
+        item_id: id,
+        ts: Date.now(),
+        device_id: "rest",
+        fields: patch,
+      },
+    ]);
+    if (shape.rejected.length)
+      return c.json({ error: "invalid_fields", detail: shape.rejected }, 400);
+    if (
+      "parent_id" in patch &&
+      checkDestination(db, sessionCredentialFor(userId), {
+        itemId: id,
+        type: item.type,
+        parentId: patch.parent_id ?? null,
+      }) !== "ok"
+    )
+      return c.json({ error: "invalid_destination" }, 403);
+    if ("metadata" in patch) {
       const m = patch.metadata as unknown;
-      if (m != null && typeof m === 'object') {
+      if (m != null && typeof m === "object") {
         (patch as Record<string, unknown>).metadata = JSON.stringify(m);
-      } else if (m === '') {
+      } else if (m === "") {
         patch.metadata = null;
       }
     }
     // A raw status patch must keep completed_at in step (mirrors setCompleted) —
     // completed-item age logic (e.g. the purge feature) relies on the stamp.
-    if (typeof patch.status === 'string' && patch.status !== item.status) {
-      patch.completed_at = patch.status === 'done' ? new Date().toISOString() : null;
+    if (typeof patch.status === "string" && patch.status !== item.status) {
+      patch.completed_at =
+        patch.status === "done" ? new Date().toISOString() : null;
     }
     updateItem(db, serverDeviceId, id, patch);
     return c.json(getItem(db, id));
   });
 
-  api.post('/tasks/:id/complete', requireScope('tasks:write'), (c) => {
-    const id = c.req.param('id');
-    const userId = c.get('userId');
+  api.post("/tasks/:id/complete", requireScope("tasks:write"), (c) => {
+    const id = c.req.param("id");
+    const userId = c.get("userId");
     const item = getItem(db, id);
-    if (!item || item.deleted || !canSee(userId, id)) return c.json({ error: 'not found' }, 404);
+    if (!item || item.deleted || !canSee(userId, id))
+      return c.json({ error: "not found" }, 404);
     // Bots may complete only tasks assigned to them; humans need write access.
     const mayComplete =
-      userId === 'local' ||
-      (isBot(userId) ? botAssigned(userId, id) : hasWriteAccess(db, id, userId));
-    if (!mayComplete) return c.json({ error: 'forbidden' }, 403);
-    setCompleted(db, serverDeviceId, id, c.req.query('done') !== 'false');
+      userId === "local" ||
+      (isBot(userId)
+        ? botAssigned(userId, id)
+        : hasWriteAccess(db, id, userId));
+    if (!mayComplete) return c.json({ error: "forbidden" }, 403);
+    setCompleted(db, serverDeviceId, id, c.req.query("done") !== "false");
     return c.json(getItem(db, id));
   });
 
   // Post a comment as the authenticated user (lets agentic frameworks reply).
-  api.post('/tasks/:id/comments', requireScope('tasks:write'), async (c) => {
-    const id = c.req.param('id');
-    const userId = c.get('userId');
+  api.post("/tasks/:id/comments", requireScope("tasks:write"), async (c) => {
+    const id = c.req.param("id");
+    const userId = c.get("userId");
     const item = getItem(db, id);
-    if (!item || item.deleted || !canSee(userId, id)) return c.json({ error: 'not found' }, 404);
+    if (!item || item.deleted || !canSee(userId, id))
+      return c.json({ error: "not found" }, 404);
     // A bot may only comment where it's assigned or @mentioned.
-    if (isBot(userId) && !botAssigned(userId, id) && !botMentioned(userId, id)) {
-      return c.json({ error: 'agent not assigned or mentioned on this task' }, 403);
+    if (
+      isBot(userId) &&
+      !botAssigned(userId, id) &&
+      !botMentioned(userId, id)
+    ) {
+      return c.json(
+        { error: "agent not assigned or mentioned on this task" },
+        403,
+      );
     }
     const b = (await c.req.json().catch(() => ({}))) as { body?: string };
-    if (!b.body) return c.json({ error: 'body required' }, 400);
+    if (!b.body) return c.json({ error: "body required" }, 400);
     const comment = addComment(db, serverDeviceId, {
       itemId: id,
-      authorId: userId === 'local' ? null : userId,
+      authorId: userId === "local" ? null : userId,
       body: b.body,
     });
     return c.json(comment, 201);
   });
 
   // Attach a file to a task (upload the blob to /api/blobs/:hash first).
-  api.post('/tasks/:id/attachments', requireScope('tasks:write'), async (c) => {
-    const id = c.req.param('id');
-    const userId = c.get('userId');
+  api.post("/tasks/:id/attachments", requireScope("tasks:write"), async (c) => {
+    const id = c.req.param("id");
+    const userId = c.get("userId");
     const item = getItem(db, id);
-    if (!item || item.deleted || !canSee(userId, id)) return c.json({ error: 'not found' }, 404);
-    if (isBot(userId) && !botAssigned(userId, id) && !botMentioned(userId, id)) {
-      return c.json({ error: 'agent not assigned or mentioned on this task' }, 403);
+    if (!item || item.deleted || !canSee(userId, id))
+      return c.json({ error: "not found" }, 404);
+    if (
+      isBot(userId) &&
+      !botAssigned(userId, id) &&
+      !botMentioned(userId, id)
+    ) {
+      return c.json(
+        { error: "agent not assigned or mentioned on this task" },
+        403,
+      );
+    }
+    if (
+      userId !== "local" &&
+      !isBot(userId) &&
+      !hasWriteAccess(db, id, userId)
+    ) {
+      return c.json({ error: "forbidden" }, 403);
     }
     const b = (await c.req.json().catch(() => ({}))) as {
       filename?: string;
@@ -1436,22 +2129,23 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       size?: number;
       hash?: string;
     };
-    if (!b.filename || !b.hash) return c.json({ error: 'filename and hash required' }, 400);
+    if (!b.filename || !b.hash)
+      return c.json({ error: "filename and hash required" }, 400);
     const att = addAttachment(db, serverDeviceId, {
-      parentType: 'item',
+      parentType: "item",
       parentId: id,
       itemId: id,
       filename: b.filename,
       mimeType: b.mimeType ?? null,
       size: b.size ?? 0,
       hash: b.hash,
-      createdBy: userId === 'local' ? null : userId,
+      createdBy: userId === "local" ? null : userId,
     });
     return c.json(att, 201);
   });
 
   // ----- natural-language agent API (/api/agent/*) ----------------------------
-  // Granular, context-small primitives a tiny LLM (via Hermes) composes for NL task
+  // Granular, context-small primitives a tiny LLM (via an external client) composes for NL task
   // management. Mounts on the same `api` router, inheriting its auth middleware.
   const agentApiDeps = buildAgentApiDeps(db, serverDeviceId, {
     multiTenant: !!BASE_DOMAIN,
@@ -1461,69 +2155,121 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
   // In-app NL commands (Stage 2): the Add box posts here when the first word matches a
   // configured keyword. Runs as the user, so created items are owned by and visible to them.
-  api.get('/agent/config', requireScope('tasks:read'), (c) => {
+  api.get("/agent/config", requireScope("tasks:read"), (c) => {
     const nl = getNlSettings(db);
     return c.json({ enabled: nl.enabled, keywords: nl.keywords });
   });
 
-  api.post('/agent/command', requireScope('inbox:write'), async (c) => {
-    const userId = c.get('userId');
+  api.post("/agent/command", requireScope("inbox:write"), async (c) => {
+    const userId = c.get("userId");
     // Each command drives up to MAX_ITERS billable LLM round-trips, so cap how many a
     // single user/token can fire per hour — a leaked token can't run up unbounded cost.
     if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
-      return c.json({ error: 'too many commands, try later' }, 429);
+      return c.json({ error: "too many commands, try later" }, 429);
     }
     const b = (await c.req.json().catch(() => ({}))) as {
       text?: string;
       timezone?: string;
       currentProjectId?: string | null;
+      // Confirmation flow for parked share/assign: `confirm` echoes back a previous response's
+      // `pending` verbatim, `skip` the mutations that first turn already applied (so the re-run
+      // doesn't duplicate them). Both are shape-validated; the loop still only executes a
+      // confirmed action on exact deep-equal match.
+      confirm?: Array<{ tool?: string; args?: Record<string, unknown> }>;
+      skip?: Array<{ name?: string; args?: Record<string, unknown> }>;
     };
-    const text = (b.text ?? '').trim();
-    if (!text) return c.json({ error: 'text required' }, 400);
+    const text = (b.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
+    const confirm = Array.isArray(b.confirm)
+      ? b.confirm.filter(
+          (
+            x,
+          ): x is { tool: "share" | "assign"; args: Record<string, unknown> } =>
+            !!x &&
+            typeof x === "object" &&
+            (x.tool === "share" || x.tool === "assign") &&
+            !!x.args &&
+            typeof x.args === "object" &&
+            !Array.isArray(x.args),
+        )
+      : undefined;
+    const skip = Array.isArray(b.skip)
+      ? b.skip.filter(
+          (x): x is { name: string; args: Record<string, unknown> } =>
+            !!x &&
+            typeof x === "object" &&
+            typeof x.name === "string" &&
+            MUTATING_TOOLS.has(x.name) &&
+            !!x.args &&
+            typeof x.args === "object" &&
+            !Array.isArray(x.args),
+        )
+      : undefined;
     if (b.timezone) setUserTimezone(db, userId, b.timezone);
     const nl = getNlSettings(db);
-    const agent = nl.enabled && nl.agentId ? resolveNlAgent(db, nl.agentId, hostAvailable()) : undefined;
-    if (!agent || !agent.enabled || agent.kind === 'webhook') {
-      return c.json({ error: 'nl_not_configured' }, 503);
+    const agent =
+      nl.enabled && nl.agentId
+        ? resolveNlAgent(db, nl.agentId, hostAvailable())
+        : undefined;
+    if (!agent || !agent.enabled || agent.kind === "webhook") {
+      return c.json({ error: "nl_not_configured" }, 503);
     }
     if (isHostAgent(agent)) {
       const cfg = getHostLmConfig();
       const rl = cfg ? checkHostRateLimit(ctx.id, cfg) : { ok: false };
-      if (!rl.ok) return c.json({ reply: rl.message ?? 'Try again later.', executed: [], usage: { input: 0, output: 0 } });
+      if (!rl.ok)
+        return c.json({
+          reply: rl.message ?? "Try again later.",
+          executed: [],
+          usage: { input: 0, output: 0 },
+        });
     }
     // The host operator's own endpoint is trusted regardless of this workspace's SSRF flag.
     const allowPrivateForCall = isHostAgent(agent) ? true : allowPrivate();
     try {
-      const r = await runAgentCommand(agentApiDeps, agent, userId, text, allowPrivateForCall, {
-        now: new Date(),
-        timezone: b.timezone ?? getUserTimezone(db, userId),
-        currentProjectId: b.currentProjectId ?? null,
-      });
+      const r = await runAgentCommand(
+        agentApiDeps,
+        agent,
+        userId,
+        text,
+        allowPrivateForCall,
+        {
+          now: new Date(),
+          timezone: b.timezone ?? getUserTimezone(db, userId),
+          currentProjectId: b.currentProjectId ?? null,
+          ...(confirm ? { confirmed: confirm } : {}),
+          ...(skip ? { alreadySucceeded: skip } : {}),
+        },
+      );
       return c.json(r);
     } catch (e) {
       // Log the detail server-side; don't return it — provider exception messages can
       // carry upstream URLs / error bodies that the API caller shouldn't see.
-      console.error('[carbon] nl command failed:', e);
-      return c.json({ error: 'command_failed' }, 502);
+      console.error("[carbon] nl command failed:", e);
+      return c.json({ error: "command_failed" }, 502);
     }
   });
 
   // NL → advanced filter: the filter builder posts a description, the configured agent
   // returns a FilterExpr tree (validated client-side before it's applied). Reuses the
   // same per-user hourly cap as commands.
-  api.post('/agent/filter', requireScope('tasks:read'), async (c) => {
-    const userId = c.get('userId');
+  api.post("/agent/filter", requireScope("tasks:read"), async (c) => {
+    const userId = c.get("userId");
     if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
-      return c.json({ error: 'too many requests, try later' }, 429);
+      return c.json({ error: "too many requests, try later" }, 429);
     }
-    const b = (await c.req.json().catch(() => ({}))) as { text?: string; timezone?: string };
-    const text = (b.text ?? '').trim();
-    if (!text) return c.json({ error: 'text required' }, 400);
+    const b = (await c.req.json().catch(() => ({}))) as {
+      text?: string;
+      timezone?: string;
+    };
+    const text = (b.text ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
     if (b.timezone) setUserTimezone(db, userId, b.timezone);
     const nl = getNlSettings(db);
-    const agent = nl.enabled && nl.agentId ? getAgent(db, nl.agentId) : undefined;
-    if (!agent || !agent.enabled || agent.kind === 'webhook') {
-      return c.json({ error: 'nl_not_configured' }, 503);
+    const agent =
+      nl.enabled && nl.agentId ? getAgent(db, nl.agentId) : undefined;
+    if (!agent || !agent.enabled || agent.kind === "webhook") {
+      return c.json({ error: "nl_not_configured" }, 503);
     }
     try {
       const r = await runFilterCommand(
@@ -1537,8 +2283,8 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       );
       return c.json({ expr: r.expr });
     } catch (e) {
-      console.error('[carbon] nl filter failed:', e);
-      return c.json({ error: 'filter_failed' }, 502);
+      console.error("[carbon] nl filter failed:", e);
+      return c.json({ error: "filter_failed" }, 502);
     }
   });
 
@@ -1546,43 +2292,62 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // applies the result, the server writes nothing), so tasks:read is enough. Shares the NL
   // command cap, and — unlike /agent/filter — may run on the host model, since nothing the
   // model returns is parsed or executed.
-  api.post('/agent/recipe/optimise', requireScope('tasks:read'), async (c) => {
-    const userId = c.get('userId');
+  api.post("/agent/recipe/optimise", requireScope("tasks:read"), async (c) => {
+    const userId = c.get("userId");
     if (!hitAllowed(nlCommandHits, userId, NL_COMMAND_PER_USER_HOUR)) {
-      return c.json({ error: 'too many requests, try later' }, 429);
+      return c.json({ error: "too many requests, try later" }, 429);
     }
-    const b = (await c.req.json().catch(() => ({}))) as { body?: string; convention?: string };
-    const text = (b.body ?? '').trim();
-    if (!text) return c.json({ error: 'text required' }, 400);
+    const b = (await c.req.json().catch(() => ({}))) as {
+      body?: string;
+      convention?: string;
+    };
+    const text = (b.body ?? "").trim();
+    if (!text) return c.json({ error: "text required" }, 400);
     // A whole recipe is a few KB at most; cap it rather than forward an unbounded prompt.
-    if (text.length > RECIPE_MAX_CHARS) return c.json({ error: 'too long' }, 413);
+    if (text.length > RECIPE_MAX_CHARS)
+      return c.json({ error: "too long" }, 413);
     const convention: MeasureConvention =
-      b.convention === 'us' || b.convention === 'metric' || b.convention === 'au' ? b.convention : 'au';
+      b.convention === "us" ||
+      b.convention === "metric" ||
+      b.convention === "au"
+        ? b.convention
+        : "au";
     const nl = getNlSettings(db);
-    const agent = nl.enabled && nl.agentId ? resolveNlAgent(db, nl.agentId, hostAvailable()) : undefined;
-    if (!agent || !agent.enabled || agent.kind === 'webhook') {
-      return c.json({ error: 'nl_not_configured' }, 503);
+    const agent =
+      nl.enabled && nl.agentId
+        ? resolveNlAgent(db, nl.agentId, hostAvailable())
+        : undefined;
+    if (!agent || !agent.enabled || agent.kind === "webhook") {
+      return c.json({ error: "nl_not_configured" }, 503);
     }
     if (isHostAgent(agent)) {
       const cfg = getHostLmConfig();
       const rl = cfg ? checkHostRateLimit(ctx.id, cfg) : { ok: false };
-      if (!rl.ok) return c.json({ error: rl.message ?? 'Try again later.' }, 429);
+      if (!rl.ok)
+        return c.json({ error: rl.message ?? "Try again later." }, 429);
     }
     // The host operator's own endpoint is trusted regardless of this workspace's SSRF flag.
     const allowPrivateForCall = isHostAgent(agent) ? true : allowPrivate();
     try {
-      const r = await runRecipeOptimise(agentApiDeps, agent, userId, text, allowPrivateForCall, convention);
+      const r = await runRecipeOptimise(
+        agentApiDeps,
+        agent,
+        userId,
+        text,
+        allowPrivateForCall,
+        convention,
+      );
       // An empty completion (truncation, refusal, a model that only emitted reasoning) would
       // wipe the user's note if the client applied it — fail instead.
-      if (!r.text.trim()) return c.json({ error: 'optimise_failed' }, 502);
+      if (!r.text.trim()) return c.json({ error: "optimise_failed" }, 502);
       return c.json({ text: r.text, usage: r.usage });
     } catch (e) {
-      console.error('[carbon] recipe optimise failed:', e);
+      console.error("[carbon] recipe optimise failed:", e);
       // Distinguish "we hung up on a model that was still working" from "the provider
       // errored" — they need different fixes (raise the budget / a shorter recipe, vs
       // check the agent), and a bare 502 sent the user looking in the wrong place.
-      if (isTimeoutError(e)) return c.json({ error: 'optimise_timeout' }, 504);
-      return c.json({ error: 'optimise_failed' }, 502);
+      if (isTimeoutError(e)) return c.json({ error: "optimise_timeout" }, 504);
+      return c.json({ error: "optimise_failed" }, 502);
     }
   });
 
@@ -1590,10 +2355,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // The bot is per-server; these let the signed-in user connect their *own* chat. The pairing
   // code lives in the control DB keyed by (tenant, user); the user sends it to the bot. Open
   // mode links the synthetic 'local' user. The tenant subdomain is null for self-host ('default').
-  const tgSubdomain = (): string | null => (ctx.id === 'default' ? null : ctx.subdomain);
+  const tgSubdomain = (): string | null =>
+    ctx.id === "default" ? null : ctx.subdomain;
 
-  api.get('/telegram', requireScope('tasks:read'), (c) => {
-    const link = getTelegramLinkForUser(controlDb, ctx.id, c.get('userId'));
+  api.get("/telegram", requireScope("tasks:read"), (c) => {
+    const link = getTelegramLinkForUser(controlDb, ctx.id, c.get("userId"));
     return c.json({
       enabled: !!TELEGRAM_BOT_TOKEN,
       botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null,
@@ -1601,9 +2367,10 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     });
   });
 
-  api.post('/telegram/code', requireScope('tasks:read'), async (c) => {
-    if (!TELEGRAM_BOT_TOKEN) return c.json({ error: 'telegram_not_configured' }, 503);
-    const userId = c.get('userId');
+  api.post("/telegram/code", requireScope("tasks:read"), async (c) => {
+    if (!TELEGRAM_BOT_TOKEN)
+      return c.json({ error: "telegram_not_configured" }, 503);
+    const userId = c.get("userId");
     const b = (await c.req.json().catch(() => ({}))) as { timezone?: string };
     // Piggyback the browser's zone here — it's the one browser round-trip every Telegram
     // user makes, so the bot can resolve "tomorrow night" without needing a separate setting.
@@ -1613,11 +2380,15 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       subdomain: tgSubdomain(),
       userId,
     });
-    return c.json({ code, expiresAt, botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null });
+    return c.json({
+      code,
+      expiresAt,
+      botUsername: telegramBot?.botUsername ?? TELEGRAM_BOT_USERNAME ?? null,
+    });
   });
 
-  api.delete('/telegram', requireScope('tasks:read'), (c) => {
-    const removed = unlinkTelegramUser(controlDb, ctx.id, c.get('userId'));
+  api.delete("/telegram", requireScope("tasks:read"), (c) => {
+    const removed = unlinkTelegramUser(controlDb, ctx.id, c.get("userId"));
     return c.json({ ok: true, removed });
   });
 
@@ -1627,23 +2398,24 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // can't be actioned by a third party), so both routes reject token auth — the
   // same human-session-only posture as requireAdmin.
   const requireSession: MiddlewareHandler<Env> = async (c, next) => {
-    if (c.get('authMethod') === 'token') return c.json({ error: 'forbidden' }, 403);
+    if (c.get("authMethod") === "token")
+      return c.json({ error: "forbidden" }, 403);
     return next();
   };
 
-  api.get('/notices', requireSession, (c) => {
-    const userId = c.get('userId');
+  api.get("/notices", requireSession, (c) => {
+    const userId = c.get("userId");
     return c.json({ notices: listOpenNotices(db, userId) });
   });
 
-  api.post('/notices/:id/act', requireSession, async (c) => {
-    const userId = c.get('userId');
-    const notice = getNotice(db, c.req.param('id'));
-    if (!notice) return c.json({ error: 'not found' }, 404);
+  api.post("/notices/:id/act", requireSession, async (c) => {
+    const userId = c.get("userId");
+    const notice = getNotice(db, c.req.param("id"));
+    if (!notice) return c.json({ error: "not found" }, 404);
     // Gate 3 posture: only the addressed user may act on their own notice.
-    if (notice.user_id !== userId) return c.json({ error: 'forbidden' }, 403);
+    if (notice.user_id !== userId) return c.json({ error: "forbidden" }, 403);
     const b = (await c.req.json().catch(() => ({}))) as { action?: string };
-    const action = b.action ?? 'dismiss';
+    const action = b.action ?? "dismiss";
     const resolved = await actOnNotice(db, serverDeviceId, notice, action);
     return c.json({ notice: resolved });
   });
@@ -1654,48 +2426,97 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   registerFederationConfigRoutes(api, {
     db,
     resolveMode: () =>
-      resolveFederationMode(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
+      resolveFederationMode(
+        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+      ),
     sessionAuth: requireSession,
     adminAuth: requireAdmin,
     // Supplied so revoking an outbound (owner) link sends a final retract-all to the
     // grantee before tearing the link down (the grantee drops the whole shared subtree).
     deliverToPeer,
     // Our identity for the mutual-whitelist check (how a peer stores US on its list).
-    myLabel: ctx.subdomain || 'default',
-    myBaseUrl: BASE_DOMAIN && ctx.subdomain ? `${ctx.subdomain}.${BASE_DOMAIN}` : undefined,
+    myLabel: ctx.subdomain || "default",
+    myBaseUrl:
+      BASE_DOMAIN && ctx.subdomain
+        ? `${ctx.subdomain}.${BASE_DOMAIN}`
+        : undefined,
     // Same-host peer access for the directory route's mutual-whitelist gate, resolved
     // in-process via the registry (no network hop). `registry` is referenced lazily —
     // this closure only runs at request time, well after module init.
     sameHostPeer: (peerSubdomain) => makeSameHostPeer(peerSubdomain),
   });
 
+  // Personal keys: members manage their own; admins can disable member creation.
+  api.get("/keys", requireHumanSession, (c) => c.json({ tokens: listTokens(db, c.get("userId")),
+    membersAllowed: db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'member_api_keys'")?.value !== "disabled" }));
+  api.put("/admin/key-policy", requireAdmin, async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    if (!body || typeof body.membersAllowed !== "boolean") return c.json({ error: "membersAllowed must be boolean" }, 400);
+    db.run("INSERT INTO meta (key, value) VALUES ('member_api_keys', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [body.membersAllowed ? "enabled" : "disabled"]);
+    return c.json({ ok: true });
+  });
+  api.post("/keys", requireHumanSession, async (c) => {
+    const uid = c.get("userId");
+    if (c.get("role") !== "admin" && db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'member_api_keys'")?.value === "disabled")
+      return c.json({ error: "Member API key creation is disabled by the administrator." }, 403);
+    const b = await c.req.json().catch(() => ({}));
+    if (!b || typeof b !== "object" || Array.isArray(b)) return c.json({ error: "Invalid key request" }, 400);
+    if (typeof b.name !== "string" || !b.name.trim() || b.name.length > 100 ||
+        !Array.isArray(b.scopes) || !b.scopes.length || b.scopes.some((s: unknown) => !["tasks:read", "tasks:write", "inbox:write"].includes(String(s))))
+      return c.json({ error: "Invalid key name or scopes" }, 400);
+    if (b.expiresAt != null && (typeof b.expiresAt !== "string" || !(Date.parse(b.expiresAt) > Date.now())))
+      return c.json({ error: "Expiry must be a future date" }, 400);
+    const roots = b.projectIds ?? null;
+    if (roots !== null && (!Array.isArray(roots) || !roots.length || roots.length > 100 || roots.some((id: unknown) =>
+      typeof id !== "string" || getItem(db, id)?.type !== "project" || !canSee(uid, id))))
+      return c.json({ error: "Select accessible projects" }, 400);
+    if ((db.get<{ n: number }>("SELECT count(*) AS n FROM api_tokens WHERE user_id = ? AND revoked = 0", [uid])?.n ?? 0) >= 100)
+      return c.json({ error: "Revoke unused keys before creating more" }, 429);
+    const result = createToken(db, { userId: uid, name: b.name.trim(), scopes: b.scopes,
+      expiresAt: b.expiresAt ? new Date(b.expiresAt).toISOString() : null, projectIds: roots, restOnly: true });
+    return c.json({ token: result.token, ...result.row }, 201);
+  });
+  api.delete("/keys/:id", requireHumanSession, (c) => {
+    const row = db.get<{ user_id: string }>("SELECT user_id FROM api_tokens WHERE id = ?", [c.req.param("id")]);
+    if (!row || row.user_id !== c.get("userId")) return c.json({ error: "not found" }, 404);
+    revokeToken(db, c.req.param("id"));
+    return c.json({ ok: true });
+  });
+
   // ----- admin: API tokens ----------------------------------------------------
 
-  api.get('/admin/tokens', requireAdmin, (c) => c.json({ tokens: listTokens(db) }));
+  api.get("/admin/tokens", requireAdmin, (c) =>
+    c.json({ tokens: listTokens(db) }),
+  );
 
-  api.post('/admin/tokens', requireAdmin, async (c) => {
+  api.post("/admin/tokens", requireAdmin, async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as {
       name?: string;
       scopes?: string[];
       userId?: string;
     };
-    if (!b.name) return c.json({ error: 'name required' }, 400);
+    if (!b.name) return c.json({ error: "name required" }, 400);
     const scopes =
       Array.isArray(b.scopes) && b.scopes.length
         ? b.scopes
-        : ['tasks:read', 'tasks:write', 'inbox:write'];
-    const result = createToken(db, { userId: b.userId || c.get('userId'), name: b.name, scopes });
+        : ["tasks:read", "tasks:write", "inbox:write"];
+    const result = createToken(db, {
+      userId: b.userId || c.get("userId"),
+      name: b.name,
+      scopes,
+    });
     return c.json({ token: result.token, ...result.row }, 201);
   });
 
-  api.delete('/admin/tokens/:id', requireAdmin, (c) => {
-    revokeToken(db, c.req.param('id'));
+  api.delete("/admin/tokens/:id", requireAdmin, (c) => {
+    revokeToken(db, c.req.param("id"));
     return c.json({ ok: true });
   });
 
-  // ----- admin: LLM agents (Hermes / OpenAI / Anthropic bot users) -------------
+  // ----- admin: LLM agents and generic external webhooks -------------
 
-  api.get('/admin/agents', requireAdmin, (c) => {
+  api.get("/admin/agents", requireAdmin, (c) => {
     const agents = listAgents(db);
     const hostCfg = getHostLmConfig();
     if (hostCfg && hostAvailable()) {
@@ -1705,20 +2526,22 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     return c.json({ agents });
   });
 
-  api.post('/admin/agents', requireAdmin, async (c) => {
+  api.post("/admin/agents", requireAdmin, async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as {
       name?: string;
       username?: string;
-      kind?: 'openai' | 'anthropic' | 'webhook';
+      kind?: "openai" | "anthropic" | "webhook";
       endpoint?: string;
       apiKey?: string;
       model?: string;
       systemPrompt?: string;
     };
     if (!b.name || !b.username || !b.kind) {
-      return c.json({ error: 'name, username, kind required' }, 400);
+      return c.json({ error: "name, username, kind required" }, 400);
     }
-    if (getUserByUsername(db, b.username)) return c.json({ error: 'username already exists' }, 409);
+    if (!["openai", "anthropic", "webhook"].includes(b.kind)) return c.json({ error: "Unsupported provider" }, 400);
+    if (getUserByUsername(db, b.username))
+      return c.json({ error: "username already exists" }, 409);
     const agent = createAgent(db, {
       name: b.name,
       username: b.username,
@@ -1728,34 +2551,28 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       model: b.model,
       systemPrompt: b.systemPrompt,
     });
-    // Agentic frameworks act back via the API, so issue them a token (shown once).
-    let token: string | undefined;
-    if (b.kind === 'webhook') {
-      token = createToken(db, {
-        userId: agent.user_id,
-        name: `${b.name} (agent)`,
-        scopes: ['tasks:read', 'tasks:write', 'inbox:write'],
-      }).token;
-    }
-    return c.json({ ...agent, token }, 201);
+    // External clients create scoped personal keys separately; do not mint a new
+    // broad bot credential as a side effect of configuring an endpoint.
+    return c.json(agent, 201);
   });
 
-  api.patch('/admin/agents/:id', requireAdmin, async (c) => {
-    const id = c.req.param('id');
-    if (!getAgent(db, id)) return c.json({ error: 'not found' }, 404);
+  api.patch("/admin/agents/:id", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    if (!getAgent(db, id)) return c.json({ error: "not found" }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (b.kind != null && b.kind !== "openai" && b.kind !== "anthropic" && b.kind !== "webhook") return c.json({ error: "Unsupported model provider" }, 400);
     updateAgent(db, id, b);
     return c.json(listAgents(db).find((a) => a.id === id) ?? {});
   });
 
-  api.post('/admin/agents/:id/test', requireAdmin, async (c) => {
-    const result = await testAgent(db, c.req.param('id'), allowPrivate());
+  api.post("/admin/agents/:id/test", requireAdmin, async (c) => {
+    const result = await testAgent(db, c.req.param("id"), allowPrivate());
     return c.json(result);
   });
 
-  api.delete('/admin/agents/:id', requireAdmin, (c) => {
-    const agent = getAgent(db, c.req.param('id'));
-    deleteAgent(db, c.req.param('id'));
+  api.delete("/admin/agents/:id", requireAdmin, (c) => {
+    const agent = getAgent(db, c.req.param("id"));
+    deleteAgent(db, c.req.param("id"));
     if (agent) {
       softDeleteUser(db, agent.user_id);
       revokeAllSessions(db, agent.user_id);
@@ -1771,9 +2588,9 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     return { agent_id: nl.agentId, keywords: nl.keywords, enabled: nl.enabled };
   };
 
-  api.get('/admin/nl-settings', requireAdmin, (c) => c.json(nlSettingsJson()));
+  api.get("/admin/nl-settings", requireAdmin, (c) => c.json(nlSettingsJson()));
 
-  api.patch('/admin/nl-settings', requireAdmin, async (c) => {
+  api.patch("/admin/nl-settings", requireAdmin, async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as {
       agent_id?: string | null;
       keywords?: string[];
@@ -1781,96 +2598,109 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     };
     if (b.agent_id) {
       const a = resolveNlAgent(db, b.agent_id, hostAvailable());
-      if (!a || a.kind === 'webhook') return c.json({ error: 'pick a direct-LLM agent' }, 400);
+      if (!a || a.kind === "webhook")
+        return c.json({ error: "pick a direct-LLM agent" }, 400);
     }
-    const patch: { agentId?: string | null; keywords?: string[]; enabled?: boolean } = {};
+    const patch: {
+      agentId?: string | null;
+      keywords?: string[];
+      enabled?: boolean;
+    } = {};
     if (b.agent_id !== undefined) patch.agentId = b.agent_id || null;
-    if (Array.isArray(b.keywords)) patch.keywords = b.keywords.filter((k) => typeof k === 'string');
-    if (typeof b.enabled === 'boolean') patch.enabled = b.enabled;
+    if (Array.isArray(b.keywords))
+      patch.keywords = b.keywords.filter((k) => typeof k === "string");
+    if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
     setNlSettings(db, patch);
     return c.json(nlSettingsJson());
   });
 
-  api.get('/admin/nl-usage', requireAdmin, (c) => c.json(getAgentUsage(db)));
+  api.get("/admin/nl-usage", requireAdmin, (c) => c.json(getAgentUsage(db)));
 
   // ----- admin: per-project CalDAV two-way sync --------------------------------
   // Config is server-only (holds the CalDAV password) and keyed by the project's
   // item id — deliberately NOT part of the CRDT sync. Requires a configured server.
-  const requireProject = (c: import('hono').Context) => {
-    const id = c.req.param('id');
+  const requireProject = (c: import("hono").Context) => {
+    const id = c.req.param("id");
     if (!id) return null;
     const proj = getItem(db, id);
-    return proj && proj.type === 'project' && !proj.deleted ? proj : null;
+    return proj && proj.type === "project" && !proj.deleted ? proj : null;
   };
 
-  api.get('/projects/:id/caldav', requireAdmin, (c) => {
-    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
-    const row = getCaldavConfigRow(db, c.req.param('id'));
+  api.get("/projects/:id/caldav", requireAdmin, (c) => {
+    if (!requireProject(c)) return c.json({ error: "project not found" }, 404);
+    const row = getCaldavConfigRow(db, c.req.param("id"));
     return c.json({ config: row ? publicCaldavConfig(row) : null });
   });
 
-  api.put('/projects/:id/caldav', requireAdmin, async (c) => {
-    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+  api.put("/projects/:id/caldav", requireAdmin, async (c) => {
+    if (!requireProject(c)) return c.json({ error: "project not found" }, 404);
     const b = (await c.req.json().catch(() => ({}))) as CaldavConfigPatch;
-    const row = upsertCaldavConfig(db, c.req.param('id'), b);
+    const row = upsertCaldavConfig(db, c.req.param("id"), b);
     return c.json({ config: publicCaldavConfig(row) });
   });
 
-  api.delete('/projects/:id/caldav', requireAdmin, (c) => {
-    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
-    deleteCaldavConfig(db, c.req.param('id'));
+  api.delete("/projects/:id/caldav", requireAdmin, (c) => {
+    if (!requireProject(c)) return c.json({ error: "project not found" }, 404);
+    deleteCaldavConfig(db, c.req.param("id"));
     return c.json({ ok: true });
   });
 
-  api.post('/projects/:id/caldav/test', requireAdmin, async (c) => {
-    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
-    return c.json(await testCaldav(db, c.req.param('id'), allowPrivate()));
+  api.post("/projects/:id/caldav/test", requireAdmin, async (c) => {
+    if (!requireProject(c)) return c.json({ error: "project not found" }, 404);
+    return c.json(await testCaldav(db, c.req.param("id"), allowPrivate()));
   });
 
-  api.post('/projects/:id/caldav/sync', requireAdmin, (c) => {
-    if (!requireProject(c)) return c.json({ error: 'project not found' }, 404);
+  api.post("/projects/:id/caldav/sync", requireAdmin, (c) => {
+    if (!requireProject(c)) return c.json({ error: "project not found" }, 404);
     // Fire-and-forget: a full sync makes one network round-trip per changed resource
     // and can outlast the reverse proxy's read timeout (→ 504). runSync serialises per
     // project and records last_status itself, so we kick it off and return at once; the
     // client polls the config's last_sync_at/last_status for the outcome.
-    void runSync(db, ensureCaldavDeviceId(db), c.req.param('id'), allowPrivate());
+    void runSync(
+      db,
+      ensureCaldavDeviceId(db),
+      c.req.param("id"),
+      allowPrivate(),
+    );
     return c.json({ ok: true, started: true }, 202);
   });
 
   // ----- Web Push -------------------------------------------------------------
 
-  api.get('/push/vapid', (c) => c.text(vapidPublicKey));
+  api.get("/push/vapid", (c) => c.text(vapidPublicKey));
 
-  api.post('/push/subscribe', async (c) => {
+  api.post("/push/subscribe", async (c) => {
     const sub = (await c.req.json().catch(() => null)) as {
       endpoint?: string;
       keys?: { p256dh?: string; auth?: string };
     } | null;
     if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
-      return c.json({ error: 'invalid subscription' }, 400);
+      return c.json({ error: "invalid subscription" }, 400);
     }
-    saveSubscription(db, c.get('userId'), {
+    saveSubscription(db, c.get("userId"), {
       endpoint: sub.endpoint,
       keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
     });
     return c.json({ ok: true });
   });
 
-  api.post('/push/unsubscribe', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { endpoint?: string };
+  api.post("/push/unsubscribe", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      endpoint?: string;
+    };
     if (body.endpoint) removeSubscription(db, body.endpoint);
     return c.json({ ok: true });
   });
 
   // FCM device tokens (Capacitor / Android shell).
-  api.post('/push/fcm', async (c) => {
+  api.post("/push/fcm", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { token?: string };
-    if (!body.token) return c.json({ error: 'missing token' }, 400);
-    saveFcmToken(db, c.get('userId'), body.token);
+    if (!body.token) return c.json({ error: "missing token" }, 400);
+    saveFcmToken(db, c.get("userId"), body.token);
     return c.json({ ok: true });
   });
 
-  api.post('/push/fcm/unsubscribe', async (c) => {
+  api.post("/push/fcm/unsubscribe", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { token?: string };
     if (body.token) removeFcmToken(db, body.token);
     return c.json({ ok: true });
@@ -1880,17 +2710,20 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // map to a user (returns null if unmapped, so the caller can no-op rather than
   // misattribute); an absent person falls back to the authenticated token's user.
   // Returns null for the anonymous 'local' user too.
-  const resolvePerson = (c: Context<Env>, person: string | undefined): string | null => {
+  const resolvePerson = (
+    c: Context<Env>,
+    person: string | undefined,
+  ): string | null => {
     if (person) return resolveUserByHaPerson(db, person);
-    const uid = c.get('userId');
-    return uid === 'local' ? null : uid;
+    const uid = c.get("userId");
+    return uid === "local" ? null : uid;
   };
 
   // ----- GPS location feed (HA device-tracker tick) ---------------------------
   // Accepts a person's current GPS coordinates from HA.  HA should POST this
   // on a regular cadence (e.g. every 5 minutes) while the person is detected.
   // Carbon stores the latest position and uses it for proximity-based reminders.
-  api.post('/gps', requireScope('tasks:write'), async (c) => {
+  api.post("/gps", requireScope("tasks:write"), async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       person?: string;
       device_id?: string;
@@ -1900,15 +2733,16 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       accuracy?: number;
       gps_accuracy?: number;
     };
-    if (typeof body.lat !== 'number' || typeof body.lng !== 'number') {
-      return c.json({ error: 'lat and lng (numbers) required' }, 400);
+    if (typeof body.lat !== "number" || typeof body.lng !== "number") {
+      return c.json({ error: "lat and lng (numbers) required" }, 400);
     }
     // Resolve which user this is about. If a `person` is given it MUST map to a
     // Carbon user — otherwise we'd misattribute (e.g. a household member's fix
     // saved against the token owner). Only fall back to the token's user when no
     // person is named at all.
     const userId = resolvePerson(c, body.person);
-    if (!userId) return c.json({ ok: true, saved: false, reason: 'unmapped person' });
+    if (!userId)
+      return c.json({ ok: true, saved: false, reason: "unmapped person" });
     const accuracy = body.accuracy ?? body.gps_accuracy ?? null;
     // A self-reporting client passes its own device_id (→ source 'device'); HA's
     // single-fix feed has none, so it lands as the reserved `ha:<user>` device.
@@ -1924,7 +2758,7 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
       lat: body.lat,
       lng: body.lng,
       accuracy,
-      source: isDevice ? 'device' : 'ha',
+      source: isDevice ? "device" : "ha",
     });
     // Keep the legacy single row for the HA path only, so background proximity
     // push (checkGpsProximity) is unchanged and a device fix never clobbers it.
@@ -1934,11 +2768,11 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
   // ----- geolocation events (Home Assistant zone enter/leave) -----------------
 
-  api.post('/geo/event', requireScope('tasks:write'), async (c) => {
+  api.post("/geo/event", requireScope("tasks:write"), async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       person?: string;
       zone?: string;
-      event?: 'enter' | 'leave';
+      event?: "enter" | "leave";
       lat?: number;
       lng?: number;
       accuracy?: number;
@@ -1947,15 +2781,22 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     // Resolve which user this is about. A named `person` must map to a Carbon user
     // (see /gps above); only an absent person falls back to the token's user.
     const userId = resolvePerson(c, body.person);
-    if (!userId) return c.json({ ok: true, matched: 0, reason: 'unmapped person' });
+    if (!userId)
+      return c.json({ ok: true, matched: 0, reason: "unmapped person" });
 
-    const isEnter = (body.event ?? 'enter') === 'enter';
+    const isEnter = (body.event ?? "enter") === "enter";
     // Persist the user's current location so GET /where (and the Nearby view) can
     // read it. Entering a named zone sets it; leaving clears it. Any coords given
     // refresh the latest GPS fix too.
     if (body.zone != null) saveZone(db, userId, isEnter ? body.zone : null);
-    if (typeof body.lat === 'number' && typeof body.lng === 'number') {
-      saveGps(db, userId, body.lat, body.lng, body.accuracy ?? body.gps_accuracy ?? null);
+    if (typeof body.lat === "number" && typeof body.lng === "number") {
+      saveGps(
+        db,
+        userId,
+        body.lat,
+        body.lng,
+        body.accuracy ?? body.gps_accuracy ?? null,
+      );
     }
     if (!isEnter) return c.json({ ok: true, matched: 0 });
 
@@ -1964,14 +2805,14 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
     const matched =
       body.zone != null
         ? tasksInZone(items, body.zone)
-        : typeof body.lat === 'number' && typeof body.lng === 'number'
+        : typeof body.lat === "number" && typeof body.lng === "number"
           ? tasksAtLocation(items, { lat: body.lat, lng: body.lng })
           : [];
     for (const t of matched) {
       await notifyTask(db, t.id, {
-        title: body.zone ? `At ${body.zone}` : 'Nearby task',
-        body: t.title || 'Untitled task',
-        url: '/today',
+        title: body.zone ? `At ${body.zone}` : "Nearby task",
+        body: t.title || "Untitled task",
+        url: "/today",
         tag: `geo:${t.id}`,
       });
     }
@@ -1981,19 +2822,20 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // The user's current location for the Nearby view: the HA zone plus one entry per
   // fresh device (≤24h). `haGps` is kept as a derived alias (the freshest HA device)
   // so an un-updated client still resolves; it will be dropped once clients roll over.
-  api.get('/where', requireScope('tasks:read'), (c) => {
-    const userId = c.get('userId');
-    if (userId === 'local') return c.json({ zone: null, haGps: null, devices: [] });
+  api.get("/where", requireScope("tasks:read"), (c) => {
+    const userId = c.get("userId");
+    if (userId === "local")
+      return c.json({ zone: null, haGps: null, devices: [] });
     const base = getUserLocation(db, userId); // { zone, haGps } (legacy single-row)
     const devices = listDeviceLocations(db, userId, DEVICE_STALE_MS);
     return c.json({ ...base, devices });
   });
 
   // Remove one of the caller's devices (a retired phone). Own devices only.
-  api.delete('/where/device/:id', requireScope('tasks:write'), (c) => {
-    const userId = c.get('userId');
-    if (userId === 'local') return c.json({ ok: true });
-    deleteDeviceLocation(db, userId, c.req.param('id'));
+  api.delete("/where/device/:id", requireScope("tasks:write"), (c) => {
+    const userId = c.get("userId");
+    if (userId === "local") return c.json({ ok: true });
+    deleteDeviceLocation(db, userId, c.req.param("id"));
     return c.json({ ok: true });
   });
 
@@ -2003,62 +2845,73 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   // Token-usable (so HA automations / scripts can call it) but admin-gated:
   // requireAdmin rejects all token auth, so we check the role directly instead.
   // Body: { user: "<id|username>", person: "person.rachel" | null }.
-  api.post('/ha-person', requireScope('tasks:write'), async (c) => {
-    if (c.get('role') !== 'admin') return c.json({ error: 'admin only' }, 403);
+  api.post("/ha-person", requireScope("tasks:write"), async (c) => {
+    if (c.get("role") !== "admin") return c.json({ error: "admin only" }, 403);
     const body = (await c.req.json().catch(() => ({}))) as {
       user?: string;
       person?: string | null;
     };
-    if (!body.user) return c.json({ error: 'user (id or username) required' }, 400);
+    if (!body.user)
+      return c.json({ error: "user (id or username) required" }, 400);
     const target = getUser(db, body.user) ?? getUserByUsername(db, body.user);
-    if (!target || target.deleted) return c.json({ error: 'user not found' }, 404);
+    if (!target || target.deleted)
+      return c.json({ error: "user not found" }, 404);
     setHaPerson(db, target.id, body.person ?? null);
-    return c.json({ ok: true, user: target.username, ha_person: getHaPerson(db, target.id) });
+    return c.json({
+      ok: true,
+      user: target.username,
+      ha_person: getHaPerson(db, target.id),
+    });
   });
 
   // ----- billing (auto-renewing subscriptions) --------------------------------
   // Tenant-admin actions. Reachable even when the workspace is locked (the dispatcher
   // allowlists /api/billing*) so an admin can self-serve a renewal from the gate.
-  // Provider: 'square' when SQUARE_* is configured (real card-on-file auto-renew), else
-  // 'simulate' (local pending→paid→renew→cancel lifecycle, no external charge).
+  // Missing provider configuration disables payment actions. Simulation requires explicit dev/test opt-in.
   // The default/self-host tenant (id 'default') has no control-plane row → no billing.
-  const billingProvider = () => (isSquareConfigured() ? 'square' : 'simulate');
+  const billingProvider = () => resolveBillingProvider(isSquareConfigured());
 
-  api.get('/billing', requireAdmin, (c) => {
-    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
+  api.get("/billing", requireAdmin, (c) => {
+    const rec = ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
     const provider = billingProvider();
     return c.json({
       provider,
       plans: listPlans(),
       expiresAt: rec?.expires_at ?? null,
-      locked: rec ? tenantLockState(rec) === 'locked' : false,
+      locked: rec ? tenantLockState(rec) === "locked" : false,
       subscription: rec ? getSubscription(controlDb, ctx.id) : null,
       billingEmail: rec?.admin_email ?? null,
-      square: provider === 'square' ? squareClientConfig() : null,
+      square: provider === "square" ? squareClientConfig() : null,
     });
   });
 
   // Start (or renew) a subscription. Square: needs a Web Payments SDK card token →
   // customer + card-on-file + subscription (auto-renews; expiry set by the webhook).
   // Simulate: records a pending subscription the client then "pays" via /billing/simulate.
-  api.post('/billing/subscribe', requireAdmin, async (c) => {
-    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
-    if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
+  api.post("/billing/subscribe", requireAdmin, async (c) => {
+    if (billingProvider() === "unavailable")
+      return c.json({ error: "Billing is unavailable. Contact the host administrator." }, 503);
+    const rec = ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
+    if (!rec)
+      return c.json(
+        { error: "billing is not available for this workspace" },
+        400,
+      );
     const b = (await c.req.json().catch(() => ({}))) as {
       planId?: string;
       cardToken?: string;
       email?: string;
     };
     const plan = b.planId ? getPlan(b.planId) : undefined;
-    if (!plan) return c.json({ error: 'unknown plan' }, 400);
+    if (!plan) return c.json({ error: "unknown plan" }, 400);
 
-    if (billingProvider() === 'square') {
-      if (!b.cardToken) return c.json({ error: 'card token required' }, 400);
+    if (billingProvider() === "square") {
+      if (!b.cardToken) return c.json({ error: "card token required" }, 400);
       // Square requires the customer to have an email (it emails invoices/receipts).
       // Use the workspace email if set, else the one supplied at subscribe time.
-      const email = (rec.admin_email || b.email?.trim() || '').toLowerCase();
+      const email = (rec.admin_email || b.email?.trim() || "").toLowerCase();
       if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-        return c.json({ error: 'a billing email address is required' }, 400);
+        return c.json({ error: "a billing email address is required" }, 400);
       }
       // Track which Square objects we created so the catch can compensate: Square
       // create* can succeed while a later step throws, orphaning live objects. (BILL-2)
@@ -2072,18 +2925,26 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
           // Reused customer may predate having an email — make sure it has one now.
           await updateCustomer(customerId, { email, name: rec.display_name });
         } else {
-          customerId = await createCustomer({ tenantId: ctx.id, email, name: rec.display_name });
+          customerId = await createCustomer({
+            tenantId: ctx.id,
+            email,
+            name: rec.display_name,
+          });
           newCustomerId = customerId;
         }
         // Remember the email on the workspace for future receipts/renewals.
         if (!rec.admin_email) setTenantAdminEmail(controlDb, ctx.id, email);
         const cardId = await createCard(customerId, b.cardToken);
         cardCreated = true;
-        const sub = await createSubscription({ customerId, cardId, planId: plan.id });
+        const sub = await createSubscription({
+          customerId,
+          cardId,
+          planId: plan.id,
+        });
         createdSubId = sub.id;
         upsertSubscription(controlDb, ctx.id, {
-          provider: 'square',
-          status: sub.status === 'ACTIVE' ? 'active' : 'pending',
+          provider: "square",
+          status: sub.status === "ACTIVE" ? "active" : "pending",
           plan_id: plan.id,
           external_id: sub.id,
           square_customer_id: customerId,
@@ -2094,16 +2955,24 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
         // the invoice.payment_made webhook will extend expiry shortly.
         if (sub.chargedThrough) {
           recordPaidPeriod(controlDb, ctx.id, plan, {
-            provider: 'square',
+            provider: "square",
             externalId: sub.id,
             chargedThrough: sub.chargedThrough,
             squareCustomerId: customerId,
             squareSubscriptionId: sub.id,
           });
         }
-        return c.json({ ok: true, provider: 'square', status: sub.status, subscriptionId: sub.id }, 201);
+        return c.json(
+          {
+            ok: true,
+            provider: "square",
+            status: sub.status,
+            subscriptionId: sub.id,
+          },
+          201,
+        );
       } catch (e) {
-        console.error('[carbon] billing subscribe failed:', e);
+        console.error("[carbon] billing subscribe failed:", e);
         // Compensate for orphaned Square objects (BILL-2). If the subscription was
         // created but local persistence failed, cancel it — otherwise Square keeps
         // auto-renewing a subscription we have no record of. Customer/card can't be
@@ -2122,66 +2991,94 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
           }
         } else if (cardCreated || newCustomerId) {
           console.error(
-            `[carbon] billing subscribe: left orphaned Square objects (customer=${newCustomerId ?? '(reused)'}, cardCreated=${cardCreated}) with no subscription — reconcile/clean up manually`,
+            `[carbon] billing subscribe: left orphaned Square objects (customer=${newCustomerId ?? "(reused)"}, cardCreated=${cardCreated}) with no subscription — reconcile/clean up manually`,
           );
         }
         // Don't return the raw thrown message — it can carry Square error bodies. (API-3)
-        return c.json({ error: 'subscribe_failed' }, 400);
+        return c.json({ error: "subscribe_failed" }, 400);
       }
     }
 
     // Simulate provider: stage a pending subscription; the client confirms via /simulate.
     const externalId = `sim_${randomUUID()}`;
     upsertSubscription(controlDb, ctx.id, {
-      provider: 'simulate',
-      status: 'pending',
+      provider: "simulate",
+      status: "pending",
       plan_id: plan.id,
       external_id: externalId,
       canceled_at: null,
     });
-    return c.json({ ok: true, provider: 'simulate', status: 'pending', subscriptionId: externalId }, 201);
+    return c.json(
+      {
+        ok: true,
+        provider: "simulate",
+        status: "pending",
+        subscriptionId: externalId,
+      },
+      201,
+    );
   });
 
   // Dev/local only: stand in for the Square "invoice.payment_made" webhook so the
   // simulate provider's full pending→paid→renew flow is testable without Square.
-  api.post('/billing/simulate', requireAdmin, async (c) => {
-    if (billingProvider() !== 'simulate') {
-      return c.json({ error: 'simulate is unavailable when a real payment provider is configured' }, 400);
+  api.post("/billing/simulate", requireAdmin, async (c) => {
+    if (billingProvider() !== "simulate") {
+      return c.json(
+        {
+          error:
+            "simulate is unavailable when a real payment provider is configured",
+        },
+        400,
+      );
     }
-    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
-    if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
+    const rec = ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
+    if (!rec)
+      return c.json(
+        { error: "billing is not available for this workspace" },
+        400,
+      );
     const sub = getSubscription(controlDb, ctx.id);
     const plan = sub?.plan_id ? getPlan(sub.plan_id) : undefined;
-    if (!sub || !plan) return c.json({ error: 'no subscription to charge — subscribe first' }, 400);
+    if (!sub || !plan)
+      return c.json(
+        { error: "no subscription to charge — subscribe first" },
+        400,
+      );
     const newExpiry = recordPaidPeriod(controlDb, ctx.id, plan, {
-      provider: 'simulate',
+      provider: "simulate",
       externalId: sub.external_id ?? `sim_${randomUUID()}`,
     });
     if (rec.admin_email) {
-      void sendBillingReceipt(rec.admin_email, plan.label, newExpiry).catch((e) =>
-        console.error('[carbon] billing receipt failed:', e),
+      void sendBillingReceipt(rec.admin_email, plan.label, newExpiry).catch(
+        (e) => console.error("[carbon] billing receipt failed:", e),
       );
     }
     return c.json({ ok: true, expiresAt: newExpiry }, 201);
   });
 
   // Cancel: stop auto-renewal. Access remains until the current period end (expiry).
-  api.post('/billing/cancel', requireAdmin, async (c) => {
-    const rec = ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id);
-    if (!rec) return c.json({ error: 'billing is not available for this workspace' }, 400);
+  api.post("/billing/cancel", requireAdmin, async (c) => {
+    const rec = ctx.id === "default" ? null : getTenantById(controlDb, ctx.id);
+    if (!rec)
+      return c.json(
+        { error: "billing is not available for this workspace" },
+        400,
+      );
     const sub = getSubscription(controlDb, ctx.id);
-    if (!sub) return c.json({ error: 'no active subscription' }, 400);
+    if (!sub) return c.json({ error: "no active subscription" }, 400);
     try {
-      if (billingProvider() === 'square' && sub.square_subscription_id) {
+      if (billingProvider() === "square" && sub.square_subscription_id) {
         await cancelSubscription(sub.square_subscription_id);
       }
-      setSubscriptionStatus(controlDb, ctx.id, 'canceled', { canceledAt: new Date().toISOString() });
+      setSubscriptionStatus(controlDb, ctx.id, "canceled", {
+        canceledAt: new Date().toISOString(),
+      });
       return c.json({ ok: true });
     } catch (e) {
       // Log the detail server-side; don't return it — a Square exception can carry
       // upstream error bodies the admin shouldn't see. (API-3)
-      console.error('[carbon] billing cancel failed:', e);
-      return c.json({ error: 'cancel_failed' }, 400);
+      console.error("[carbon] billing cancel failed:", e);
+      return c.json({ error: "cancel_failed" }, 400);
     }
   });
 
@@ -2192,12 +3089,17 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
   const fedApi = federationRoutes({
     db,
     serverDeviceId,
-    myLabel: ctx.subdomain || 'default',
+    myLabel: ctx.subdomain || "default",
     // Our externally-reachable base for an L3 callback: `https://<subdomain>.<apex>`.
     // Only meaningful on a multi-tenant host (BASE_DOMAIN set); unset for self-host.
-    myBaseUrl: BASE_DOMAIN && ctx.subdomain ? `${ctx.subdomain}.${BASE_DOMAIN}` : undefined,
+    myBaseUrl:
+      BASE_DOMAIN && ctx.subdomain
+        ? `${ctx.subdomain}.${BASE_DOMAIN}`
+        : undefined,
     resolveMode: () =>
-      resolveFederationMode(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
+      resolveFederationMode(
+        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+      ),
     deliverToPeer,
     blobStore,
     sessionAuth: basicAuth(db, { allowOpen: !BASE_DOMAIN && ALLOW_OPEN_MODE }),
@@ -2205,19 +3107,19 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 
   const tenantApp = new Hono<Env>();
   // Public federation surfaces: JSON capped small; blob transfer keeps MAX_BLOB_BYTES.
-  tenantApp.use('/api/federation/*', async (c, next) => {
-    if (c.req.path.includes('/blob')) return blobBodyLimit(c, next);
+  tenantApp.use("/api/federation/*", async (c, next) => {
+    if (c.req.path.includes("/blob")) return blobBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
-  tenantApp.route('/api', api);
-  tenantApp.route('/api/federation', fedApi);
+  tenantApp.route("/api", api);
+  tenantApp.route("/api/federation", fedApi);
   // Catch-all for anything a tenant handler throws without its own try/catch: log the
   // full error server-side, return a generic 500 so no internal detail leaks. tenantApp
   // is a standalone fetch entry point (invoked via tApp.fetch in the /api dispatcher),
   // so it needs its own handler — the host app's onError never sees these. (API-4)
   tenantApp.onError((err, c) => {
-    console.error('[carbon] unhandled tenant error:', err);
-    return c.json({ error: 'internal_error' }, 500);
+    console.error("[carbon] unhandled tenant error:", err);
+    return c.json({ error: "internal_error" }, 500);
   });
   return tenantApp;
 }
@@ -2233,8 +3135,8 @@ function buildTenantApp(ctx: TenantCtx, deliverToPeer: DeliverToPeer): FetchApp 
 function exitOnUnwritableData(what: string, detail: string): never {
   console.error(
     `[carbon] cannot write to ${what} (${detail}).\n` +
-      '  The server runs as uid 1000 in Docker, so the mounted ./data must be owned by it:\n' +
-      '    docker compose down && sudo chown -R 1000:1000 ./data && docker compose up -d',
+      "  The server runs as uid 1000 in Docker, so the mounted ./data must be owned by it:\n" +
+      "    docker compose down && sudo chown -R 1000:1000 ./data && docker compose up -d",
   );
   process.exit(1);
 }
@@ -2244,25 +3146,43 @@ try {
   mkdirSync(BLOBS_DIR, { recursive: true });
 } catch (err) {
   const code = (err as NodeJS.ErrnoException).code;
-  if (code === 'EACCES' || code === 'EPERM') {
+  if (code === "EACCES" || code === "EPERM") {
     exitOnUnwritableData(`the data directory ${dirname(DB_PATH)}`, code);
   }
   throw err;
 }
 
+// A0: index.ts is BOTH the server entry point and an importable module. When a test
+// (or the perf/e2e harness) imports it to reach the real `buildTenantApp` route table,
+// `process.argv[1]` is the importing file, not index.ts — so the entry-only side
+// effects (port bind, background schedulers, the Telegram bot) must not run. Set
+// CARBON_NO_AUTOSTART=1 to suppress them explicitly (harness/CI). When run for real
+// (`tsx src/index.ts` / `node apps/server/dist/index.js` / the Docker runtime stage's
+// `node server/index.js`) argv[1] is index.ts and everything starts.
+const IS_ENTRY =
+  process.env.CARBON_NO_AUTOSTART !== "1" &&
+  (() => {
+    const a = process.argv[1] ?? "";
+    return (
+      a.endsWith("/src/index.ts") || // tsx src/index.ts (dev)
+      a.endsWith("/dist/index.js") || // node apps/server/dist/index.js (prod / e2e)
+      a.endsWith("/server/index.js") // Docker runtime stage: node server/index.js
+    );
+  })();
+
 // Default (legacy) tenant — the single-tenant self-host DB. Pinned, never evicted.
 const defaultCtx = (() => {
   try {
     return initTenantDb({
-      id: 'default',
-      subdomain: '',
+      id: "default",
+      subdomain: "",
       dbPath: DB_PATH,
       blobsDir: BLOBS_DIR,
     });
   } catch (err) {
     // node:sqlite reports a file the process may open but not write as errcode 8.
     if ((err as { errcode?: number }).errcode === 8) {
-      exitOnUnwritableData(`the database ${DB_PATH}`, 'SQLITE_READONLY');
+      exitOnUnwritableData(`the database ${DB_PATH}`, "SQLITE_READONLY");
     }
     throw err;
   }
@@ -2278,7 +3198,7 @@ bootstrapUsers(defaultCtx.db, process.env.AUTH_USERS);
  *  gated advanced tier there anyway, and private/loopback peers are refused. */
 function federationAllowPrivate(): boolean {
   if (!BASE_DOMAIN) return true; // single-tenant self-host
-  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === '1') return true; // global override
+  if (process.env.ALLOW_PRIVATE_AGENT_ENDPOINTS === "1") return true; // global override
   return false;
 }
 
@@ -2300,7 +3220,7 @@ function makeSameHostPeer(peerSubdomain: string): SameHostPeer | null {
     // gate's `peerWhitelisted` uses (peers may be stored by base_url OR subdomain). Deny
     // rows live in the same table but must not count as a whitelist ⇒ filter to 'allow'.
     hasWhitelisted: (myBaseUrl, myLabel) =>
-      listPeers(peerDb, 'allow').some(
+      listPeers(peerDb, "allow").some(
         (p) =>
           p.subdomain === myLabel ||
           p.subdomain === myBaseUrl ||
@@ -2349,150 +3269,171 @@ const registry = createTenantRegistry({
 // exchange round for every active link across active tenant DBs; same-host
 // both-tenants-in-one-process is fine (deliverToPeer loops back). The purge-suggestion
 // check is synchronous per-tenant and runs first since it's cheap and unrelated.
-startReminderScheduler(
-  () => registry.activeDbs(),
-  () => {
-    for (const ctx of registry.activeCtxs()) {
-      try {
-        checkPurgeSuggestions(ctx.db, ctx.serverDeviceId);
-      } catch (e) {
-        console.error('[carbon] purge-suggestion sweep failed:', e);
+if (IS_ENTRY) {
+  startReminderScheduler(
+    () => registry.activeDbs(),
+    () => {
+      for (const ctx of registry.activeCtxs()) {
+        try {
+          checkPurgeSuggestions(ctx.db, ctx.serverDeviceId);
+        } catch (e) {
+          console.error("[carbon] purge-suggestion sweep failed:", e);
+        }
       }
-    }
-    return runAllFederationExchanges(
-      () => registry.activeCtxs().map((ctx) => ({ db: ctx.db, myLabel: ctx.subdomain || 'default' })),
-      deliverToPeer,
-    );
-  },
-);
-startGpsScheduler(() => registry.activeDbs());
-startCaldavScheduler(() =>
-  registry.activeCtxs().map((ctx) => ({
-    db: ctx.db,
-    deviceId: ensureCaldavDeviceId(ctx.db),
-    allowPrivate: agentsAllowPrivate(ctx.id === 'default' ? null : getTenantById(controlDb, ctx.id)),
-  })),
-);
+      return runAllFederationExchanges(
+        () =>
+          registry
+            .activeCtxs()
+            .map((ctx) => ({
+              db: ctx.db,
+              myLabel: ctx.subdomain || "default",
+            })),
+        deliverToPeer,
+      );
+    },
+  );
+  startGpsScheduler(() => registry.activeDbs());
+  startCaldavScheduler(() =>
+    registry.activeCtxs().map((ctx) => ({
+      db: ctx.db,
+      deviceId: ensureCaldavDeviceId(ctx.db),
+      allowPrivate: agentsAllowPrivate(
+        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+      ),
+    })),
+  );
+}
 
 // Per-server Telegram bot: confirm the token, register the webhook, and expose the handler the
 // /telegram/webhook route calls. Fire-and-forget (getMe/setWebhook are network calls); no-ops
 // when TELEGRAM_BOT_TOKEN is unset.
-startTelegramBot({
-  controlDb,
-  registry,
-  botToken: TELEGRAM_BOT_TOKEN,
-  botUsername: TELEGRAM_BOT_USERNAME,
-  baseDomain: BASE_DOMAIN,
-  webhookUrl: TELEGRAM_WEBHOOK_URL,
-  webhookSecret: TELEGRAM_WEBHOOK_SECRET,
-  resolveSubdomain: (sub) => resolveTenantLocation(controlDb, sub)?.subdomain ?? null,
-  allowPrivateFor: (tenantId) =>
-    agentsAllowPrivate(tenantId === 'default' ? null : getTenantById(controlDb, tenantId)),
-  hostLmAvailableFor: (tenantId) =>
-    tenantId === 'default' ? true : !!getTenantById(controlDb, tenantId)?.host_lm_available,
-})
-  .then((bot) => {
-    telegramBot = bot;
+if (IS_ENTRY) {
+  startTelegramBot({
+    controlDb,
+    registry,
+    botToken: TELEGRAM_BOT_TOKEN,
+    botUsername: TELEGRAM_BOT_USERNAME,
+    baseDomain: BASE_DOMAIN,
+    webhookUrl: TELEGRAM_WEBHOOK_URL,
+    webhookSecret: TELEGRAM_WEBHOOK_SECRET,
+    resolveSubdomain: (sub) =>
+      resolveTenantLocation(controlDb, sub)?.subdomain ?? null,
+    allowPrivateFor: (tenantId) =>
+      agentsAllowPrivate(
+        tenantId === "default" ? null : getTenantById(controlDb, tenantId),
+      ),
+    hostLmAvailableFor: (tenantId) =>
+      tenantId === "default"
+        ? true
+        : !!getTenantById(controlDb, tenantId)?.host_lm_available,
   })
-  .catch((e) => console.error('[carbon] telegram bot failed to start:', e));
+    .then((bot) => {
+      telegramBot = bot;
+    })
+    .catch((e) => console.error("[carbon] telegram bot failed to start:", e));
+}
 
 // Lock is derived (no write fires at expiry — the dispatcher recomputes per request),
 // so the only control-plane housekeeping is GCing expired pending signups. Hourly.
-setInterval(() => {
-  try {
-    gcPendingSignups(controlDb);
-    gcPendingDeletes(controlDb);
-  } catch (e) {
-    console.error('[carbon] pending-signup gc failed:', e);
-  }
-}, 3_600_000);
+if (IS_ENTRY) {
+  setInterval(() => {
+    try {
+      gcPendingSignups(controlDb);
+      gcPendingDeletes(controlDb);
+    } catch (e) {
+      console.error("[carbon] pending-signup gc failed:", e);
+    }
+  }, 3_600_000);
+}
 
 console.log(
   `[carbon] default db=${DB_PATH} users=${listUsers(defaultCtx.db).length} ` +
-    `tenants=${listTenants(controlDb).length} base=${BASE_DOMAIN ?? '(single-tenant)'}`,
+    `tenants=${listTenants(controlDb).length} base=${BASE_DOMAIN ?? "(single-tenant)"}`,
 );
 if (!BASE_DOMAIN && ALLOW_OPEN_MODE && listUsers(defaultCtx.db).length === 0) {
   console.warn(
-    '[carbon] WARNING: ALLOW_OPEN_MODE=1 and no users — the API is unauthenticated. ' +
-      'Unset ALLOW_OPEN_MODE (or create an account) before exposing this host.',
+    "[carbon] WARNING: ALLOW_OPEN_MODE=1 and no users — the API is unauthenticated. " +
+      "Unset ALLOW_OPEN_MODE (or create an account) before exposing this host.",
   );
-} else if (!BASE_DOMAIN && !ALLOW_OPEN_MODE && listUsers(defaultCtx.db).length === 0) {
+} else if (
+  !BASE_DOMAIN &&
+  !ALLOW_OPEN_MODE &&
+  listUsers(defaultCtx.db).length === 0
+) {
   console.warn(
-    '[carbon] no users and open mode disabled (default). Create an account with ' +
-      '`npm run add-user`, or set ALLOW_OPEN_MODE=1 only for a private LAN box.',
+    "[carbon] no users and open mode disabled (default). Create an account with " +
+      "`npm run add-user`, or set ALLOW_OPEN_MODE=1 only for a private LAN box.",
   );
 }
 
-// BILL-4: with no Square config, billingProvider() falls back to 'simulate', where a
-// workspace admin can self-grant paid periods via /billing/simulate. That's intended for
-// self-hosters, but on a production multi-tenant host it means billing isn't actually
-// charging anyone. Warn loudly (don't hard-fail — self-host is a legitimate config).
-if (
-  (process.env.NODE_ENV === 'production' || process.env.ENV === 'production') &&
-  !isSquareConfigured()
-) {
-  console.warn(
-    '[carbon] WARNING: running in production but SQUARE_* is unconfigured — billing is in ' +
-      "'simulate' mode, so workspace admins can self-grant paid periods via /billing/simulate. " +
-      'Configure the Square provider (SQUARE_ACCESS_TOKEN, SQUARE_LOCATION_ID, SQUARE_APP_ID, ' +
-      'SQUARE_PLAN_Q3M, SQUARE_PLAN_Y1) to take real payments.',
-  );
+if (resolveBillingProvider(isSquareConfigured()) === "unavailable") {
+  console.warn("[carbon] payment provider unconfigured; billing actions are disabled.");
 }
 
 // ----- host app: CORS, health, control plane, tenant dispatch ----------------
 
-const app = new Hono();
+// Exported so tests (e.g. the bounded-attack isolation test) can drive the REAL
+// dispatcher — the /api/* route that carries the A2 global + per-tenant concurrency
+// gates — rather than a re-implementation of it.
+export const app = new Hono();
 
 // Catch-all for anything a host-level handler (or the mounted `host` sub-app) throws
 // without its own try/catch: log the full error server-side, return a generic 500 so no
 // internal detail leaks to the client. `app` is the top-level fetch entry point. (API-4)
 app.onError((err, c) => {
-  console.error('[carbon] unhandled server error:', err);
-  return c.json({ error: 'internal_error' }, 500);
+  console.error("[carbon] unhandled server error:", err);
+  return c.json({ error: "internal_error" }, 500);
 });
 
-// CORS: defaults to wildcard for local/dev (auth is via the Authorization header, not
-// cookies, so there is no CSRF surface). On a hosted multi-tenant deploy set
-// CORS_ORIGINS to a comma-separated allowlist — native shells send these origins:
+// CORS (A2): explicit config, no implicit defaults — see ./cors for the full rules
+// (fixed non-empty allowHeaders keeps the middleware off the GHSA-8j4g-w8fx-2239
+// preflight ReDoS path; empty CORS_ORIGINS denies cross-origin on a BASE_DOMAIN apex
+// and keeps the header-auth '*' wildcard on a single-tenant self-host). Native
+// shells send:
 //   Tauri  → tauri://localhost (Linux/macOS), http://tauri.localhost (Windows)
 //   Capacitor Android → https://localhost
 //   dev → http://localhost:3042
-const corsOrigins = (process.env.CORS_ORIGINS ?? '')
-  .split(',')
+const corsOrigins = (process.env.CORS_ORIGINS ?? "")
+  .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 if (BASE_DOMAIN && !corsOrigins.length) {
   console.warn(
-    '[carbon] WARNING: BASE_DOMAIN is set but CORS_ORIGINS is empty — CORS defaults to *. ' +
-      'Set CORS_ORIGINS to your apex / native-shell origins in production.',
+    "[carbon] WARNING: BASE_DOMAIN is set but CORS_ORIGINS is empty — cross-origin " +
+      "requests are DENIED (no Access-Control-Allow-Origin is emitted). Set CORS_ORIGINS " +
+      "to your apex / native-shell origins in production (tauri://localhost, " +
+      "http://tauri.localhost, https://localhost, …).",
   );
 }
-const corsMw = cors({ origin: corsOrigins.length ? corsOrigins : '*' });
-app.use('/api/*', corsMw);
-app.use('/host/*', corsMw);
+const corsMw = buildCorsMw({ origins: corsOrigins, baseDomain: !!BASE_DOMAIN });
+app.use("/api/*", corsMw);
+app.use("/host/*", corsMw);
 
 // Health is host-level; also used by the web client to (a) auto-discover its sync
 // server from window.location.origin and (b) learn whether this host is the apex
 // (landing page), a real tenant workspace, or an unknown subdomain.
 // Tradeoff: `locked` (+ `expiresAt` only while locked) stay unauthenticated so the SPA
 // can show RenewGate before sign-in. Unlocked workspaces do not disclose expiry.
-app.get('/api/health', (c) => {
-  let role: 'single' | 'apex' | 'app' | 'tenant' | 'unknown' = 'single';
+app.get("/api/health", (c) => {
+  let role: "single" | "apex" | "app" | "tenant" | "unknown" = "single";
   let locked = false;
   let expiresAt: string | null = null;
   let syncEpoch: number | null = null;
   if (BASE_DOMAIN) {
-    const label = hostLabel(c.req.header('host'), BASE_DOMAIN);
-    if (label === null) role = 'apex'; // the bare apex
-    else if (label === APP_HOST) role = 'app'; // dedicated offline/local-only host
-    else if (RESERVED_SUBDOMAINS.has(label)) role = 'apex'; // www/admin/… → landing
+    const label = hostLabel(c.req.header("host"), BASE_DOMAIN);
+    if (label === null)
+      role = "apex"; // the bare apex
+    else if (label === APP_HOST)
+      role = "app"; // dedicated offline/local-only host
+    else if (RESERVED_SUBDOMAINS.has(label))
+      role = "apex"; // www/admin/… → landing
     else {
       // resolveTenantLocation only resolves active/provisional, so a suspended tenant
       // still reads as 'unknown' (hard off). A locked tenant is active → 'tenant'.
-      role = resolveTenantLocation(controlDb, label) ? 'tenant' : 'unknown';
-      if (role === 'tenant') {
+      role = resolveTenantLocation(controlDb, label) ? "tenant" : "unknown";
+      if (role === "tenant") {
         const rec = getTenantBySubdomain(controlDb, label);
-        if (rec && tenantLockState(rec) === 'locked') {
+        if (rec && tenantLockState(rec) === "locked") {
           locked = true;
           expiresAt = rec.expires_at;
         }
@@ -2506,9 +3447,9 @@ app.get('/api/health', (c) => {
     if (ctx) syncEpoch = getSyncEpoch(ctx.db);
   }
   return c.json({
-    status: 'ok',
+    status: "ok",
     version: VERSION,
-    name: 'carbon',
+    name: "carbon",
     baseDomain: BASE_DOMAIN ?? null,
     appHost: BASE_DOMAIN ? APP_HOST : null,
     role,
@@ -2523,16 +3464,22 @@ app.get('/api/health', (c) => {
 // ----- control plane: /host/* (signup public; rest host-admin-guarded) -------
 
 const tenantUrl = (subdomain: string) =>
-  BASE_DOMAIN ? `https://${subdomain}.${BASE_DOMAIN}` : `(set BASE_DOMAIN) /${subdomain}`;
+  BASE_DOMAIN
+    ? `https://${subdomain}.${BASE_DOMAIN}`
+    : `(set BASE_DOMAIN) /${subdomain}`;
 
-// In-memory signup rate limit. Per-IP keys on clientIp() (TCP peer, or last XFF hop
-// only when TRUST_PROXY=1); the global cap is the backstop if a caller still manages
-// to vary their apparent IP. Stale buckets are pruned each call so the map can't grow
-// without bound (A6).
+// In-memory signup rate limit. Per-IP keys on clientIp() (TCP peer; XFF only when
+// TRUST_PROXY=1, via the trusted-proxy walk in ./client-ip — see
+// docs/internal/a2/trusted-proxy.md); the global cap is the backstop if a caller
+// still manages to vary their apparent IP. Stale buckets are pruned each call so
+// the map can't grow without bound (A6).
 const signupHits = new Map<string, number[]>();
 let globalSignups: number[] = [];
 const SIGNUP_PER_IP_HOUR = 5;
-const SIGNUP_GLOBAL_HOUR = Math.max(1, Number(process.env.SIGNUP_GLOBAL_HOUR) || 50);
+const SIGNUP_GLOBAL_HOUR = Math.max(
+  1,
+  Number(process.env.SIGNUP_GLOBAL_HOUR) || 50,
+);
 function signupAllowed(ip: string): boolean {
   const now = Date.now();
   const win = now - 3_600_000;
@@ -2554,30 +3501,52 @@ function signupAllowed(ip: string): boolean {
 // Narrower per-email cap on /signup/start so one address can't be code-bombed, plus a
 // lenient per-IP cap on /signup/verify to bound brute-forcing the 6-digit code space.
 const emailStartHits = new Map<string, number[]>();
-const SIGNUP_PER_EMAIL_HOUR = Math.max(1, Number(process.env.SIGNUP_PER_EMAIL_HOUR) || 3);
+const SIGNUP_PER_EMAIL_HOUR = Math.max(
+  1,
+  Number(process.env.SIGNUP_PER_EMAIL_HOUR) || 3,
+);
 /** Within this window a repeated /signup/start for the same email is treated as a
  *  duplicate (double-submit / retry) and does not send another email. */
-const SIGNUP_DEDUP_MS = Math.max(5_000, Number(process.env.SIGNUP_DEDUP_MS) || 45_000);
+const SIGNUP_DEDUP_MS = Math.max(
+  5_000,
+  Number(process.env.SIGNUP_DEDUP_MS) || 45_000,
+);
 /** In-flight guard so two concurrent POSTs for the same email don't both send. */
 const signupInFlight = new Set<string>();
 const verifyHits = new Map<string, number[]>();
-const VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.VERIFY_PER_IP_HOUR) || 30);
+const VERIFY_PER_IP_HOUR = Math.max(
+  1,
+  Number(process.env.VERIFY_PER_IP_HOUR) || 30,
+);
 
 // Deletion OTC: a per-workspace cap on requesting a code (can't code-bomb a contact
 // address) and a per-IP cap on verifying it (bounds brute-forcing the 6-digit code).
 const deleteStartHits = new Map<string, number[]>();
-const DELETE_START_PER_WS_HOUR = Math.max(1, Number(process.env.DELETE_START_PER_WS_HOUR) || 3);
+const DELETE_START_PER_WS_HOUR = Math.max(
+  1,
+  Number(process.env.DELETE_START_PER_WS_HOUR) || 3,
+);
 const deleteVerifyHits = new Map<string, number[]>();
-const DELETE_VERIFY_PER_IP_HOUR = Math.max(1, Number(process.env.DELETE_VERIFY_PER_IP_HOUR) || 30);
+const DELETE_VERIFY_PER_IP_HOUR = Math.max(
+  1,
+  Number(process.env.DELETE_VERIFY_PER_IP_HOUR) || 30,
+);
 
 // Per-user cap on the LLM-backed NL command endpoint (each call = up to MAX_ITERS
 // provider round-trips). Keyed on the resolved user id, not IP.
 const nlCommandHits = new Map<string, number[]>();
-const NL_COMMAND_PER_USER_HOUR = Math.max(1, Number(process.env.NL_COMMAND_PER_USER_HOUR) || 120);
+const NL_COMMAND_PER_USER_HOUR = Math.max(
+  1,
+  Number(process.env.NL_COMMAND_PER_USER_HOUR) || 120,
+);
 // Recipe optimise sends the note body straight into the prompt — bound it (~16 KB, far more
 // than any real recipe) so a huge note can't be used to run up provider cost.
 const RECIPE_MAX_CHARS = 16_000;
-function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boolean {
+function hitAllowed(
+  map: Map<string, number[]>,
+  key: string,
+  cap: number,
+): boolean {
   const now = Date.now();
   const win = now - 3_600_000;
   for (const [k, v] of map) {
@@ -2593,7 +3562,7 @@ function hitAllowed(map: Map<string, number[]>, key: string, cap: number): boole
 }
 
 const host = new Hono<{ Variables: HostVars }>();
-host.use('*', jsonBodyLimit);
+host.use("*", jsonBodyLimit);
 
 // ----- Square webhooks (public, HMAC-verified) ------------------------------
 // One global endpoint for all tenants; the tenant is resolved from the subscription
@@ -2603,7 +3572,7 @@ host.use('*', jsonBodyLimit);
 function tenantBySquareSub(subscriptionId: string): string | null {
   return (
     controlDb.get<{ tenant_id: string }>(
-      'SELECT tenant_id FROM subscriptions WHERE square_subscription_id = ?',
+      "SELECT tenant_id FROM subscriptions WHERE square_subscription_id = ?",
       [subscriptionId],
     )?.tenant_id ?? null
   );
@@ -2613,21 +3582,26 @@ function tenantBySquareSub(subscriptionId: string): string | null {
 // mark the event processed in that case, so Square keeps retrying (the mapping may just
 // not have been persisted yet by a racing /billing/subscribe). Returns true once the
 // paid period has been applied (or the event is safely ignorable for a known tenant).
-async function applySquareInvoicePaid(subscriptionId: string): Promise<boolean> {
+async function applySquareInvoicePaid(
+  subscriptionId: string,
+): Promise<boolean> {
   const tenantId = tenantBySquareSub(subscriptionId);
   if (!tenantId) return false; // unknown subscription — signal retry, don't lose it
   const sub = await retrieveSubscription(subscriptionId);
-  const planId = (sub.planVariationId && planForVariation(sub.planVariationId)) ||
+  const planId =
+    (sub.planVariationId && planForVariation(sub.planVariationId)) ||
     getSubscription(controlDb, tenantId)?.plan_id ||
-    '';
+    "";
   const plan = getPlan(planId);
   if (!plan) {
-    console.error(`[carbon] webhook: no plan for subscription ${subscriptionId} (variation ${sub.planVariationId})`);
+    console.error(
+      `[carbon] webhook: no plan for subscription ${subscriptionId} (variation ${sub.planVariationId})`,
+    );
     return true; // known tenant, unmappable plan — retrying won't help; treat as handled
   }
   // chargedThrough makes this idempotent: re-processing sets expiry to the same date.
   const newExpiry = recordPaidPeriod(controlDb, tenantId, plan, {
-    provider: 'square',
+    provider: "square",
     externalId: subscriptionId,
     chargedThrough: sub.chargedThrough,
     squareSubscriptionId: subscriptionId,
@@ -2635,51 +3609,64 @@ async function applySquareInvoicePaid(subscriptionId: string): Promise<boolean> 
   const rec = getTenantById(controlDb, tenantId);
   if (rec?.admin_email) {
     void sendBillingReceipt(rec.admin_email, plan.label, newExpiry).catch((e) =>
-      console.error('[carbon] billing receipt failed:', e),
+      console.error("[carbon] billing receipt failed:", e),
     );
   }
   return true;
 }
 
-host.post('/billing/webhook', async (c) => {
+host.post("/billing/webhook", async (c) => {
   const raw = await c.req.text();
-  const sig = c.req.header('x-square-hmacsha256-signature');
-  if (!verifyWebhookSignature(raw, sig)) return c.json({ error: 'bad signature' }, 401);
+  const sig = c.req.header("x-square-hmacsha256-signature");
+  if (!verifyWebhookSignature(raw, sig))
+    return c.json({ error: "bad signature" }, 401);
   let event: {
     event_id?: string;
     type?: string;
-    data?: { object?: { invoice?: { subscription_id?: string }; subscription?: { id?: string; status?: string } } };
+    data?: {
+      object?: {
+        invoice?: { subscription_id?: string };
+        subscription?: { id?: string; status?: string };
+      };
+    };
   };
   try {
     event = JSON.parse(raw);
   } catch {
-    return c.json({ error: 'bad json' }, 400);
+    return c.json({ error: "bad json" }, 400);
   }
   const eventId = event.event_id;
-  const type = event.type ?? '';
-  if (!eventId) return c.json({ error: 'no event id' }, 400);
+  const type = event.type ?? "";
+  if (!eventId) return c.json({ error: "no event id" }, 400);
   // Dedup BEFORE running any side effect: if we've already recorded this event_id, it's
   // a Square retry of something we finished — ack 200 and do nothing. (BILL-3)
   if (billingEventSeen(controlDb, eventId)) return c.json({ ok: true });
   const obj = event.data?.object ?? {};
   try {
-    if (type === 'invoice.payment_made') {
+    if (type === "invoice.payment_made") {
       const subId = obj.invoice?.subscription_id;
       // applySquareInvoicePaid returns false when the subscription maps to no known
       // tenant — do NOT mark the event; return 5xx so Square retries rather than
       // permanently dropping a paid invoice for a not-yet-persisted subscription. (BILL-1)
       if (subId && !(await applySquareInvoicePaid(subId))) {
-        console.error(`[carbon] webhook: paid invoice for unknown subscription ${subId} — asking Square to retry`);
-        return c.json({ error: 'unknown subscription' }, 503); // 5xx → Square retries
+        console.error(
+          `[carbon] webhook: paid invoice for unknown subscription ${subId} — asking Square to retry`,
+        );
+        return c.json({ error: "unknown subscription" }, 503); // 5xx → Square retries
       }
-    } else if (type === 'invoice.payment_failed') {
-      const tId = obj.invoice?.subscription_id ? tenantBySquareSub(obj.invoice.subscription_id) : null;
-      if (tId) setSubscriptionStatus(controlDb, tId, 'past_due');
-    } else if (type === 'subscription.updated') {
+    } else if (type === "invoice.payment_failed") {
+      const tId = obj.invoice?.subscription_id
+        ? tenantBySquareSub(obj.invoice.subscription_id)
+        : null;
+      if (tId) setSubscriptionStatus(controlDb, tId, "past_due");
+    } else if (type === "subscription.updated") {
       const s = obj.subscription;
-      if (s?.id && (s.status === 'CANCELED' || s.status === 'DEACTIVATED')) {
+      if (s?.id && (s.status === "CANCELED" || s.status === "DEACTIVATED")) {
         const tId = tenantBySquareSub(s.id);
-        if (tId) setSubscriptionStatus(controlDb, tId, 'canceled', { canceledAt: new Date().toISOString() });
+        if (tId)
+          setSubscriptionStatus(controlDb, tId, "canceled", {
+            canceledAt: new Date().toISOString(),
+          });
       }
     }
     // Mark only after successful handling so a transient failure (thrown above, or the
@@ -2688,17 +3675,18 @@ host.post('/billing/webhook', async (c) => {
     // (absolute expiry) as a second line of defence against a rare race.
     markBillingEvent(controlDb, eventId, type);
   } catch (e) {
-    console.error('[carbon] webhook handling failed:', e);
-    return c.json({ error: 'handling failed' }, 500); // 5xx → Square retries
+    console.error("[carbon] webhook handling failed:", e);
+    return c.json({ error: "handling failed" }, 500); // 5xx → Square retries
   }
   return c.json({ ok: true });
 });
 
 // Self-service signup, step 1: stage the workspace + email a one-time code. The tenant
 // is NOT created yet — only on /signup/verify once the email is proven.
-host.post('/signup/start', async (c) => {
+host.post("/signup/start", async (c) => {
   const ip = clientIp(c);
-  if (!signupAllowed(ip)) return c.json({ error: 'too many signups, try later' }, 429);
+  if (!signupAllowed(ip))
+    return c.json({ error: "too many signups, try later" }, 429);
   const b = (await c.req.json().catch(() => ({}))) as {
     email?: string;
     subdomain?: string;
@@ -2708,10 +3696,10 @@ host.post('/signup/start', async (c) => {
     /** True when the user explicitly clicked Resend — bypasses the short dedup window. */
     resend?: boolean;
   };
-  const email = b.email?.trim().toLowerCase() || '';
-  if (!email) return c.json({ error: 'email required' }, 400);
+  const email = b.email?.trim().toLowerCase() || "";
+  if (!email) return c.json({ error: "email required" }, 400);
   if (!b.adminUsername || !b.adminPassword) {
-    return c.json({ error: 'adminUsername and adminPassword required' }, 400);
+    return c.json({ error: "adminUsername and adminPassword required" }, 400);
   }
 
   // Concurrent duplicate POSTs (double-click / browser retry): only one may send.
@@ -2723,13 +3711,19 @@ host.post('/signup/start', async (c) => {
   // retry and skip a second delivery of the same verification email.
   if (!b.resend) {
     const existing = getPendingSignup(controlDb, email);
-    if (existing && Date.now() - Date.parse(existing.created_at) < SIGNUP_DEDUP_MS) {
+    if (
+      existing &&
+      Date.now() - Date.parse(existing.created_at) < SIGNUP_DEDUP_MS
+    ) {
       return c.json({ pending: true, email, deduped: true }, 201);
     }
   }
 
   if (!hitAllowed(emailStartHits, email, SIGNUP_PER_EMAIL_HOUR)) {
-    return c.json({ error: 'too many codes requested for this email, try later' }, 429);
+    return c.json(
+      { error: "too many codes requested for this email, try later" },
+      429,
+    );
   }
   signupInFlight.add(email);
   try {
@@ -2745,8 +3739,8 @@ host.post('/signup/start', async (c) => {
   } catch (e) {
     // Log the detail server-side; return a stable code — the thrown message can carry
     // internal (e.g. email-provider) error bodies. (API-3)
-    console.error('[carbon] signup/start failed:', e);
-    return c.json({ error: 'signup_failed' }, 400);
+    console.error("[carbon] signup/start failed:", e);
+    return c.json({ error: "signup_failed" }, 400);
   } finally {
     signupInFlight.delete(email);
   }
@@ -2754,13 +3748,17 @@ host.post('/signup/start', async (c) => {
 
 // Self-service signup, step 2: verify the code, then provision the workspace with a
 // trial expiry. The pending row is kept if provisioning fails so the user can retry.
-host.post('/signup/verify', async (c) => {
+host.post("/signup/verify", async (c) => {
   const ip = clientIp(c);
   if (!hitAllowed(verifyHits, ip, VERIFY_PER_IP_HOUR)) {
-    return c.json({ error: 'too many attempts, try later' }, 429);
+    return c.json({ error: "too many attempts, try later" }, 429);
   }
-  const b = (await c.req.json().catch(() => ({}))) as { email?: string; code?: string };
-  if (!b.email || !b.code) return c.json({ error: 'email and code required' }, 400);
+  const b = (await c.req.json().catch(() => ({}))) as {
+    email?: string;
+    code?: string;
+  };
+  if (!b.email || !b.code)
+    return c.json({ error: "email and code required" }, 400);
   const result = verifyPendingSignup(controlDb, b.email, String(b.code));
   if (!result.ok) return c.json({ error: result.error }, 400);
   const p = result.pending;
@@ -2773,16 +3771,26 @@ host.post('/signup/verify', async (c) => {
       adminEmail: p.email,
       // SIGNUP_REQUIRE_APPROVAL=1 holds new workspaces in 'provisional' until a host
       // admin/payment hook flips them to 'active' (still routable, seam for billing).
-      status: process.env.SIGNUP_REQUIRE_APPROVAL === '1' ? 'provisional' : 'active',
-      expiresAt: new Date(Date.now() + SIGNUP_TRIAL_DAYS * 86_400_000).toISOString(),
+      status:
+        process.env.SIGNUP_REQUIRE_APPROVAL === "1" ? "provisional" : "active",
+      expiresAt: new Date(
+        Date.now() + SIGNUP_TRIAL_DAYS * 86_400_000,
+      ).toISOString(),
     });
     deletePendingSignup(controlDb, p.id);
-    return c.json({ subdomain: rec.subdomain, url: tenantUrl(rec.subdomain), status: rec.status }, 201);
+    return c.json(
+      {
+        subdomain: rec.subdomain,
+        url: tenantUrl(rec.subdomain),
+        status: rec.status,
+      },
+      201,
+    );
   } catch (e) {
     // Keep the pending row so the user can retry (e.g. pick a free subdomain). Log the
     // detail server-side; return a stable code rather than the raw thrown message. (API-3)
-    console.error('[carbon] signup/verify provisioning failed:', e);
-    return c.json({ error: 'provision_failed' }, 400);
+    console.error("[carbon] signup/verify provisioning failed:", e);
+    return c.json({ error: "provision_failed" }, 400);
   }
 });
 
@@ -2792,12 +3800,18 @@ host.post('/signup/verify', async (c) => {
 
 /** Resolve a deletable workspace whose contact email matches `email`, else null.
  *  The default/self-host tenant has no control-plane row, so it is never deletable. */
-function deletableTenant(workspace: string, email: string): TenantRecord | null {
+function deletableTenant(
+  workspace: string,
+  email: string,
+): TenantRecord | null {
   const sub = workspace.trim().toLowerCase();
   if (!sub) return null;
   const rec = getTenantBySubdomain(controlDb, sub);
-  if (!rec || rec.status === 'deleted') return null;
-  if (!rec.admin_email || rec.admin_email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+  if (!rec || rec.status === "deleted") return null;
+  if (
+    !rec.admin_email ||
+    rec.admin_email.trim().toLowerCase() !== email.trim().toLowerCase()
+  ) {
     return null;
   }
   return rec;
@@ -2809,7 +3823,9 @@ function buildWorkspaceBundle(rec: TenantRecord): string {
   // Fold the WAL into the main db file so the on-disk bytes are current before we read
   // them (the tenant may have unflushed writes). Best-effort: skip if not loadable.
   try {
-    registry.getCtx(rec.subdomain)?.db.raw.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    registry
+      .getCtx(rec.subdomain)
+      ?.db.raw.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   } catch {
     /* not loaded / locked — fall back to whatever is on disk */
   }
@@ -2817,7 +3833,9 @@ function buildWorkspaceBundle(rec: TenantRecord): string {
   try {
     for (const name of readdirSync(rec.blobs_dir)) {
       try {
-        blobs[name] = readFileSync(join(rec.blobs_dir, name)).toString('base64');
+        blobs[name] = readFileSync(join(rec.blobs_dir, name)).toString(
+          "base64",
+        );
       } catch {
         /* file vanished mid-scan — skip */
       }
@@ -2826,10 +3844,10 @@ function buildWorkspaceBundle(rec: TenantRecord): string {
     /* no blobs dir yet */
   }
   return JSON.stringify({
-    format: 'carbon-backup',
+    format: "carbon-backup",
     version: 1,
     exported_at: new Date().toISOString(),
-    db: readFileSync(rec.db_path).toString('base64'),
+    db: readFileSync(rec.db_path).toString("base64"),
     blobs,
   });
 }
@@ -2837,22 +3855,32 @@ function buildWorkspaceBundle(rec: TenantRecord): string {
 // Step 1: stage a deletion + email a one-time code — but only if the workspace exists
 // and the supplied email is its contact address. Always answers 200 with the same
 // generic body so the endpoint can't be used to probe which workspaces/emails exist.
-host.post('/delete/start', async (c) => {
-  const b = (await c.req.json().catch(() => ({}))) as { workspace?: string; email?: string };
-  const workspace = (b.workspace ?? '').trim().toLowerCase();
-  const email = (b.email ?? '').trim().toLowerCase();
+host.post("/delete/start", async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as {
+    workspace?: string;
+    email?: string;
+  };
+  const workspace = (b.workspace ?? "").trim().toLowerCase();
+  const email = (b.email ?? "").trim().toLowerCase();
   const generic = { ok: true } as const;
-  if (!workspace || !email) return c.json({ error: 'workspace and email required' }, 400);
+  if (!workspace || !email)
+    return c.json({ error: "workspace and email required" }, 400);
   if (!hitAllowed(deleteStartHits, workspace, DELETE_START_PER_WS_HOUR)) {
-    return c.json({ error: 'too many codes requested for this workspace, try later' }, 429);
+    return c.json(
+      { error: "too many codes requested for this workspace, try later" },
+      429,
+    );
   }
   const rec = deletableTenant(workspace, email);
   if (!rec) return c.json(generic); // no match — say nothing, send nothing
   try {
-    const { code } = createPendingDelete(controlDb, { tenantId: rec.id, email: rec.admin_email! });
+    const { code } = createPendingDelete(controlDb, {
+      tenantId: rec.id,
+      email: rec.admin_email!,
+    });
     await sendDeleteOtcCode(rec.admin_email!, code, rec.subdomain);
   } catch (e) {
-    console.error('[carbon] delete/start failed:', e);
+    console.error("[carbon] delete/start failed:", e);
   }
   return c.json(generic);
 });
@@ -2860,10 +3888,10 @@ host.post('/delete/start', async (c) => {
 // Step 2: verify the code, returning a short-lived token that authorizes the export
 // and the final delete. The workspace+email must still match (the code alone is scoped
 // to the tenant, but re-checking keeps the contract obvious and tolerates email reuse).
-host.post('/delete/verify', async (c) => {
+host.post("/delete/verify", async (c) => {
   const ip = clientIp(c);
   if (!hitAllowed(deleteVerifyHits, ip, DELETE_VERIFY_PER_IP_HOUR)) {
-    return c.json({ error: 'too many attempts, try later' }, 429);
+    return c.json({ error: "too many attempts, try later" }, 429);
   }
   const b = (await c.req.json().catch(() => ({}))) as {
     workspace?: string;
@@ -2871,10 +3899,10 @@ host.post('/delete/verify', async (c) => {
     code?: string;
   };
   if (!b.workspace || !b.email || !b.code) {
-    return c.json({ error: 'workspace, email and code required' }, 400);
+    return c.json({ error: "workspace, email and code required" }, 400);
   }
   const rec = deletableTenant(b.workspace, b.email);
-  if (!rec) return c.json({ error: 'invalid_code' }, 400);
+  if (!rec) return c.json({ error: "invalid_code" }, 400);
   const result = verifyPendingDelete(controlDb, rec.id, String(b.code));
   if (!result.ok) return c.json({ error: result.error }, 400);
   return c.json({ token: result.token });
@@ -2882,44 +3910,50 @@ host.post('/delete/verify', async (c) => {
 
 // Download a full backup of the workspace. Authorized by the verified delete token, so
 // the same proof-of-email that allows deletion lets the owner take their data first.
-host.post('/delete/export', async (c) => {
+host.post("/delete/export", async (c) => {
   const b = (await c.req.json().catch(() => ({}))) as { token?: string };
-  const row = resolveDeleteToken(controlDb, b.token ?? '');
-  if (!row) return c.json({ error: 'session expired — request a new code' }, 401);
+  const row = resolveDeleteToken(controlDb, b.token ?? "");
+  if (!row)
+    return c.json({ error: "session expired — request a new code" }, 401);
   const rec = getTenantById(controlDb, row.tenant_id);
-  if (!rec || rec.status === 'deleted') return c.json({ error: 'workspace not found' }, 404);
+  if (!rec || rec.status === "deleted")
+    return c.json({ error: "workspace not found" }, 404);
   const bundle = buildWorkspaceBundle(rec);
   return new Response(bundle, {
     headers: {
-      'Content-Type': 'application/json',
-      'Content-Disposition': `attachment; filename="carbon-${rec.subdomain}-backup.json"`,
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename="carbon-${rec.subdomain}-backup.json"`,
     },
   });
 });
 
 // Step 3: permanently delete the workspace (and its data dir). Irreversible.
-host.post('/delete/confirm', async (c) => {
+host.post("/delete/confirm", async (c) => {
   const b = (await c.req.json().catch(() => ({}))) as { token?: string };
-  const row = resolveDeleteToken(controlDb, b.token ?? '');
-  if (!row) return c.json({ error: 'session expired — request a new code' }, 401);
+  const row = resolveDeleteToken(controlDb, b.token ?? "");
+  if (!row)
+    return c.json({ error: "session expired — request a new code" }, 401);
   const rec = getTenantById(controlDb, row.tenant_id);
   deletePendingDelete(controlDb, row.id);
-  if (!rec || rec.status === 'deleted') return c.json({ ok: true }); // already gone
+  if (!rec || rec.status === "deleted") return c.json({ ok: true }); // already gone
   registry.evict(rec.id); // close the open handle before removing files
   deleteTenant(controlDb, rec.id);
   return c.json({ ok: true });
 });
 
-host.use('/tenants', hostAdminAuth(controlDb, { clientIp }));
-host.use('/tenants/*', hostAdminAuth(controlDb, { clientIp }));
+host.use("/tenants", hostAdminAuth(controlDb, { clientIp }));
+host.use("/tenants/*", hostAdminAuth(controlDb, { clientIp }));
 
-host.get('/tenants', (c) =>
+host.get("/tenants", (c) =>
   c.json({
-    tenants: listTenants(controlDb).map((t) => ({ ...t, url: tenantUrl(t.subdomain) })),
+    tenants: listTenants(controlDb).map((t) => ({
+      ...t,
+      url: tenantUrl(t.subdomain),
+    })),
   }),
 );
 
-host.post('/tenants', async (c) => {
+host.post("/tenants", async (c) => {
   const b = (await c.req.json().catch(() => ({}))) as {
     subdomain?: string;
     adminUsername?: string;
@@ -2928,7 +3962,7 @@ host.post('/tenants', async (c) => {
     plan?: string;
   };
   if (!b.adminUsername || !b.adminPassword) {
-    return c.json({ error: 'adminUsername and adminPassword required' }, 400);
+    return c.json({ error: "adminUsername and adminPassword required" }, 400);
   }
   try {
     const rec = provisionTenant(controlDb, TENANTS_DIR, {
@@ -2942,77 +3976,97 @@ host.post('/tenants', async (c) => {
   } catch (e) {
     // Log the detail server-side; return a stable code rather than the raw thrown
     // message (avoids leaking internal provisioning errors). (API-3)
-    console.error('[carbon] tenant provisioning failed:', e);
-    return c.json({ error: 'provision_failed' }, 400);
+    console.error("[carbon] tenant provisioning failed:", e);
+    return c.json({ error: "provision_failed" }, 400);
   }
 });
 
-host.patch('/tenants/:id', async (c) => {
-  const id = c.req.param('id');
-  if (!getTenantById(controlDb, id)) return c.json({ error: 'not found' }, 404);
+host.patch("/tenants/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!getTenantById(controlDb, id)) return c.json({ error: "not found" }, 404);
   const b = (await c.req.json().catch(() => ({}))) as {
-    status?: 'active' | 'provisional' | 'suspended';
+    status?: "active" | "provisional" | "suspended";
     plan?: string | null;
     expiresAt?: string | null; // "Set Expiry" — when the workspace locks (null = never)
     locked?: boolean; // "Lock"/"Unlock" — manual operator lock (soft gate, still resolves)
     blobQuotaMb?: number | null; // storage cap in MB (null = server default, 0 = unlimited)
+    dbQuotaMb?: number | null; // database cap in MB (null = server default, 0 = unlimited)
     maxUsers?: number | null; // human-user cap (null = server default, 0 = unlimited)
     allowPrivateEndpoints?: boolean; // let this workspace's agents reach private/LAN hosts
     hostLmAvailable?: boolean; // let this workspace select the host-shared LM
-    federationMode?: 'off' | 'intra_server' | 'cross_server' | null; // Gate 1 override (null = env default)
+    federationMode?: "off" | "intra_server" | "cross_server" | null; // Gate 1 override (null = env default)
   };
   if (b.status) {
     setTenantStatus(controlDb, id, b.status);
-    if (b.status === 'suspended') registry.evict(id); // stop serving immediately
+    if (b.status === "suspended") registry.evict(id); // stop serving immediately
     // Note: a locked tenant is NOT evicted — it must stay loadable to serve the gate.
   }
-  if ('plan' in b) setTenantPlan(controlDb, id, b.plan ?? null);
-  if ('expiresAt' in b) setTenantExpiry(controlDb, id, b.expiresAt ?? null);
-  if ('locked' in b) setTenantLock(controlDb, id, !!b.locked);
-  if ('blobQuotaMb' in b) {
+  if ("plan" in b) setTenantPlan(controlDb, id, b.plan ?? null);
+  if ("expiresAt" in b) setTenantExpiry(controlDb, id, b.expiresAt ?? null);
+  if ("locked" in b) setTenantLock(controlDb, id, !!b.locked);
+  if ("blobQuotaMb" in b) {
     setTenantBlobQuota(
       controlDb,
       id,
-      b.blobQuotaMb == null ? null : Math.max(0, Math.round(b.blobQuotaMb)) * 1024 * 1024,
+      b.blobQuotaMb == null
+        ? null
+        : Math.max(0, Math.round(b.blobQuotaMb)) * 1024 * 1024,
     );
   }
-  if ('maxUsers' in b) {
-    setTenantMaxUsers(controlDb, id, b.maxUsers == null ? null : Math.max(0, Math.round(b.maxUsers)));
+  if ("dbQuotaMb" in b) {
+    setTenantDbQuota(
+      controlDb,
+      id,
+      b.dbQuotaMb == null
+        ? null
+        : Math.max(0, Math.round(b.dbQuotaMb)) * 1024 * 1024,
+    );
   }
-  if ('allowPrivateEndpoints' in b) {
+  if ("maxUsers" in b) {
+    setTenantMaxUsers(
+      controlDb,
+      id,
+      b.maxUsers == null ? null : Math.max(0, Math.round(b.maxUsers)),
+    );
+  }
+  if ("allowPrivateEndpoints" in b) {
     setTenantAllowPrivate(controlDb, id, !!b.allowPrivateEndpoints);
   }
-  if ('hostLmAvailable' in b) {
+  if ("hostLmAvailable" in b) {
     setTenantHostLmAvailable(controlDb, id, !!b.hostLmAvailable);
   }
-  if ('federationMode' in b) {
+  if ("federationMode" in b) {
     const m = b.federationMode;
     setTenantFederationMode(
       controlDb,
       id,
-      m === 'off' || m === 'intra_server' || m === 'cross_server' ? m : null,
+      m === "off" || m === "intra_server" || m === "cross_server" ? m : null,
     );
   }
   return c.json({ ...getTenantById(controlDb, id) });
 });
 
-host.delete('/tenants/:id', (c) => {
-  const id = c.req.param('id');
-  if (!getTenantById(controlDb, id)) return c.json({ error: 'not found' }, 404);
+host.delete("/tenants/:id", (c) => {
+  const id = c.req.param("id");
+  if (!getTenantById(controlDb, id)) return c.json({ error: "not found" }, 404);
   registry.evict(id); // close the open handle before removing files
   deleteTenant(controlDb, id);
   return c.json({ ok: true });
 });
 
-host.get('/tenants/:id/usage', (c) => {
-  const id = c.req.param('id');
+host.get("/tenants/:id/usage", (c) => {
+  const id = c.req.param("id");
   const rec = getTenantById(controlDb, id);
-  if (!rec) return c.json({ error: 'not found' }, 404);
+  if (!rec) return c.json({ error: "not found" }, 404);
   const ctx = registry.getCtx(rec.subdomain);
   const users = ctx ? listUsers(ctx.db).length : 0;
-  const humanUsers = ctx ? listUsers(ctx.db).filter((u) => !u.is_bot).length : 0;
+  const humanUsers = ctx
+    ? listUsers(ctx.db).filter((u) => !u.is_bot).length
+    : 0;
   const lastActivity = ctx
-    ? (ctx.db.get<{ m: string | null }>('SELECT MAX(updated_at) AS m FROM items')?.m ?? null)
+    ? (ctx.db.get<{ m: string | null }>(
+        "SELECT MAX(updated_at) AS m FROM items",
+      )?.m ?? null)
     : null;
   let dbBytes = 0;
   try {
@@ -3031,87 +4085,168 @@ host.get('/tenants/:id/usage', (c) => {
     lastActivity,
     blobBytes,
     blobQuota: effectiveBlobQuota(rec),
+    dbQuota: effectiveDbQuota(rec),
   });
 });
 
-app.route('/host', host);
+app.route("/host", host);
 
 // ----- Telegram webhook (per-server, outside tenant dispatch) ----------------
 // Telegram POSTs updates here. The bot maps the chat → (workspace, user) via the control DB,
 // so this is a single server-level endpoint, not per-subdomain. When the bot/webhook is
 // enabled the secret is mandatory (fail closed) and compared with timingSafeEqual.
-app.use('/telegram/webhook', jsonBodyLimit);
-app.post('/telegram/webhook', async (c) => {
+app.use("/telegram/webhook", jsonBodyLimit);
+app.post("/telegram/webhook", async (c) => {
   const webhookEnabled = !!(TELEGRAM_BOT_TOKEN && TELEGRAM_WEBHOOK_URL);
   if (webhookEnabled && !TELEGRAM_WEBHOOK_SECRET) {
-    console.error('[carbon] telegram webhook rejected: TELEGRAM_WEBHOOK_SECRET unset');
-    return c.json({ error: 'forbidden' }, 403);
+    console.error(
+      "[carbon] telegram webhook rejected: TELEGRAM_WEBHOOK_SECRET unset",
+    );
+    return c.json({ error: "forbidden" }, 403);
   }
   if (TELEGRAM_WEBHOOK_SECRET) {
-    const got = c.req.header('x-telegram-bot-api-secret-token') ?? '';
+    const got = c.req.header("x-telegram-bot-api-secret-token") ?? "";
     const expected = Buffer.from(TELEGRAM_WEBHOOK_SECRET);
     const actual = Buffer.from(got);
-    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
-      return c.json({ error: 'forbidden' }, 403);
+    if (
+      expected.length !== actual.length ||
+      !timingSafeEqual(expected, actual)
+    ) {
+      return c.json({ error: "forbidden" }, 403);
     }
   } else if (TELEGRAM_BOT_TOKEN) {
     // Token set but no webhook URL/secret — do not accept unauthenticated posts.
-    return c.json({ error: 'forbidden' }, 403);
+    return c.json({ error: "forbidden" }, 403);
   }
   if (!telegramBot) return c.json({ ok: true }); // bot disabled / not ready yet — Telegram retries
   const update = await c.req.json().catch(() => null);
   if (update) {
     // Don't make Telegram wait on the LLM round-trip; process after responding.
-    void telegramBot.handle(update).catch((e) => console.error('[carbon] telegram handle error:', e));
+    void telegramBot
+      .handle(update)
+      .catch((e) => console.error("[carbon] telegram handle error:", e));
   }
   return c.json({ ok: true });
 });
 
 // ----- tenant dispatch: forward /api/* to the per-subdomain tenant app -------
 
-app.all('/api/*', async (c) => {
-  const subdomain = subdomainFromHost(c.req.header('host'), BASE_DOMAIN);
-  // Lock gate (soft): a locked workspace still resolves and serves reads + billing so
-  // the admin can renew, but every mutation/sync is refused. Checked here (not inside
-  // the cached tenant app) because lock state is time-varying and lives in control.db.
-  // The default tenant (subdomain === null) has no control-plane row and never locks.
-  if (subdomain !== null) {
-    const rec = getTenantBySubdomain(controlDb, subdomain);
-    if (rec && tenantLockState(rec) === 'locked') {
-      const path = c.req.path;
-      const isBilling = path === '/api/billing' || path.startsWith('/api/billing/');
-      if (!isBilling && c.req.method !== 'GET') {
-        return c.json({ error: 'workspace_locked', expiresAt: rec.expires_at }, 403);
+// A2: global in-flight gate across ALL tenants' /api traffic. Rejects with 429 once the
+// server is at capacity so a burst can't queue unbounded work.
+const globalGate = new ConcurrencyGate(MAX_CONCURRENT_REQUESTS);
+// A2: one in-flight gate per tenant, keyed by the stable per-tenant ctx (the registry
+// caches one ctx per tenant id, so the WeakMap key is stable and prunes on eviction).
+const tenantGates = new WeakMap<TenantCtx, ConcurrencyGate>();
+function tenantGate(ctx: TenantCtx): ConcurrencyGate {
+  let g = tenantGates.get(ctx);
+  if (!g) {
+    g = new ConcurrencyGate(TENANT_MAX_CONCURRENT);
+    tenantGates.set(ctx, g);
+  }
+  return g;
+}
+
+/** 429 with a Retry-After hint: the actionable "slow down, then retry" response. */
+function rateLimited(
+  c: Context,
+  scope: "global" | "tenant" | "user" | "sync",
+  retryAfterMs: number,
+): Response {
+  const res = c.json(
+    { error: "rate_limited", scope, retry_after_ms: retryAfterMs },
+    429,
+  );
+  res.headers.set(
+    "Retry-After",
+    String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+  );
+  return res;
+}
+
+app.all("/api/*", async (c) => {
+  const subdomain = subdomainFromHost(c.req.header("host"), BASE_DOMAIN);
+
+  // A2: global concurrency bound (all tenants). Held for the full request, incl. async
+  // handlers (we await the forwarded fetch before releasing).
+  if (!globalGate.tryEnter()) return rateLimited(c, "global", 1000);
+  try {
+    // Lock gate (soft): a locked workspace still resolves and serves reads + billing so
+    // the admin can renew, but every mutation/sync is refused. Checked here (not inside
+    // the cached tenant app) because lock state is time-varying and lives in control.db.
+    // The default tenant (subdomain === null) has no control-plane row and never locks.
+    if (subdomain !== null) {
+      const rec = getTenantBySubdomain(controlDb, subdomain);
+      if (rec && tenantLockState(rec) === "locked") {
+        const path = c.req.path;
+        const isBilling =
+          path === "/api/billing" || path.startsWith("/api/billing/");
+        if (!isBilling && c.req.method !== "GET") {
+          return c.json(
+            { error: "workspace_locked", expiresAt: rec.expires_at },
+            403,
+          );
+        }
       }
     }
+    const tApp = registry.getApp(subdomain);
+    if (!tApp) return c.json({ error: "unknown workspace" }, 404);
+    // Stamp a trusted client IP for tenant-side rate limits (overwrite any client value).
+    const headers = new Headers(c.req.raw.headers);
+    headers.set(CARBON_REAL_IP_HEADER, clientIp(c));
+    const req = new Request(c.req.raw, { headers });
+
+    // A2: per-tenant concurrency bound — isolates a noisy workspace from its neighbors
+    // (a single tenant can at most fill its own slice of the global pool).
+    const ctx = registry.getCtx(subdomain);
+    const tGate = ctx ? tenantGate(ctx) : null;
+    if (tGate && !tGate.tryEnter()) return rateLimited(c, "tenant", 1000);
+    try {
+      return await tApp.fetch(req);
+    } finally {
+      tGate?.exit();
+    }
+  } finally {
+    globalGate.exit();
   }
-  const tApp = registry.getApp(subdomain);
-  if (!tApp) return c.json({ error: 'unknown workspace' }, 404);
-  // Stamp a trusted client IP for tenant-side rate limits (overwrite any client value).
-  const headers = new Headers(c.req.raw.headers);
-  headers.set(CARBON_REAL_IP_HEADER, clientIp(c));
-  return tApp.fetch(new Request(c.req.raw, { headers }));
 });
 
 // ----- static SPA -----------------------------------------------------------
 
 const staticRoot = resolve(STATIC_DIR);
 if (existsSync(staticRoot)) {
-  app.use('/*', serveStatic({ root: STATIC_DIR }));
-  app.get('/*', serveStatic({ path: `${STATIC_DIR}/index.html` }));
+  app.route(
+    "/",
+    landingRoutes({
+      root: staticRoot,
+      baseDomain: BASE_DOMAIN || "",
+      appHost: APP_HOST,
+      isApex: (host) => {
+        if (!BASE_DOMAIN) return false;
+        const label = hostLabel(host, BASE_DOMAIN);
+        return (
+          label !== APP_HOST &&
+          (label === null || RESERVED_SUBDOMAINS.has(label))
+        );
+      },
+    }),
+  );
+  app.use("/*", serveStatic({ root: STATIC_DIR }));
+  app.get("/*", serveStatic({ path: `${STATIC_DIR}/index.html` }));
   console.log(`[carbon] serving web from ${staticRoot}`);
 }
 
-const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`[carbon] listening on http://localhost:${info.port}`);
-});
-server.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(
-      `[carbon] port ${PORT} is already in use — another Carbon server is probably running. ` +
-        `Stop it, or set PORT to a free port.`,
-    );
-    process.exit(1);
-  }
-  throw err;
-});
+if (IS_ENTRY) {
+  const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
+    console.log(`[carbon] listening on http://localhost:${info.port}`);
+  });
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `[carbon] port ${PORT} is already in use — another Carbon server is probably running. ` +
+          `Stop it, or set PORT to a free port.`,
+      );
+      process.exit(1);
+    }
+    throw err;
+  });
+}

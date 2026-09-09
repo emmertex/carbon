@@ -55,8 +55,8 @@ export function DataBackup() {
     try {
       await exportBackup();
       setMsg({ ok: true, text: 'Backup downloaded.' });
-    } catch {
-      setMsg({ ok: false, text: 'Export failed.' });
+    } catch (error) {
+      setMsg({ ok: false, text: error instanceof Error ? error.message : 'Export failed.' });
     } finally {
       setBusy(null);
     }

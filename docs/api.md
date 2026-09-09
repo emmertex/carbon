@@ -1,3 +1,41 @@
+# Personal API keys
+
+Create a key in Settings → Integrations → Personal API keys. Copy its secret once;
+only its hash is stored. Keys act as their owner with their current permissions.
+Choose expiry and optional project subtrees. Key-creation and policy requests must
+be JSON objects; malformed/null bodies are rejected before any change. A member can manage their own keys;
+administrators can disable member key creation and revoke keys through administration.
+
+Personal keys expose GET/POST `/api/tasks`, GET/PATCH `/api/tasks/{id}`,
+POST `/api/tasks/{id}/complete` and POST `/api/tasks/{id}/comments`.
+`tasks:read` permits reads, `tasks:write` permits edits/completion/comments, and
+`inbox:write` permits creation. Restricted keys must supply `project_id` when creating.
+Moving an item outside a selected subtree is denied. Current user permissions still
+apply if a share is changed or revoked. Sync, blobs, AI and account/admin routes are
+not part of this personal-key contract and reject these credentials. Older integration
+keys retain their existing route contract; revoke and replace them when migrating.
+
+The [OpenAPI contract](openapi.json) describes the personal-key task API.
+
+```sh
+# Set CARBON_URL and CARBON_API_KEY in your environment, then:
+curl --fail-with-body "$CARBON_URL/api/tasks?limit=100&offset=0" \
+  -H "Authorization: Bearer $CARBON_API_KEY"
+curl --fail-with-body "$CARBON_URL/api/tasks" \
+  -H "Authorization: Bearer $CARBON_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"title":"Example task","project_id":"YOUR_PROJECT_ID"}'
+```
+
+Follow `next_offset` until `has_more=false`. Limit defaults to 100 and caps at 1000;
+responses also have a byte budget. HTTP 401 means expired/revoked/invalid credentials;
+403 means insufficient scope, subtree or user permissions; 413 means oversized input
+or output; 429 means capacity/quota rejection (honor `Retry-After`). GETs can be retried.
+After an uncertain create/comment response, inspect state before retrying: POSTs do
+not promise idempotency. Rotate by creating a replacement, testing a read, updating
+your client, then revoking the old key. Never embed secrets in URLs or source code.
+
+---
+
 # Carbon REST API guide
 
 Carbon exposes a small REST API for integrations (Home Assistant, scripts, agents). It is
@@ -116,7 +154,7 @@ accepts `title`, `note`, `status`, `due_date`, `defer_date`, `flagged`, `priorit
 
 ## Natural-language agent endpoints (`/api/agent/*`)
 
-A granular, context-small surface for a **small LLM** (driven via Hermes) to do
+A granular, context-small surface for a **small LLM** to do
 natural-language task management — the server fuzzy-matches names and batches writes so the
 model just passes plain names. Same scopes as above. Full contract + worked call sequences:
 [`carbon-agent-api.md` §6](carbon-agent-api.md).

@@ -152,7 +152,7 @@ Bot commands: `/start` (link), `/whoami` (show your link), `/reset` (forget cont
   re-run `setWebhook` with the same `TELEGRAM_WEBHOOK_SECRET` the server has.
 - **"This workspace doesn't have an AI assistant set up yet."** An admin must add a direct-LLM
   agent in **Settings → AI agents** and enable **Natural-language commands**. See
-  [Hermes / agent integration](hermes.md).
+  [External webhook / agent integration](carbon-agent-api.md).
 - **"That code has expired / wasn't recognised."** Codes last 10 minutes and are single-use —
   generate a fresh one in Settings → Telegram.
 - **Token usage.** Bot traffic is metered separately under *telegram* in Settings → AI agents

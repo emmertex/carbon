@@ -1,10 +1,11 @@
-import { rmSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from "node:fs";
 
-/** Wipe and recreate the throwaway server data dir before each Playwright run. */
+/** webServer runs before globalSetup. Never delete its open database here. */
 export default function globalSetup(): void {
-  const dataDir = join(process.cwd(), 'e2e', '.tmp');
-  rmSync(dataDir, { recursive: true, force: true });
-  mkdirSync(dataDir, { recursive: true });
-  process.env.E2E_DATA_DIR = dataDir;
+  const dataDir = process.env.E2E_DATA_DIR;
+  if (!dataDir || !existsSync(dataDir))
+    throw new Error(
+      "E2E config must select a disposable data directory before server startup",
+    );
+  // Retain the owned directory for diagnostics; no teardown races with live servers.
 }

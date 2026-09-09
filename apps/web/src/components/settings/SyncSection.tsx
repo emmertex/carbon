@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, CloudOff, Cloud, RefreshCw, Loader2 } from 'lucide-react';
+import { AlertCircle, CloudOff, Cloud, RefreshCw, Loader2, Upload } from 'lucide-react';
 import { blobRefIndex } from '@carbon/core';
-import { syncNow, signOut as doSignOut, resetLocalDataAndReload } from '@/lib/sync';
+import { syncNow, signOut as doSignOut, resetLocalDataAndReload, countUnsyncedWork } from '@/lib/sync';
 import { type BlobFetchMode, type ServerConfig } from '@/lib/config';
 import { blobCacheBytes, flushBlobCache, syncBlobCache } from '@/lib/blobs';
 import { getDb } from '@/lib/db';
@@ -263,11 +263,41 @@ export function SyncSection({
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
+  // Unsynced-work detection for the sign-out prompt: null = not yet counted,
+  // a number = how many unsynced ops/record-ops/pending blobs this device holds.
+  const [unsynced, setUnsynced] = useState<number | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [pushFailed, setPushFailed] = useState(false);
+
+  function openSignOut() {
+    setConfirmSignOut(true);
+    setPushFailed(false);
+    setUnsynced(null);
+    void countUnsyncedWork().then(setUnsynced);
+  }
 
   async function signOut(eraseLocal: boolean) {
+    setSigningOut(true);
     setConfirmSignOut(false);
     await doSignOut(eraseLocal);
     if (eraseLocal) window.location.reload();
+  }
+
+  // The safe path when work hasn't been pushed: sync first (so the work is on
+  // the server), then sign out & erase. A failed push (offline, …) leaves the
+  // prompt open so the user can choose keep / erase-anyway instead.
+  async function pushThenSignOut() {
+    setSigningOut(true);
+    setPushFailed(false);
+    const ok = await syncNow();
+    if (!ok) {
+      setSigningOut(false);
+      setPushFailed(true);
+      return;
+    }
+    setConfirmSignOut(false);
+    await doSignOut(true);
+    window.location.reload();
   }
 
   async function resetLocal() {
@@ -342,7 +372,7 @@ export function SyncSection({
             </button>
           )}
           {signedIn && !confirmSignOut && (
-            <button onClick={() => setConfirmSignOut(true)} className={btnSecondary}>
+            <button onClick={openSignOut} className={btnSecondary}>
               Sign out
             </button>
           )}
@@ -356,28 +386,66 @@ export function SyncSection({
           )}
         </div>
 
-        {/* Sign-out choice: keep the local copy for offline use, or erase it. */}
+        {/* Sign-out choice. Erase is the default (primary); keeping local data
+            for offline use is the explicit alternative. When unsynced work is
+            detected, a "push first" path is offered up front so it isn't lost. */}
         {signedIn && confirmSignOut && (
           <div className="rounded-lg border border-border bg-surface-2 p-3 text-sm">
             <p className="font-medium text-text">Sign out of {currentUser?.username}?</p>
-            <p className="mt-0.5 text-text-muted">
-              Keep your tasks on this device for offline use, or erase the local copy so nothing
-              is left behind.
-            </p>
+
+            {unsynced !== null && unsynced > 0 ? (
+              <p className="mt-0.5 text-amber-600 dark:text-amber-400">
+                You have <span className="font-semibold">{unsynced}</span> unsynced
+                {unsynced === 1 ? ' change' : ' changes'} that haven&apos;t reached the server
+                yet. Erasing now would lose{unsynced === 1 ? ' it' : ' them'} — push first, or
+                keep them local.
+              </p>
+            ) : (
+              <p className="mt-0.5 text-text-muted">
+                Erase the local copy so nothing is left behind, or keep it on this device for
+                offline use.
+              </p>
+            )}
+
             <div className="mt-2 flex flex-wrap gap-2">
-              <button onClick={() => void signOut(false)} className={btnSecondary}>
-                Sign out, keep local data
-              </button>
-              <button onClick={() => void signOut(true)} className={btnDanger}>
+              {unsynced !== null && unsynced > 0 && (
+                <button onClick={() => void pushThenSignOut()} disabled={signingOut} className={btnPrimary}>
+                  {signingOut ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <Upload size={14} />
+                  )}{' '}
+                  {pushFailed ? 'Push failed — retry' : 'Push & sign out'}
+                </button>
+              )}
+              <button onClick={() => void signOut(true)} disabled={signingOut} className={btnDanger}>
+                {signingOut ? <Loader2 size={14} className="animate-spin" /> : null}{' '}
                 Sign out &amp; erase local data
               </button>
               <button
-                onClick={() => setConfirmSignOut(false)}
+                onClick={() => void signOut(false)}
+                disabled={signingOut}
+                className={btnSecondary}
+              >
+                Sign out, keep local data
+              </button>
+              <button
+                onClick={() => {
+                  setConfirmSignOut(false);
+                  setPushFailed(false);
+                }}
+                disabled={signingOut}
                 className="px-2 py-2 text-sm text-text-muted hover:text-text"
               >
                 Cancel
               </button>
             </div>
+            {pushFailed && (
+              <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+                The push didn&apos;t complete (offline or a sync error). Your unsynced work is
+                still on this device — keep it local, or erase if you&apos;re sure.
+              </p>
+            )}
           </div>
         )}
 

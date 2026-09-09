@@ -41,6 +41,7 @@ export function AppearanceSection() {
         <div>
           <span className="mb-1 block text-sm font-medium">Light theme</span>
           <SegmentedControl
+            wrap
             value={lightTheme}
             onChange={setLightTheme}
             options={LIGHT_THEMES.map((t) => ({ value: t.id, label: t.label }))}
@@ -49,6 +50,7 @@ export function AppearanceSection() {
         <div>
           <span className="mb-1 block text-sm font-medium">Dark theme</span>
           <SegmentedControl
+            wrap
             value={darkTheme}
             onChange={setDarkTheme}
             options={DARK_THEMES.map((t) => ({ value: t.id, label: t.label }))}

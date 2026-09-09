@@ -245,8 +245,7 @@ report the whole household. Cover everyone in one automation by looping:
 
 To close the loop — HA (or an LLM agent) reads tasks, acts, and comments back — use the full
 REST API with a `tasks:read,tasks:write` token; see [`api.md`](api.md). For an **agentic**
-bot that reasons over a task and replies in its thread, see the Hermes path
-([`hermes.md`](hermes.md) / [`carbon-agent-api.md`](carbon-agent-api.md)).
+bot that reasons over a task and replies in its thread, use the personal API key workflow in [`api.md`](api.md).
 
 ---
 

@@ -7,7 +7,6 @@ const DOCS = `${REPO}/blob/master/docs`;
 export const LINKS = {
   usage: `${DOCS}/usage-and-shortcuts.md`,
   dataSecurity: `${DOCS}/data-security.md`,
-  hermes: `${DOCS}/hermes.md`,
   agentsApi: `${DOCS}/carbon-agent-api.md`,
   restApi: `${DOCS}/api.md`,
   homeAssistant: `${DOCS}/home-assistant.md`,

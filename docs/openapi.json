@@ -1,0 +1,368 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Carbon personal-key task API",
+    "version": "1.0.0"
+  },
+  "security": [
+    {
+      "personalKey": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "personalKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Personal key, intersected with live owner permissions and selected project subtrees"
+      }
+    }
+  },
+  "paths": {
+    "/api/tasks": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "tasks, total, limit, offset, has_more, next_offset; follow next_offset until has_more is false"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          }
+        },
+        "description": "Requires tasks:read",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ]
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Successful task response"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          },
+          "201": {
+            "description": "Created task or comment"
+          }
+        },
+        "description": "Requires inbox:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parent_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "body": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Successful task response"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          }
+        },
+        "description": "Requires tasks:read",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "Successful task response"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          }
+        },
+        "description": "Requires tasks:write",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parent_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "body": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{id}/complete": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Successful task response"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          }
+        },
+        "description": "Requires tasks:write",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/tasks/{id}/comments": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Successful task response"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Invalid, expired or revoked key"
+          },
+          "403": {
+            "description": "Scope, subtree or current user permission denied"
+          },
+          "404": {
+            "description": "Task not found or inaccessible"
+          },
+          "413": {
+            "description": "Payload or response too large"
+          },
+          "429": {
+            "description": "Quota or concurrency limit; honor Retry-After"
+          },
+          "201": {
+            "description": "Created task or comment"
+          }
+        },
+        "description": "Requires tasks:write",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "parent_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "body": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "body"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

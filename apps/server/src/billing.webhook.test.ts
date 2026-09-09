@@ -24,7 +24,9 @@
  * first imported. We do that with a dynamic import() inside `before()`.
  */
 import assert from 'node:assert/strict';
-import { test, describe, before, after } from 'node:test';
+import dns from 'node:dns/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { test, describe, before, after, mock } from 'node:test';
 import { createHmac } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Db } from '@carbon/core';
@@ -53,6 +55,9 @@ let planForVariation: (variationId: string) => string | undefined;
 let savedFetch: typeof globalThis.fetch;
 
 before(async () => {
+  // safeFetch resolves DNS before calling the mocked transport. Keep the fixture offline.
+  mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
+  syncBuiltinESMExports();
   process.env.SQUARE_WEBHOOK_SIGNATURE_KEY = WEBHOOK_KEY;
   process.env.SQUARE_WEBHOOK_URL = WEBHOOK_URL;
   const square = await import('./square');
@@ -63,6 +68,8 @@ before(async () => {
 });
 
 after(() => {
+  mock.restoreAll();
+  syncBuiltinESMExports();
   globalThis.fetch = savedFetch;
   delete process.env.SQUARE_WEBHOOK_SIGNATURE_KEY;
   delete process.env.SQUARE_WEBHOOK_URL;

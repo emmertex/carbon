@@ -5,10 +5,11 @@ import {
   firstBlobRef,
   parseThumb,
   type Db,
-} from '@carbon/core';
-import { getDb } from './db';
-import { mutate } from './mutate';
-import { getBlob, getCachedBlob, storeFile } from './blobs';
+} from "@carbon/core";
+import { getDb, getBoundIdentity } from "./db";
+import { identityKey } from "./identity";
+import { mutate } from "./mutate";
+import { getBlob, getCachedBlob, storeFile } from "./blobs";
 
 // Row thumbnails.
 //
@@ -28,16 +29,40 @@ const THUMB_MAX_PX = 320;
 /** JPEG quality — small enough to always sync, good enough for a row icon. */
 const THUMB_QUALITY = 0.72;
 
-/** Items whose thumbnail is being generated right now, so overlapping saves (the
- *  1.5s autosave plus a blur commit) don't render the same image twice. */
-const inFlight = new Set<string>();
-/** Ids that got another ensure call (or a mid-flight first-image change) while a
- *  pass was running. Value is `allowFetch` OR'd across the queued callers — if any
- *  of them may hit the network, the retry may too. */
-const queued = new Map<string, boolean>();
+interface ThumbnailWork {
+  inFlight: Set<string>;
+  queued: Map<string, boolean>;
+}
 
-function queueRetry(id: string, allowFetch: boolean): void {
-  queued.set(id, (queued.get(id) ?? false) || allowFetch);
+// A replaced SQLite handle marks a new binding lifetime, including A→B→A.
+// Identical item IDs in different bindings must not share work or retry queues.
+const workByDb = new WeakMap<Db, ThumbnailWork>();
+
+function captureBinding() {
+  const namespace = getBoundIdentity();
+  if (!namespace || identityKey() !== namespace) return null;
+  const db = getDb();
+  let work = workByDb.get(db);
+  if (!work) {
+    work = { inFlight: new Set(), queued: new Map() };
+    workByDb.set(db, work);
+  }
+  return {
+    db,
+    work,
+    isCurrent: () =>
+      getBoundIdentity() === namespace &&
+      identityKey() === namespace &&
+      getDb() === db,
+  };
+}
+
+function queueRetry(
+  work: ThumbnailWork,
+  id: string,
+  allowFetch: boolean,
+): void {
+  work.queued.set(id, (work.queued.get(id) ?? false) || allowFetch);
 }
 
 /** Decode `source` and re-encode it as a downscaled JPEG. Returns null when the
@@ -45,7 +70,7 @@ function queueRetry(id: string, allowFetch: boolean): void {
 export async function makeThumbnail(
   source: Blob,
 ): Promise<{ blob: Blob; w: number; h: number } | null> {
-  if (typeof createImageBitmap !== 'function') return null;
+  if (typeof createImageBitmap !== "function") return null;
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(source);
@@ -53,17 +78,20 @@ export async function makeThumbnail(
     return null; // not an image (or an unsupported codec) — no thumbnail, no error
   }
   try {
-    const scale = Math.min(1, THUMB_MAX_PX / Math.max(bitmap.width, bitmap.height));
+    const scale = Math.min(
+      1,
+      THUMB_MAX_PX / Math.max(bitmap.width, bitmap.height),
+    );
     const w = Math.max(1, Math.round(bitmap.width * scale));
     const h = Math.max(1, Math.round(bitmap.height * scale));
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.drawImage(bitmap, 0, 0, w, h);
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, 'image/jpeg', THUMB_QUALITY),
+      canvas.toBlob(resolve, "image/jpeg", THUMB_QUALITY),
     );
     return blob ? { blob, w, h } : null;
   } finally {
@@ -85,39 +113,51 @@ export async function makeThumbnail(
  * cannot abort A and then forget B. A mid-flight body change that invalidates the
  * thumbnail we just built is queued the same way.
  */
-export async function ensureNoteThumb(id: string, allowFetch = true): Promise<void> {
+export async function ensureNoteThumb(
+  id: string,
+  allowFetch = true,
+): Promise<void> {
+  const binding = captureBinding();
+  if (!binding) return;
+  const { inFlight, queued } = binding.work;
   if (inFlight.has(id)) {
-    queueRetry(id, allowFetch);
+    queueRetry(binding.work, id, allowFetch);
     return;
   }
   inFlight.add(id);
   try {
-    const item = getItem(getDb(), id);
+    const item = getItem(binding.db, id);
     if (!item) return;
     const src = firstBlobRef(item.note);
     const current = parseThumb(item);
     if (!src) {
       // Image removed from the note — drop the stale thumbnail reference. The blob
       // itself is left to the cache policy (it may still be referenced elsewhere).
-      if (current) mutate((db, dev) => updateItem(db, dev, id, { thumb: null }), 'thumb');
+      if (current)
+        mutate((db, dev) => updateItem(db, dev, id, { thumb: null }), "thumb");
       return;
     }
     if (current?.src === src) return;
 
-    const source = allowFetch ? await getBlob(src, null) : await getCachedBlob(src, null);
-    if (!source) return; // not available locally (and not fetchable) — try again later
+    const source = allowFetch
+      ? await getBlob(src, null)
+      : await getCachedBlob(src, null);
+    if (!binding.isCurrent() || !source) return; // not available locally (and not fetchable) — try again later
     const thumb = await makeThumbnail(source);
-    if (!thumb) return;
+    if (!binding.isCurrent() || !thumb) return;
 
     const hash = await storeFile(
-      new File([thumb.blob], `${src.slice(0, 12)}-thumb.jpg`, { type: 'image/jpeg' }),
+      new File([thumb.blob], `${src.slice(0, 12)}-thumb.jpg`, {
+        type: "image/jpeg",
+      }),
     );
+    if (!binding.isCurrent()) return;
     // Re-read: the note may have changed while we were decoding/encoding. Only
     // publish the thumbnail if it still describes the current first image; otherwise
     // queue a retry for whatever the body needs now.
-    const fresh = getItem(getDb(), id);
+    const fresh = getItem(binding.db, id);
     if (!fresh || firstBlobRef(fresh.note) !== src) {
-      queueRetry(id, allowFetch);
+      queueRetry(binding.work, id, allowFetch);
       return;
     }
     mutate(
@@ -125,16 +165,16 @@ export async function ensureNoteThumb(id: string, allowFetch = true): Promise<vo
         updateItem(db, dev, id, {
           thumb: JSON.stringify({ src, hash, w: thumb.w, h: thumb.h }),
         }),
-      'thumb',
+      "thumb",
     );
   } catch (err) {
-    console.warn('[carbon] thumbnail generation failed', err);
+    console.warn("[carbon] thumbnail generation failed", err);
   } finally {
     inFlight.delete(id);
     if (queued.has(id)) {
       const nextFetch = queued.get(id)!;
       queued.delete(id);
-      void ensureNoteThumb(id, nextFetch);
+      if (binding.isCurrent()) void ensureNoteThumb(id, nextFetch);
     }
   }
 }
@@ -147,6 +187,14 @@ export async function ensureNoteThumb(id: string, allowFetch = true): Promise<vo
  * download every image in the workspace; the 'all' policy has already pulled the
  * originals down by the time this runs, so it fills in everything.
  */
-export async function backfillThumbs(db: Db, allowFetch = false): Promise<void> {
-  for (const it of itemsNeedingThumb(db)) await ensureNoteThumb(it.id, allowFetch);
+export async function backfillThumbs(
+  db: Db,
+  allowFetch = false,
+): Promise<void> {
+  const binding = captureBinding();
+  if (!binding || binding.db !== db) return;
+  for (const it of itemsNeedingThumb(db)) {
+    if (!binding.isCurrent()) return;
+    await ensureNoteThumb(it.id, allowFetch);
+  }
 }

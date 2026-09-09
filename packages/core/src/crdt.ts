@@ -1,9 +1,13 @@
-import { v4 as uuidv4 } from 'uuid';
-import type { Db, SqlValue } from './db';
-import type { Item, ItemPatch, Op } from './types';
-import { ITEM_PATCH_FIELDS } from './types';
+import { v4 as uuidv4 } from "uuid";
+import type { Db, SqlValue } from "./db";
+import type { Item, ItemPatch, Op } from "./types";
+import { ITEM_PATCH_FIELDS } from "./types";
 
-const BOOLEAN_FIELDS = new Set<keyof ItemPatch>(['flagged', 'deleted', 'notes_project']);
+const BOOLEAN_FIELDS = new Set<keyof ItemPatch>([
+  "flagged",
+  "deleted",
+  "notes_project",
+]);
 
 type Clock = { ts: number; dev: string };
 type ClockMap = Record<string, Clock>;
@@ -17,10 +21,12 @@ type ClockMap = Record<string, Clock>;
 // so an edit made after seeing another op always wins. (A monotonic Lamport/HLC
 // hybrid; ties across devices still break on device_id.)
 
-const CLOCK_KEY = 'op_clock';
+const CLOCK_KEY = "op_clock";
 
 function readClock(db: Db): number {
-  const r = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [CLOCK_KEY]);
+  const r = db.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", [
+    CLOCK_KEY,
+  ]);
   return r ? Number(r.value) : 0;
 }
 function writeClock(db: Db, v: number): void {
@@ -58,11 +64,12 @@ export function causalNowIso(db: Db): string {
 
 function toStorage(field: keyof ItemPatch, value: unknown): SqlValue {
   if (value === null || value === undefined) return null;
-  if (BOOLEAN_FIELDS.has(field) || typeof value === 'boolean') return value ? 1 : 0;
+  if (BOOLEAN_FIELDS.has(field) || typeof value === "boolean")
+    return value ? 1 : 0;
   // Legacy/foreign ops can carry decoded JSON (geo/alerts/recurrence) instead of the
   // string the column stores — serialize rather than hand the driver an unbindable
   // object (sql.js/better-sqlite3 both throw, which would wedge ingest forever).
-  if (typeof value === 'object') return JSON.stringify(value);
+  if (typeof value === "object") return JSON.stringify(value);
   return value as SqlValue;
 }
 
@@ -81,7 +88,7 @@ function wins(opTs: number, opDev: string, clock: Clock | undefined): boolean {
  */
 export function applyOp(db: Db, op: Op): void {
   const existing = db.get<{ clocks: string }>(
-    'SELECT clocks FROM items WHERE id = ?',
+    "SELECT clocks FROM items WHERE id = ?",
     [op.item_id],
   );
   const nowIso = new Date(op.ts).toISOString();
@@ -95,9 +102,7 @@ export function applyOp(db: Db, op: Op): void {
     );
   }
 
-  const clocks: ClockMap = JSON.parse(
-    existing?.clocks ?? '{}',
-  ) as ClockMap;
+  const clocks: ClockMap = JSON.parse(existing?.clocks ?? "{}") as ClockMap;
 
   const setCols: string[] = [];
   const setVals: SqlValue[] = [];
@@ -113,13 +118,13 @@ export function applyOp(db: Db, op: Op): void {
 
   if (setCols.length === 0 && existing) return; // nothing newer to apply
 
-  setCols.push('clocks = ?');
+  setCols.push("clocks = ?");
   setVals.push(JSON.stringify(clocks));
-  setCols.push('updated_at = ?');
+  setCols.push("updated_at = ?");
   setVals.push(nowIso);
   setVals.push(op.item_id);
 
-  db.run(`UPDATE items SET ${setCols.join(', ')} WHERE id = ?`, setVals);
+  db.run(`UPDATE items SET ${setCols.join(", ")} WHERE id = ?`, setVals);
 }
 
 /** Persist an op into the log (synced=0) and apply it locally. */
@@ -148,7 +153,14 @@ export function insertOp(db: Db, op: Op, synced: boolean): void {
     `INSERT INTO ops (id, item_id, ts, device_id, fields, synced)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO NOTHING`,
-    [op.id, op.item_id, op.ts, op.device_id, JSON.stringify(op.fields ?? {}), synced ? 1 : 0],
+    [
+      op.id,
+      op.item_id,
+      op.ts,
+      op.device_id,
+      JSON.stringify(op.fields ?? {}),
+      synced ? 1 : 0,
+    ],
   );
 }
 
@@ -173,7 +185,9 @@ function rowToOp(row: OpRow): Op {
 /** Ops not yet pushed to the server (client side). */
 export function getUnsyncedOps(db: Db): Op[] {
   return db
-    .all<OpRow>('SELECT id, item_id, ts, device_id, fields FROM ops WHERE synced = 0 ORDER BY ts')
+    .all<OpRow>(
+      "SELECT id, item_id, ts, device_id, fields FROM ops WHERE synced = 0 ORDER BY ts",
+    )
     .map(rowToOp);
 }
 
@@ -186,41 +200,56 @@ const MARK_SYNCED_BATCH = 500;
 export function markOpsSynced(db: Db, ids: string[]): void {
   for (let i = 0; i < ids.length; i += MARK_SYNCED_BATCH) {
     const chunk = ids.slice(i, i + MARK_SYNCED_BATCH);
-    const placeholders = chunk.map(() => '?').join(',');
+    const placeholders = chunk.map(() => "?").join(",");
     db.run(`UPDATE ops SET synced = 1 WHERE id IN (${placeholders})`, chunk);
   }
 }
 
-/**
- * Ingest a batch of remote ops: store any new ones and apply them. Returns the
- * ops that were genuinely new (not already in the log).
- */
-export function ingestOps(db: Db, ops: Op[], markSynced: boolean): Op[] {
+export interface IngestOpsResult {
+  /** Ops that were genuinely new (not already in the log) and applied. */
+  fresh: Op[];
+  /**
+   * A4: ids of ops that could NOT be ingested (unappliable or unstoreable). They are
+   * reported so the caller can surface them in the sync response (`rejected`) instead of
+   * silently losing them. An op in `skipped` left NO trace in the log (see the
+   * savepoint rollback below) — a malformed op can never poison the shared log.
+   */
+  skipped: string[];
+}
+
+/** Ingest each new op under a savepoint. Rejection rolls back the log, shell,
+ * materialized fields, trigger effects and clock together; valid siblings survive. */
+export function ingestOps(
+  db: Db,
+  ops: Op[],
+  markSynced: boolean,
+): IngestOpsResult {
   const fresh: Op[] = [];
+  const skipped: string[] = [];
   db.transaction(() => {
-    let maxTs = 0;
     for (const op of ops) {
-      if (op.ts > maxTs) maxTs = op.ts;
-      const seen = db.get('SELECT 1 AS x FROM ops WHERE id = ?', [op.id]);
-      if (seen) continue;
-      // A single malformed op (legacy shape, foreign client) must not throw here:
-      // the transaction would roll back the whole batch, and because the sync
-      // cursor only advances on success, every future sync would re-fetch and
-      // re-hit the same op — permanently wedging the device. Skip it and converge
-      // on everything else.
+      if (db.get("SELECT 1 AS x FROM ops WHERE id = ?", [op.id])) continue;
+      db.exec("SAVEPOINT ingest_item");
       try {
         insertOp(db, op, markSynced);
         applyOp(db, op);
+        observeTs(db, op.ts);
       } catch (e) {
-        console.error(`[carbon] skipping unappliable op ${op.id} (item ${op.item_id}):`, e);
+        // Rollback failure must escape and abort the batch, never acknowledge it.
+        db.exec("ROLLBACK TO ingest_item");
+        db.exec("RELEASE ingest_item");
+        console.error(
+          `[carbon] skipping unappliable op ${op.id} (item ${op.item_id}):`,
+          e,
+        );
+        skipped.push(op.id);
         continue;
       }
+      db.exec("RELEASE ingest_item");
       fresh.push(op);
     }
-    // Advance our clock past everything in the batch so the next local edit wins.
-    observeTs(db, maxTs);
   });
-  return fresh;
+  return { fresh, skipped };
 }
 
 // ----- compaction -----------------------------------------------------------
@@ -295,7 +324,7 @@ export function ingestOps(db: Db, ops: Op[], markSynced: boolean): Op[] {
 /** True iff an op's field set is exactly {note} (the only ops we ever prune). */
 function isNoteOnlyOp(fields: ItemPatch): boolean {
   const keys = Object.keys(fields);
-  return keys.length === 1 && keys[0] === 'note';
+  return keys.length === 1 && keys[0] === "note";
 }
 
 export interface CompactOptions {
@@ -329,7 +358,7 @@ export function compactNoteOps(db: Db, opts: CompactOptions = {}): number {
   // insert, and a peer at that cursor would skip the reused op). Losers at this rowid
   // are left for a later pass, once a newer op sits physically above them.
   const maxRowid =
-    db.get<{ m: number | null }>('SELECT MAX(rowid) AS m FROM ops')?.m ?? 0;
+    db.get<{ m: number | null }>("SELECT MAX(rowid) AS m FROM ops")?.m ?? 0;
   interface Row {
     rowid: number;
     id: string;
@@ -343,12 +372,12 @@ export function compactNoteOps(db: Db, opts: CompactOptions = {}): number {
     ? db.all<Row>(
         `SELECT rowid, id, item_id, ts, device_id, fields, synced
          FROM ops
-         WHERE item_id IN (${itemIds.map(() => '?').join(',')})
+         WHERE item_id IN (${itemIds.map(() => "?").join(",")})
          ORDER BY item_id, ts`,
         itemIds,
       )
     : db.all<Row>(
-        'SELECT rowid, id, item_id, ts, device_id, fields, synced FROM ops ORDER BY item_id, ts',
+        "SELECT rowid, id, item_id, ts, device_id, fields, synced FROM ops ORDER BY item_id, ts",
       );
 
   // Per item, keep the single LWW-winning note-only op and mark every other note-only
@@ -357,7 +386,10 @@ export function compactNoteOps(db: Db, opts: CompactOptions = {}): number {
   // note-only op per item is always retained as a conservative representative).
   // Winner selection is by LWW only — the max-rowid guard affects *physical deletion*,
   // never which op is retained as the logical winner, so it can't change convergence.
-  const winners = new Map<string, { ts: number; dev: string; id: string; rowid: number }>();
+  const winners = new Map<
+    string,
+    { ts: number; dev: string; id: string; rowid: number }
+  >();
   const candidates: { id: string; rowid: number }[] = [];
   for (const r of rows) {
     const fields = JSON.parse(r.fields) as ItemPatch;
@@ -369,11 +401,21 @@ export function compactNoteOps(db: Db, opts: CompactOptions = {}): number {
 
     const cur = winners.get(r.item_id);
     if (!cur) {
-      winners.set(r.item_id, { ts: r.ts, dev: r.device_id, id: r.id, rowid: r.rowid });
+      winners.set(r.item_id, {
+        ts: r.ts,
+        dev: r.device_id,
+        id: r.id,
+        rowid: r.rowid,
+      });
     } else if (wins(r.ts, r.device_id, { ts: cur.ts, dev: cur.dev })) {
       // r supersedes the incumbent → incumbent is a prunable loser.
       candidates.push({ id: cur.id, rowid: cur.rowid });
-      winners.set(r.item_id, { ts: r.ts, dev: r.device_id, id: r.id, rowid: r.rowid });
+      winners.set(r.item_id, {
+        ts: r.ts,
+        dev: r.device_id,
+        id: r.id,
+        rowid: r.rowid,
+      });
     } else {
       // r loses to the retained winner → prunable.
       candidates.push({ id: r.id, rowid: r.rowid });
@@ -386,14 +428,16 @@ export function compactNoteOps(db: Db, opts: CompactOptions = {}): number {
   // is simply retained this pass; it's pruned on a later pass once a newer op sits
   // physically above it. This never affects convergence (the retained winner is
   // unchanged) — only which dead rows are reclaimed now vs later.
-  const toDelete = candidates.filter((c) => c.rowid < maxRowid).map((c) => c.id);
+  const toDelete = candidates
+    .filter((c) => c.rowid < maxRowid)
+    .map((c) => c.id);
 
   if (toDelete.length === 0) return 0;
   const BATCH = 500;
   db.transaction(() => {
     for (let i = 0; i < toDelete.length; i += BATCH) {
       const chunk = toDelete.slice(i, i + BATCH);
-      const ph = chunk.map(() => '?').join(',');
+      const ph = chunk.map(() => "?").join(",");
       db.run(`DELETE FROM ops WHERE id IN (${ph})`, chunk);
     }
   });

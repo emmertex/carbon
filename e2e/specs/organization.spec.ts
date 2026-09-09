@@ -31,7 +31,7 @@ test.describe('Tier 3 — organization', () => {
     await addTask(page, 'Parent project');
     const row = page.getByTestId('task-row').filter({ hasText: 'Parent project' }).first();
     await row.click();
-    await page.locator('div.lg\\:flex').getByRole('button', { name: 'Focus' }).click();
+    await page.getByTestId('task-detail').getByRole('button', { name: 'Focus' }).click();
     await expect(page.getByRole('heading', { name: 'Parent project' })).toBeVisible();
   });
 

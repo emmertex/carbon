@@ -6,6 +6,7 @@ import {
   type DragMoveEvent,
   type DragOverEvent,
   type DragEndEvent,
+  DragOverlay,
 } from '@dnd-kit/core';
 import {
   SortableContext,
@@ -27,8 +28,8 @@ import {
   isBlocked,
   type Item,
 } from '@carbon/core';
-import { useQuery } from '@/hooks/useQuery';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
+import { useQuery } from '@/hooks/useQuery';
 import { isCompactViewport } from '@/hooks/useCompact';
 import { itemAssignees } from '@/lib/enrich';
 import { mutate } from '@/lib/mutate';
@@ -349,7 +350,7 @@ export function TaskTree({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    if (editingId) return; // the edit input handles its own keys
+    if (editingId || e.target !== e.currentTarget) return; // inputs and sortable rows handle their own keys
     setKbMode(true);
     const idx = idxOf(focusedId);
     const cur = idx >= 0 ? visible[idx] : null;
@@ -490,6 +491,9 @@ export function TaskTree({
     mutate((db, dev) => moveItem(db, dev, String(active.id), proj.parentId, sortOrder));
   }
 
+  // Find the item currently being dragged for the overlay
+  const activeItem = activeId ? visible.find((f) => f.id === activeId)?.item : null;
+
   if (flat.length === 0) return null;
 
   return (
@@ -511,26 +515,42 @@ export function TaskTree({
           className="flex flex-col outline-none"
         >
           {visible.map((f) => (
-            <SortableTreeRow
-              key={f.id}
-              item={f.item}
-              depth={f.id === activeId && projected ? projected.depth : f.depth}
-              collapsible={hasKids.has(f.id)}
-              kbMode={kbMode}
-              edit={{
-                focused: focusedId === f.id,
-                editing: editingId === f.id,
-                editText,
-                onEditChange: onEditTextChange,
-                onEditKeyDown,
-                onEditBlur: (e) => onRowBlur(f.id, e),
-              }}
-              onAddSibling={addSibling}
-              onAddSubtask={addSubtask}
-            />
+            <div key={f.id} className="relative">
+              {/* Drop indicator: blue line showing where item will be placed */}
+              {overId === f.id && activeId !== f.id && (
+                <div
+                  className="absolute left-0 right-0 top-0 h-0.5 bg-accent z-20"
+                  style={{ boxShadow: '0 0 4px var(--accent)' }}
+                />
+              )}
+              <SortableTreeRow
+                item={f.item}
+                depth={f.id === activeId && projected ? projected.depth : f.depth}
+                collapsible={hasKids.has(f.id)}
+                kbMode={kbMode}
+                edit={{
+                  focused: focusedId === f.id,
+                  editing: editingId === f.id,
+                  editText,
+                  onEditChange: onEditTextChange,
+                  onEditKeyDown,
+                  onEditBlur: (e) => onRowBlur(f.id, e),
+                }}
+                onAddSibling={addSibling}
+                onAddSubtask={addSubtask}
+              />
+            </div>
           ))}
         </div>
       </SortableContext>
+      {/* Drag overlay: shows a static copy of the dragged item */}
+      <DragOverlay>
+        {activeItem && (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface shadow-xl">
+            <TaskRow item={activeItem} />
+          </div>
+        )}
+      </DragOverlay>
     </DndContext>
   );
 }

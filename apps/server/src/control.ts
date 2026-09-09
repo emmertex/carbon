@@ -39,6 +39,11 @@ export interface TenantRecord {
   /** Per-workspace blob storage cap in bytes. Null = use the server default;
    *  0 = unlimited. Enforced before accepting new blob uploads. */
   blob_quota_bytes: number | null;
+  /** Per-workspace SQLite database cap in bytes (the ops/record-ops log is the
+   *  dominant grower). Null = use the server default (DB_QUOTA_MB); 0 = unlimited.
+   *  Enforced before ingesting a sync push (a push that would exceed it is refused
+   *  with 507; the client keeps its ops unsynced). */
+  db_quota_bytes: number | null;
   /** Max human (non-bot) users this workspace may have. Null = use the server
    *  default (MAX_WORKSPACE_USERS); 0 = unlimited. Enforced on user creation. */
   max_users: number | null;
@@ -148,6 +153,7 @@ export function openControlDb(path: string): Db {
   ensureColumn(db, 'tenants', 'locked_at', 'TEXT');
   ensureColumn(db, 'tenants', 'admin_email', 'TEXT');
   ensureColumn(db, 'tenants', 'blob_quota_bytes', 'INTEGER');
+  ensureColumn(db, 'tenants', 'db_quota_bytes', 'INTEGER');
   ensureColumn(db, 'tenants', 'max_users', 'INTEGER');
   ensureColumn(db, 'tenants', 'allow_private_endpoints', 'INTEGER');
   // 1 = this workspace may use the host-shared LM (see host-lm.ts). Defaults to available
@@ -308,6 +314,12 @@ export function setTenantLock(db: Db, id: string, locked: boolean): void {
  *  default; 0 means unlimited. */
 export function setTenantBlobQuota(db: Db, id: string, bytes: number | null): void {
   db.run('UPDATE tenants SET blob_quota_bytes = ? WHERE id = ?', [bytes, id]);
+}
+
+/** Host-admin per-workspace database cap (bytes). Null resets to the server default
+ *  (DB_QUOTA_MB); 0 means unlimited. Enforced on the sync push path (see index.ts). */
+export function setTenantDbQuota(db: Db, id: string, bytes: number | null): void {
+  db.run('UPDATE tenants SET db_quota_bytes = ? WHERE id = ?', [bytes, id]);
 }
 
 /** Host-admin per-workspace user cap. Null resets to the server default

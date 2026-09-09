@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -18,58 +18,100 @@ if (gitHash === 'unknown') {
   }
 }
 
-export default defineConfig({
-  define: {
-    __APP_VERSION__: JSON.stringify(rootPkg.version),
-    __GIT_HASH__: JSON.stringify(gitHash),
-  },
-  plugins: [
-    react(),
-    tailwindcss(),
-    VitePWA({
-      // CARBON_NO_PWA=1 builds without the service worker (useful for automated
-      // screenshotting, which otherwise never reaches network-idle).
-      disable: !!process.env.CARBON_NO_PWA,
-      // Custom SW (src/sw.ts) adds push + notification handling on top of precaching.
-      strategies: 'injectManifest',
-      srcDir: 'src',
-      filename: 'sw.ts',
-      registerType: 'autoUpdate',
-      injectRegister: 'auto',
-      includeAssets: ['sql-wasm.wasm', 'sql-wasm-browser.wasm', 'favicon.png', 'apple-touch-icon.png'],
-      injectManifest: {
-        globPatterns: ['**/*.{js,css,html,wasm,svg,png,ico}'],
-        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), 'VITE_');
+  const publicSite = new URL(env.VITE_PUBLIC_SITE_URL || 'https://carbon.etx.sx/');
+  if (
+    !['http:', 'https:'].includes(publicSite.protocol) ||
+    publicSite.pathname !== '/' ||
+    publicSite.search ||
+    publicSite.hash ||
+    publicSite.username ||
+    publicSite.password
+  ) {
+    throw new Error('VITE_PUBLIC_SITE_URL must be an HTTP(S) origin');
+  }
+  return {
+    build: {
+      rollupOptions: {
+        input: {
+          app: fileURLToPath(new URL('./index.html', import.meta.url)),
+          landing: fileURLToPath(new URL('./landing.html', import.meta.url)),
+        },
       },
-      manifest: {
-        name: 'Carbon',
-        short_name: 'Carbon',
-        description: 'A simple-on-the-surface, powerful-underneath task manager.',
-        theme_color: '#0a0a0a',
-        background_color: '#0a0a0a',
-        display: 'standalone',
-        start_url: '/',
-        icons: [
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
-          // Padded so Android's circular mask can't clip the logo.
-          {
-            src: '/icon-512-maskable.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-        ],
-      },
-    }),
-  ],
-  resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
-  },
-  server: {
-    port: 3042,
-    host: true,
-  },
+    define: {
+      __APP_VERSION__: JSON.stringify(rootPkg.version),
+      __GIT_HASH__: JSON.stringify(gitHash),
+    },
+    plugins: [
+      react(),
+      tailwindcss(),
+      VitePWA({
+        // CARBON_NO_PWA=1 builds without the service worker (useful for automated
+        // screenshotting, which otherwise never reaches network-idle).
+        disable: !!process.env.CARBON_NO_PWA,
+        // Custom SW (src/sw.ts) adds push + notification handling on top of precaching.
+        strategies: 'injectManifest',
+        srcDir: 'src',
+        filename: 'sw.ts',
+        registerType: 'autoUpdate',
+        injectRegister: false,
+        includeAssets: [
+          'sql-wasm.wasm',
+          'sql-wasm-browser.wasm',
+          'favicon.png',
+          'apple-touch-icon.png',
+        ],
+        injectManifest: {
+          globPatterns: ['**/*.{js,css,html,wasm,svg,png,ico}'],
+          // Marketing HTML is customized per host and must come from the server.
+          globIgnores: ['**/landing.html', '**/shots/landing-*'],
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        },
+        manifest: {
+          name: 'Carbon',
+          short_name: 'Carbon',
+          description: 'A simple-on-the-surface, powerful-underneath task manager.',
+          theme_color: '#0a0a0a',
+          background_color: '#0a0a0a',
+          display: 'standalone',
+          start_url: '/',
+          icons: [
+            { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+            // Padded so Android's circular mask can't clip the logo.
+            {
+              src: '/icon-512-maskable.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+      }),
+      {
+        name: 'carbon-landing-metadata',
+        enforce: 'post',
+        transformIndexHtml: {
+          order: 'post',
+          handler(html, context) {
+            if (!context.filename.endsWith('landing.html')) return html;
+            return html
+              .replaceAll('https://carbon.etx.sx/', publicSite.href)
+              .replace(/<link\b[^>]*rel="manifest"[^>]*>/g, '');
+          },
+        },
+      },
+    ],
+    resolve: {
+      alias: {
+        '@': fileURLToPath(new URL('./src', import.meta.url)),
+      },
+    },
+    server: {
+      port: 3042,
+      host: true,
+    },
+  };
 });

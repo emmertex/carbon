@@ -39,13 +39,30 @@ android {
         }
     }
 
+    // Two distribution flavors of the same app:
+    //   sideload  — the full feature set (incl. background GPS tracks via a
+    //               foreground service), distributed through GitHub Releases.
+    //   playstore — the Google Play build. Play restricts background location to
+    //               a short approved-use list that doesn't include activity
+    //               tracking, so this flavor strips the background-location
+    //               permission + the GPS-track foreground service via
+    //               src/playstore/AndroidManifest.xml (tools:node="remove").
+    //               Foreground geofencing + reminders still work, and the web
+    //               bundle is built with VITE_PLAY_STORE=1 so the "Record GPS
+    //               while time-tracking" toggle is hidden.
+    flavorDimensions "distribution"
+    productFlavors {
+        sideload {}
+        playstore {}
+    }
+
     signingConfigs {
         release {
             if (ciKeystorePath) {
                 storeFile file(ciKeystorePath)
                 storePassword System.getenv("CARBON_ANDROID_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("CARBON_ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("CARBON_ANDROID_KEY_PASSWORD")
+                keyPassword System.getenv("CARBON_ANDROID_KEYSTORE_PASSWORD")
             } else {
                 storeFile file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']

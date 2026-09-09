@@ -71,13 +71,16 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
-docs/internal/
 
 # Playwright benchmark artifacts
 test-results/
 perf/test-results/
 e2e/test-results/
 e2e/.tmp/
+
+# Locally-installed Playwright browsers (workspace-local, per-machine; see
+# LD_LIBRARY_PATH / PLAYWRIGHT_BROWSERS_PATH in the e2e run notes). Never commit.
+.pw-browsers/
 
 # Python bytecode (hermes scripts)
 __pycache__/

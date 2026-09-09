@@ -1,10 +1,9 @@
 # Carbon
 
-**1.0** — a self-hosted task manager that's **simple on the surface** (like Todoist /
-Microsoft To-Do) and **powerful underneath** (projects, tags/contexts, defer & due dates,
-review, recurrence, flags — the OmniFocus toolbox). It runs **fully offline** in the
-browser and syncs to your own server whenever it's reachable. No SaaS, no accounts you
-don't control. See [CHANGELOG.md](CHANGELOG.md) for what's in this release.
+Carbon is a task manager for capturing ideas, organizing projects, planning next
+actions and reviewing progress. Start locally without an account, use a hosted
+workspace, or run your own sync server. See [CHANGELOG.md](CHANGELOG.md) for release
+changes and the [usage guide](docs/usage-and-shortcuts.md) to get started.
 
 ## Architecture
 
@@ -30,6 +29,9 @@ npm run dev          # web on :3042, server on :3069 (via turbo)
 
 Open http://localhost:3042. The app works with no server configured (local-only). To sync,
 open **Settings** and point it at your server URL.
+
+The public landing page has a separate static entry. For preview and deployment
+routing, see [Landing page setup](docs/landing-page.md).
 
 ## Self-host (Docker)
 
@@ -144,14 +146,9 @@ Two kinds:
   **Endpoint** is the *base URL* that exposes `/chat/completions` — usually ending
   in `/v1` (e.g. `http://10.2.x.x:1234/v1`). Set model, API key, system prompt.
 
-- **Agentic webhook** (Hermes / OpenClaw) — Hermes is a *framework*, not a model, so
-  it's configured differently. Carbon **POSTs the trigger** (`event`, task, comment
-  thread, your instructions) to the agent's **Webhook URL** (with an optional
-  `x-carbon-secret` header), and the framework **acts back via the Carbon REST API**
-  using the **token issued once at creation**. So: point its webhook at Carbon's
-  trigger, and configure Hermes with the issued token + your Carbon URL; it replies
-  with `POST /api/tasks/:id/comments` and finishes with `POST /api/tasks/:id/complete`.
-  Full integration reference for building a skill: [`docs/carbon-agent-api.md`](docs/carbon-agent-api.md).
+- **External clients** use personal API keys from Settings → Integrations. Choose
+  read/write capabilities, expiry and optional project subtrees. Members may create
+  keys unless the administrator disables creation. See [API guide](docs/api.md).
 
 ## Status
 

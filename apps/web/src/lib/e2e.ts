@@ -11,6 +11,17 @@ export function registerE2eHooks(): void {
     get ready() {
       return useStore.getState().ready;
     },
+    async seedReorderTasks(count: number): Promise<string[]> {
+      const { createItem } = await import('@carbon/core');
+      const { getDeviceId, persist } = await import('./db');
+      const ids: string[] = [];
+      for (let i = 0; i < Math.min(count, 500); i++)
+        ids.push(createItem(getDb(), getDeviceId(), { title: `Reorder ${i}`, ownerId: useStore.getState().currentUser?.id ?? null }).id);
+      useStore.getState().bump();
+      await persist();
+      return ids;
+    },
+    firstTapDetails(value: boolean): void { useStore.getState().setUiPrefs({ firstTapDetails: value }); },
     async reset(): Promise<void> {
       const { registerDevSeed } = await import('./devSeed');
       registerDevSeed();

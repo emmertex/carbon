@@ -1,3 +1,5 @@
+import type { ClientRequest } from "node:http";
+import { Agent as HttpsAgent } from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { Agent } from "undici";
@@ -110,11 +112,25 @@ async function checkSafeEndpoint(
     if (isPrivateIp(host)) throw new EndpointError(blocked);
     return { addresses: [host] };
   }
-  const addrs = await lookup(host, { all: true });
+  const addrs = await boundedLookup(host);
   for (const { address } of addrs) {
     if (isPrivateIp(address)) throw new EndpointError(blocked);
   }
   return { addresses: addrs.map((a) => a.address) };
+}
+
+let activeDns = 0;
+/** Keep a DNS slot until the native resolver actually settles, even if the caller
+ * has already timed out. This prevents abandoned lookups accumulating indefinitely. */
+async function boundedLookup(host: string) {
+  if (activeDns >= 64)
+    throw new EndpointError("outbound DNS capacity exceeded; retry later");
+  activeDns++;
+  try {
+    return await lookup(host, { all: true });
+  } finally {
+    activeDns--;
+  }
 }
 
 /** Throws EndpointError if rawUrl isn't a safe outbound target. */
@@ -125,6 +141,36 @@ export async function assertSafeEndpoint(
   await checkSafeEndpoint(rawUrl, allowPrivate);
 }
 
+/**
+ * A2: best-effort SSRF pre-check for transports that open their OWN socket and can't be
+ * pinned to the addresses we validated (web-push's `sendNotification`). Returns `false`
+ * ONLY when the target is CONFIRMED private/LAN — an IP literal, a `localhost`/`*.localhost`
+ * name, or a hostname that RESOLVES to a private address. A hostname that fails to resolve
+ * (NXDOMAIN, offline/dev) returns `true`: it cannot be connected to either, so the attempt
+ * simply fails at connect rather than reaching anything sensitive. That keeps the guard
+ * from breaking legitimate push providers in offline environments while still never
+ * opening a socket to a confirmed private target.
+ */
+export async function isOutboundTargetAllowed(url: string): Promise<boolean> {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false; // not a URL at all
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+  if (isIP(host)) return !isPrivateIp(host);
+  try {
+    const addrs = await boundedLookup(host);
+    for (const { address } of addrs) if (isPrivateIp(address)) return false;
+    return true;
+  } catch {
+    return true; // unresolvable → the transport can't connect anyway; let it fail naturally
+  }
+}
+
 /** Default outbound request timeout. Without it a hung upstream (TCP accepted, no
  *  response) would stall the caller indefinitely — the server-side `[timeout:..]` in an
  *  Overpass QL is not a socket timeout. */
@@ -133,6 +179,24 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 /** Redirect hops safeFetch will follow before giving up (matches curl/browser defaults). */
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** A2: cap on the outbound response body size we're willing to buffer. Without it a
+ *  hostile (or MITM'd on `http:`) upstream can send `Content-Length: 10GB` and stream
+ *  garbage; a caller doing `await res.text()`/`res.json()` buffers it all → memory
+ *  exhaustion. Normal responses are KBs-to-low-MBs, so 16MB is generous; override with
+ *  OUTBOUND_MAX_RESPONSE_MB. All bodies, including chunked/decompressed responses, are counted while read. */
+const MAX_RESPONSE_BYTES =
+  Math.floor(Number(process.env.OUTBOUND_MAX_RESPONSE_MB) || 16) * 1024 * 1024;
+
+/** Throws EndpointError if `res` declares a body larger than MAX_RESPONSE_BYTES. */
+function assertResponseBounded(res: Response): void {
+  const len = Number(res.headers.get("content-length"));
+  if (Number.isFinite(len) && len > 0 && len > MAX_RESPONSE_BYTES) {
+    throw new EndpointError(
+      `outbound response is too large (${len} bytes, cap ${MAX_RESPONSE_BYTES})`,
+    );
+  }
+}
 
 /**
  * Headers that authenticate the caller to the host it addressed, and so must not
@@ -146,12 +210,12 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
  * (federation's `__link_secret`) is only as safe as the peer origin it was sent to.
  */
 const CREDENTIAL_HEADERS = [
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'x-api-key',
-  'x-carbon-secret',
-  'x-federation-secret',
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-api-key",
+  "x-carbon-secret",
+  "x-federation-secret",
 ];
 
 function stripCredentials(headers: RequestInit["headers"]): Headers {
@@ -186,8 +250,8 @@ function pinnedDispatcher(addresses: string[]): Agent {
  * Redirects are followed manually (up to MAX_REDIRECTS), re-validating and re-pinning
  * each hop's target — otherwise a public endpoint could 3xx-redirect to a private one
  * (e.g. cloud metadata) and the guard would never see the real destination. Pass
- * `timeoutMs` to override (0 disables). If the caller supplies its own `init.signal` we
- * respect it and skip the internal timeout.
+ * `timeoutMs` to override (0 disables). Caller cancellation and the deadline are
+ * combined; redirects, rejected/consumed/cancelled bodies and deadlines release sockets.
  */
 export async function safeFetch(
   url: string,
@@ -195,46 +259,214 @@ export async function safeFetch(
   init?: RequestInit,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<Response> {
-  const signal =
-    init?.signal ?? (timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined);
+  const signals = [
+    init?.signal,
+    timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined,
+  ].filter((s): s is AbortSignal => !!s);
+  const signal = signals.length ? AbortSignal.any(signals) : undefined;
+  // DNS is part of the request deadline too. Native resolver work cannot be
+  // cancelled, but the caller and its transport lifecycle are never held by it.
+  const abortable = async <T>(promise: Promise<T>): Promise<T> => {
+    if (!signal) return promise;
+    signal.throwIfAborted();
+    let abort!: () => void;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+        }),
+      ]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  };
   let current = url;
   let method = init?.method ?? "GET";
   let body = init?.body;
   let headers = init?.headers;
-  let origin: string | null = null;
+  const origin = new URL(url).origin;
   for (let hop = 0; ; hop++) {
-    const { addresses } = await checkSafeEndpoint(current, allowPrivate);
-    // Safe to parse: checkSafeEndpoint just did, and threw if it wasn't a URL.
-    origin ??= new URL(current).origin;
-    const dispatcher = addresses.length ? pinnedDispatcher(addresses) : undefined;
-    const res = await fetch(current, {
-      ...init,
-      method,
-      body,
-      headers,
-      redirect: "manual",
-      signal,
-      ...(dispatcher ? { dispatcher } : {}),
-    } as RequestInit);
-    if (!REDIRECT_STATUSES.has(res.status)) return res;
-    const location = res.headers.get("location");
-    if (!location) return res;
-    if (hop >= MAX_REDIRECTS)
-      throw new EndpointError("too many redirects while resolving the endpoint");
-    // Per the fetch redirect spec: 303 always downgrades non-GET/HEAD to a bodyless
-    // GET; 301/302 do the same but only for POST. 307/308 preserve method and body.
-    if (res.status === 303 && method !== "GET" && method !== "HEAD") {
-      method = "GET";
-      body = undefined;
-    } else if ((res.status === 301 || res.status === 302) && method === "POST") {
-      method = "GET";
-      body = undefined;
+    const { addresses } = await abortable(
+      checkSafeEndpoint(current, allowPrivate),
+    );
+    const dispatcher = addresses.length
+      ? pinnedDispatcher(addresses)
+      : undefined;
+    let res: Response | undefined;
+    try {
+      res = await fetch(current, {
+        ...init,
+        method,
+        body,
+        headers,
+        redirect: "manual",
+        signal,
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit);
+      assertResponseBounded(res);
+      const location = res.headers.get("location");
+      if (REDIRECT_STATUSES.has(res.status) && location) {
+        await res.body?.cancel();
+        await dispatcher?.destroy();
+        if (hop >= MAX_REDIRECTS)
+          throw new EndpointError(
+            "too many redirects while resolving the endpoint",
+          );
+        if (
+          (res.status === 303 && method !== "GET" && method !== "HEAD") ||
+          ((res.status === 301 || res.status === 302) && method === "POST")
+        ) {
+          method = "GET";
+          body = undefined;
+        }
+        const next = new URL(location, current);
+        if (next.origin !== origin) {
+          headers = stripCredentials(headers);
+          // A body may contain link secrets; never forward it across origins.
+          if (body != null)
+            throw new EndpointError(
+              "refusing cross-origin redirect of a request body",
+            );
+        }
+        current = next.toString();
+        continue;
+      }
+      if (!res.body) {
+        await dispatcher?.destroy();
+        return res;
+      }
+      const reader = res.body.getReader();
+      let received = 0;
+      let closed = false;
+      let controller: ReadableStreamDefaultController<Uint8Array>;
+      const cleanup = async () => {
+        if (closed) return;
+        closed = true;
+        signal?.removeEventListener("abort", onAbort);
+        try {
+          await reader.cancel();
+        } finally {
+          await dispatcher?.destroy();
+        }
+      };
+      const onAbort = () => {
+        if (closed) return;
+        controller.error(signal?.reason);
+        void cleanup();
+      };
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+          signal?.addEventListener("abort", onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+        },
+        async pull(c) {
+          if (closed) return;
+          try {
+            const chunk = await abortable(reader.read());
+            if (closed) return;
+            if (chunk.done) {
+              c.close();
+              await cleanup();
+              return;
+            }
+            received += chunk.value.byteLength;
+            if (received > MAX_RESPONSE_BYTES)
+              throw new EndpointError(
+                `outbound response exceeds ${MAX_RESPONSE_BYTES} bytes`,
+              );
+            c.enqueue(chunk.value);
+          } catch (error) {
+            if (!closed) c.error(error);
+            await cleanup();
+          }
+        },
+        cancel: cleanup,
+      });
+      const response = new Response(stream, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
+      Object.defineProperty(response, "url", { value: res.url });
+      return response;
+    } catch (error) {
+      await res?.body?.cancel().catch(() => {});
+      await dispatcher?.destroy();
+      throw error;
     }
-    const next = new URL(location, current);
-    // Credentials belong to the origin the caller chose. Once the chain leaves it
-    // they stop travelling — and they stay gone if a later hop comes back, since
-    // `headers` is never restored from `init`.
-    if (next.origin !== origin) headers = stripCredentials(headers);
-    current = next.toString();
   }
+}
+
+/** Native HTTPS transports get the same checked DNS answers and an end-to-end
+ * deadline, including DNS, with deterministic agent teardown on every outcome. */
+export async function withSafeHttpsAgent<T>(
+  url: string,
+  send: (agent: HttpsAgent) => Promise<T>,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  if (new URL(url).protocol !== "https:")
+    throw new EndpointError("push endpoint must use HTTPS");
+  let agent: HttpsAgent | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
+  try {
+    return await Promise.race([
+      (async () => {
+        const { addresses } = await checkSafeEndpoint(url, false);
+        if (expired) throw new EndpointError("outbound request timed out");
+        agent = new HttpsAgent({
+          lookup: (_host, opts, cb) => {
+            if (opts.all)
+              cb(
+                null,
+                addresses.map((address) => ({
+                  address,
+                  family: isIP(address),
+                })),
+              );
+            else cb(null, addresses[0], isIP(addresses[0]));
+          },
+        });
+        const bounded = agent as HttpsAgent & {
+          addRequest(req: ClientRequest, ...args: unknown[]): void;
+        };
+        const add = bounded.addRequest.bind(agent);
+        bounded.addRequest = (req, ...args) => {
+          boundNativeResponse(req);
+          add(req, ...args);
+        };
+        return send(agent);
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          expired = true;
+          agent?.destroy();
+          reject(new EndpointError("outbound request timed out"));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    agent?.destroy();
+  }
+}
+
+/** Enforce a body cap before native libraries append response chunks to strings. */
+export function boundNativeResponse(
+  req: Pick<ClientRequest, "on" | "destroy">,
+): void {
+  req.on("response", (res) => {
+    let bytes = 0;
+    res.on("data", (chunk: Buffer | string) => {
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > MAX_RESPONSE_BYTES)
+        req.destroy(new EndpointError("outbound response exceeds byte limit"));
+    });
+    const length = Number(res.headers["content-length"]);
+    if (length > MAX_RESPONSE_BYTES)
+      req.destroy(new EndpointError("outbound response exceeds byte limit"));
+  });
 }

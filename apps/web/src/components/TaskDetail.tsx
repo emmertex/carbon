@@ -17,10 +17,8 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  getItem,
-  getProjects,
+  getItem, dependencyCandidates, depWouldCycle, isLineage, type Db,
   getChildren,
-  allItems,
   projectAncestor,
   getItemTags,
   listTags,
@@ -30,8 +28,6 @@ import {
   getPredecessors,
   getSuccessors,
   setItemDepLink,
-  depWouldCycle,
-  isLineage,
   setCompleted,
   deleteItem,
   parseRecurrence,
@@ -125,51 +121,63 @@ const PRIORITIES = [
 
 const inputCls = cn("w-full", inputBase);
 
-/** Today / Tomorrow / 3 Days / 1 Week quick-set buttons + a date picker for
- *  anything else. `onPick` receives a yyyy-MM-dd string; `onClear` clears the field. */
+/** A date field with a Today quick-set + Clear, plus a row of -1 week / -1 day /
+ *  +1 day / +1 week shift chips. `onPick` receives a yyyy-MM-dd string; `onClear`
+ *  clears the field. The shift chips anchor on `base` (an ISO date), or today when
+ *  it's empty. */
 function DateShortcuts({
   value,
   onPick,
   onClear,
-  extras,
+  base,
 }: {
   value: string | null;
   onPick: (dateStr: string) => void;
   onClear: () => void;
-  /** Extra chips rendered just after the date picker (e.g. defer "-1 day"). */
-  extras?: React.ReactNode;
+  /** Reference date for the +/- shift chips (ISO). Falls back to today when null. */
+  base: string | null;
 }) {
-  const opts: [string, number][] = [
-    ["Today", 0],
-    ["Tomorrow", 1],
-    ["3 Days", 3],
-    ["1 Week", 7],
+  const shifts: [string, number][] = [
+    ["-1 Week", -7],
+    ["-1 day", -1],
+    ["+1 day", 1],
+    ["+1 week", 7],
   ];
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {opts.map(([label, n]) => (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input
+          type="date"
+          title="Pick a date"
+          className={cn(inputCls, "w-auto")}
+          value={toDateInput(value)}
+          onChange={(e) => (e.target.value ? onPick(e.target.value) : onClear())}
+        />
         <button
-          key={label}
           type="button"
           className={chipCls}
-          onClick={() => onPick(dateInputOffset(n))}
+          onClick={() => onPick(dateInputOffset(0))}
         >
-          {label}
+          Today
         </button>
-      ))}
-      <input
-        type="date"
-        title="Pick a date"
-        className={cn(inputCls, "w-auto")}
-        value={toDateInput(value)}
-        onChange={(e) => (e.target.value ? onPick(e.target.value) : onClear())}
-      />
-      {extras}
-      {value && (
-        <button type="button" className={chipCls} onClick={onClear}>
-          Clear
-        </button>
-      )}
+        {value && (
+          <button type="button" className={chipCls} onClick={onClear}>
+            Clear
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {shifts.map(([label, n]) => (
+          <button
+            key={label}
+            type="button"
+            className={chipCls}
+            onClick={() => onPick(dateInputShift(base, n))}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -221,11 +229,11 @@ const UNIT: Record<RecurrenceRule["type"], string> = {
  *  a task id so duplicate titles stay unambiguous). Each pick calls `onAdd`;
  *  multiple picks are supported — the chosen tasks render as pills by the caller. */
 function DepPicker({
-  candidates,
+  load,
   placeholder,
   onAdd,
 }: {
-  candidates: Item[];
+  load: (db: Db, query: string) => Item[];
   placeholder: string;
   onAdd: (id: string) => void;
 }) {
@@ -233,11 +241,7 @@ function DepPicker({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const query = q.trim().toLowerCase();
-  const matches = (
-    query
-      ? candidates.filter((c) => (c.title || "Untitled").toLowerCase().includes(query))
-      : candidates
-  ).slice(0, 8);
+  const matches = useQuery((db) => open ? load(db, query) : [], [open, query, load]) ?? [];
 
   function add(id: string) {
     onAdd(id);
@@ -272,7 +276,7 @@ function DepPicker({
           }
         }}
         placeholder={placeholder}
-        className={inputCls}
+        className={cn(inputCls, "w-full min-w-0 max-w-full")}
       />
       {open && (matches.length > 0 || query) && (
         <ul className="absolute left-0 top-full z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-border bg-surface py-1 shadow-lg">
@@ -324,30 +328,11 @@ export function TaskDetail({ id }: { id: string }) {
       // make sense within one project's plan.
       const predecessors = getPredecessors(db, id);
       const successors = getSuccessors(db, id);
-      const linkedIds = new Set([...predecessors, ...successors].map((i) => i.id));
-      const myProjectId = projectAncestor(db, id)?.id ?? null;
-      const otherTasks = allItems(db).filter(
-        (t) =>
-          t.type === "task" &&
-          t.id !== id &&
-          t.status !== "done" &&
-          !linkedIds.has(t.id) &&
-          (projectAncestor(db, t.id)?.id ?? null) === myProjectId,
-      );
-      const blockedByCandidates = otherTasks.filter(
-        (t) => !isLineage(db, t.id, id) && !depWouldCycle(db, t.id, id),
-      );
-      const blocksCandidates = otherTasks.filter(
-        (t) => !isLineage(db, id, t.id) && !depWouldCycle(db, id, t.id),
-      );
       return {
         item,
         hasChildren: getChildren(db, id).length > 0,
         predecessors,
         successors,
-        blockedByCandidates,
-        blocksCandidates,
-        projects: getProjects(db),
         // The task's project is its nearest project ancestor — for a subtask
         // `parent_id` points at another task, not the project.
         projectId: projectAncestor(db, item.id)?.id ?? null,
@@ -443,7 +428,7 @@ export function TaskDetail({ id }: { id: string }) {
 
   if (!data) {
     return (
-      <div className="flex h-full flex-col items-center justify-center text-sm text-text-muted">
+      <div className="@container flex h-full flex-col items-center justify-center text-sm text-text-muted">
         <p>Task not found</p>
         <button className="mt-2 text-accent" onClick={() => select(null)}>
           Close
@@ -460,9 +445,6 @@ export function TaskDetail({ id }: { id: string }) {
     hasChildren,
     predecessors,
     successors,
-    blockedByCandidates,
-    blocksCandidates,
-    projects,
     projectId,
     tags,
     allTags,
@@ -707,7 +689,7 @@ export function TaskDetail({ id }: { id: string }) {
   const timeSummary = totalTime > 0 ? formatDuration(totalTime) : "None";
 
   return (
-    <div className="flex h-full flex-col" data-testid="task-detail">
+    <div className="@container flex h-full flex-col" data-testid="task-detail">
       <header className="flex items-center gap-1 border-b border-border px-3 py-2">
         <button
           onClick={() => select(null)}
@@ -1026,7 +1008,7 @@ export function TaskDetail({ id }: { id: string }) {
         )}
 
         {!isProject && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-4 @[520px]:grid-cols-2">
             {/* Priority is task-scheduling — hidden on notes (value kept in the DB). */}
             {!isNote && (
               <div>
@@ -1045,19 +1027,11 @@ export function TaskDetail({ id }: { id: string }) {
             )}
             <div>
               <Label>Project</Label>
-              <Select
-                value={projectId ?? ""}
-                onChange={(e) => patch({ parent_id: e.target.value || null })}
-              >
-                <option value="">Inbox (no project)</option>
-                {projects
-                  .filter((p) => p.id !== id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title || "Untitled project"}
-                    </option>
-                  ))}
-              </Select>
+              <p className="mb-2 break-words text-sm">{projectId ? getItem(getDb(), projectId)?.title : "Inbox (no project)"}</p>
+              <DepPicker placeholder="Move to project…"
+                load={(db, q) => db.all<{ id: string }>("SELECT id FROM items WHERE type = 'project' AND deleted = 0 AND id != ? AND instr(lower(title), lower(?)) > 0 ORDER BY title, id LIMIT 8", [id, q]).map((r) => getItem(db, r.id)!)}
+                onAdd={(project) => patch({ parent_id: project })} />
+              {projectId && <button className="mt-2 text-xs text-accent" onClick={() => patch({ parent_id: null })}>Move to Inbox</button>}
             </div>
           </div>
         )}
@@ -1134,6 +1108,7 @@ export function TaskDetail({ id }: { id: string }) {
               <Label>Due</Label>
               <DateShortcuts
                 value={item.due_date}
+                base={item.due_date}
                 onPick={(d) =>
                   patch({
                     due_date: combineDateTime(d, toTimeInput(item.due_date)),
@@ -1160,43 +1135,12 @@ export function TaskDetail({ id }: { id: string }) {
             {gtdTools || showDefer ? (
             <div>
               <Label>Defer until</Label>
-              {(() => {
-                // Subtract relative to the deferred date, or the due date when no
-                // defer is set yet. Unavailable when neither exists.
-                const base = item.defer_date ?? item.due_date;
-                return (
-                  <DateShortcuts
-                    value={item.defer_date}
-                    onPick={(d) => patch({ defer_date: fromDateInput(d) })}
-                    onClear={() => patch({ defer_date: null })}
-                    extras={
-                      base
-                        ? (
-                            [
-                              ["-1 day", 1],
-                              ["-1 week", 7],
-                            ] as [string, number][]
-                          ).map(([label, n]) => (
-                            <button
-                              key={label}
-                              type="button"
-                              className={chipCls}
-                              onClick={() =>
-                                patch({
-                                  defer_date: fromDateInput(
-                                    dateInputShift(base, -n),
-                                  ),
-                                })
-                              }
-                            >
-                              {label}
-                            </button>
-                          ))
-                        : null
-                    }
-                  />
-                );
-              })()}
+              <DateShortcuts
+                value={item.defer_date}
+                base={item.defer_date ?? item.due_date}
+                onPick={(d) => patch({ defer_date: fromDateInput(d) })}
+                onClear={() => patch({ defer_date: null })}
+              />
             </div>
             ) : (
               <button
@@ -1238,7 +1182,7 @@ export function TaskDetail({ id }: { id: string }) {
               </div>
               <input
                 type="datetime-local"
-                className={inputCls}
+                className={cn(inputCls, "w-full min-w-0 max-w-full")}
                 value={toDateTimeInput(item.reminder_at)}
                 onChange={(e) =>
                   patch({ reminder_at: fromDateTimeInput(e.target.value) })
@@ -1449,7 +1393,7 @@ export function TaskDetail({ id }: { id: string }) {
                   ))}
                 </div>
                 <DepPicker
-                  candidates={blockedByCandidates}
+                  load={(db, q) => dependencyCandidates(db, id, "predecessor", q)}
                   placeholder="Search tasks to add as prerequisite…"
                   onAdd={addBlockedBy}
                 />
@@ -1469,7 +1413,7 @@ export function TaskDetail({ id }: { id: string }) {
                   ))}
                 </div>
                 <DepPicker
-                  candidates={blocksCandidates}
+                  load={(db, q) => dependencyCandidates(db, id, "successor", q)}
                   placeholder="Search tasks this blocks…"
                   onAdd={addBlocks}
                 />

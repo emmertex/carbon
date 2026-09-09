@@ -17,6 +17,7 @@ import { ensureUserPrefsTables } from './user-prefs';
 import { ensureNoticeTables } from './notices';
 import { ensureFederationTables, ensureGovernanceTables } from './federation';
 import { ensurePurgeNoticeTable } from './purge-notices';
+import type { FetchApp } from './tenant';
 
 export type TestDb = ReturnType<typeof openDb>;
 
@@ -68,9 +69,29 @@ export function makeHono(db: TestDb, allowOpen = true) {
   return app;
 }
 
-/** Fire a request against a Hono app without a real HTTP server. */
+export interface WorkspaceDb {
+  db: TestDb;
+  deviceId: string;
+  vapidPublicKey: string;
+}
+
+/** N independent, current-version in-memory workspace (tenant) DBs — the
+ *  "multiple workspaces" fixture. Each is a valid tenant DB (schema + server
+ *  tables + its own device id / VAPID key), so integration tests can exercise
+ *  cross-tenant / multi-workspace flows (federation, tenant isolation, …)
+ *  without spinning up real tenants. */
+export function makeWorkspaceDbs(n: number): WorkspaceDb[] {
+  return Array.from({ length: n }, () => {
+    const { db, deviceId, vapidPublicKey } = makeTestDb();
+    return { db, deviceId, vapidPublicKey };
+  });
+}
+
+/** Fire a request against an app without a real HTTP server. Accepts any
+ *  FetchApp (a Hono instance, or the real per-tenant app returned by
+ *  buildTenantApp in index.ts) so tests can reach the production route table. */
 export function appFetch(
-  app: Hono<{ Variables: AuthVars }>,
+  app: FetchApp,
   path: string,
   init?: RequestInit,
 ): Promise<Response> {

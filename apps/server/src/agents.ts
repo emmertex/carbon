@@ -24,7 +24,7 @@ class LLMHttpError extends Error {
 }
 
 // openai/anthropic: Carbon calls the LLM directly and posts the reply.
-// webhook: Carbon notifies an agentic framework (Hermes/OpenClaw) which acts back
+// webhook: Carbon notifies an agentic framework (external client) which acts back
 //   via the Carbon REST API using its own token.
 export type AgentKind = 'openai' | 'anthropic' | 'webhook';
 

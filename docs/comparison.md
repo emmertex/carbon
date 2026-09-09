@@ -171,7 +171,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Direct LLM integration             | ✓ **OpenAI/Anthropic/webhook agents** (sync server)                          | "AI Assistant" (Pro, limited) | ✗         | Copilot (peripheral) |
 | **In-app NL commands**             | ✓ **keyword-triggered Add box → LLM tool loop** (sync server)                | ✗                             | ✗         | ✗                    |
 | **Telegram bot**                   | ✓ **per-server bot, per-user linking, conversational replies** (sync server) | Via integrations              | ✗         | ✗                    |
-| **Agentic-framework webhook**      | ✓ **Hermes/OpenClaw-compatible webhook path** (sync server)                  | ✗                             | ✗         | ✗                    |
+| **Agentic-framework webhook**      | ✓ **Generic external webhook path** (sync server)                  | ✗                             | ✗         | ✗                    |
 | Trigger agent by `@mention`/assign | ✓ (sync server)                                                              | ✗                             | ✗         | ✗                    |
 | Configurable agent prompt          | ✓ (sync server)                                                              | ✗                             | ✗         | ✗                    |
 

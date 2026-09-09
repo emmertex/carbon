@@ -1260,6 +1260,15 @@ function forgesLocalIdentity(db: Db, rec: RecordOp): boolean {
  *  - **No ts clamp** (peer causal clock; clamping corrupts LWW). Still `observeTs`.
  *  - **Tags dropped** (tag/item_tag). `triggerAgents` is NEVER called by the ingest.
  *
+ *
+ * A1 note: this is a DISTINCT authorization context from the user-scoped shared module
+ * (apps/server/src/authorize.ts) — a peer SERVER is not a local user, so it is gated by
+ * the link's granted subtree (above), not by hasWriteAccess(item, user). Within that
+ * boundary the same data-level protections apply (owner_id protection, identity remap +
+ * forgesLocalIdentity, mention stripping), matching the record-identity and destination
+ * rules the shared module enforces for a user. The user-scoped surfaces (sync, REST,
+ * agent, telegram) all route through the shared module.
+ *
  * Returns the sanitized `{ ops, records }`; the caller ingests them (idempotent).
  */
 export function sanitizeFederatedPush(

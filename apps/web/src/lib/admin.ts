@@ -97,12 +97,14 @@ export interface ApiToken {
   user_id: string;
   name: string;
   scopes: string[];
+  project_ids: string[] | null;
+  expires_at: string | null;
   created_at: string;
   last_used_at: string | null;
 }
 
 export async function adminListTokens(): Promise<ApiToken[]> {
-  const res = await fetch(url('/api/admin/tokens'), { headers: authHeaders(getServerConfig()) });
+  const res = await fetch(url('/api/keys'), { headers: authHeaders(getServerConfig()) });
   if (!res.ok) throw new Error(`list tokens failed: ${res.status}`);
   return ((await res.json()) as { tokens: ApiToken[] }).tokens;
 }
@@ -111,8 +113,10 @@ export async function adminListTokens(): Promise<ApiToken[]> {
 export async function adminCreateToken(input: {
   name: string;
   scopes: string[];
+  expiresAt?: string | null;
+  projectIds?: string[] | null;
 }): Promise<string> {
-  const res = await fetch(url('/api/admin/tokens'), {
+  const res = await fetch(url('/api/keys'), {
     method: 'POST',
     headers: authHeaders(getServerConfig()),
     body: JSON.stringify(input),
@@ -122,7 +126,7 @@ export async function adminCreateToken(input: {
 }
 
 export async function adminRevokeToken(id: string): Promise<void> {
-  const res = await fetch(url(`/api/admin/tokens/${id}`), {
+  const res = await fetch(url(`/api/keys/${id}`), {
     method: 'DELETE',
     headers: authHeaders(getServerConfig()),
   });
@@ -225,18 +229,52 @@ export async function getNlConfig(): Promise<NlConfig> {
   return (await res.json()) as NlConfig;
 }
 
-export interface CommandReply {
-  reply: string;
-  executed?: unknown[];
-  usage?: { input: number; output: number };
+/** A share/assign action the assistant proposed that is parked until the user confirms it. */
+export interface PendingAction {
+  tool: 'share' | 'assign';
+  args: Record<string, unknown>;
+  /** Human-readable sentence describing exactly what a confirmation will do. */
+  description: string;
 }
 
-/** Run a natural-language command server-side (acts as the signed-in user). */
-export async function runCommand(text: string, currentProjectId?: string | null): Promise<CommandReply> {
+/** A tool call an earlier turn of the command already executed (echoed back on the confirm
+ *  re-send so the server skips re-applying it). */
+export interface ExecutedCall {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+export interface CommandReply {
+  reply: string;
+  executed?: ExecutedCall[];
+  usage?: { input: number; output: number };
+  /** Parked share/assign actions awaiting the user's confirmation. */
+  pending?: PendingAction[];
+}
+
+/** What a confirm re-send carries: the parked actions to apply (echoed verbatim) plus the
+ *  mutations the first turn already performed (so they aren't duplicated). */
+export interface CommandConfirm {
+  confirm: PendingAction[];
+  skip: ExecutedCall[];
+}
+
+/** Run a natural-language command server-side (acts as the signed-in user). On the confirm
+ *  re-send, pass the `pending` + `executed` values from the first response verbatim. */
+export async function runCommand(
+  text: string,
+  currentProjectId?: string | null,
+  confirmed?: CommandConfirm,
+): Promise<CommandReply> {
   const res = await fetch(url('/api/agent/command'), {
     method: 'POST',
     headers: authHeaders(getServerConfig()),
-    body: JSON.stringify({ text, timezone: localTimezone(), currentProjectId: currentProjectId ?? undefined }),
+    body: JSON.stringify({
+      text,
+      timezone: localTimezone(),
+      currentProjectId: currentProjectId ?? undefined,
+      ...(confirmed ? { confirm: confirmed.confirm, skip: confirmed.skip } : {}),
+    }),
   });
   if (res.status === 503) throw new Error('AI commands are not set up. Configure one in Settings → AI agents.');
   if (!res.ok) throw new Error(await errMsg(res, 'command failed'));
@@ -320,4 +358,14 @@ export async function adminGetNlUsage(): Promise<{
   const res = await fetch(url('/api/admin/nl-usage'), { headers: authHeaders(getServerConfig()) });
   if (!res.ok) throw new Error(`nl usage failed: ${res.status}`);
   return (await res.json()) as { total: UsageTotals; byKind: Record<string, UsageTotals> };
+}
+
+export async function memberKeyPolicy(): Promise<boolean> {
+  const res = await fetch(url('/api/keys'), { headers: authHeaders(getServerConfig()) });
+  if (!res.ok) throw new Error('Could not load key policy');
+  return (await res.json() as { membersAllowed: boolean }).membersAllowed;
+}
+export async function setMemberKeyPolicy(membersAllowed: boolean): Promise<void> {
+  const res = await fetch(url('/api/admin/key-policy'), { method: 'PUT', headers: authHeaders(getServerConfig()), body: JSON.stringify({ membersAllowed }) });
+  if (!res.ok) throw new Error('Could not update key policy');
 }

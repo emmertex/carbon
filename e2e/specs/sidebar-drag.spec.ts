@@ -104,6 +104,37 @@ test.describe('Sidebar drag-to-reorder', () => {
       .toBe(true);
   });
 
+  test('projects support keyboard pickup, cancellation and reordering', async ({ page }) => {
+    await page.goto('/');
+    await createProject(page, 'parallel', 'Keyboard First');
+    await createProject(page, 'parallel', 'Keyboard Second');
+    const firstId = (await projectLink(page, 'Keyboard First').getAttribute('href'))!.split('/').pop()!;
+    const row = projectLink(page, 'Keyboard Second').locator('xpath=ancestor::*[@aria-roledescription="sortable"][1]');
+    await row.focus();
+    await page.keyboard.press('Space', { delay: 50 });
+    await expect(row).toHaveAttribute('aria-pressed', 'true');
+    await page.keyboard.press('ArrowUp', { delay: 50 });
+    await page.keyboard.press('Escape');
+    await expect(row).not.toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(async () => {
+      const first = await projectLink(page, 'Keyboard First').boundingBox();
+      const second = await projectLink(page, 'Keyboard Second').boundingBox();
+      return second!.y > first!.y;
+    }).toBe(true);
+    await row.focus();
+    await page.keyboard.press('Space', { delay: 50 });
+    await expect(row).toHaveAttribute('aria-pressed', 'true');
+    await page.keyboard.press('ArrowUp', { delay: 50 });
+    await expect(page.getByRole('status').filter({ hasText: `was moved over droppable area ${firstId}.` })).toHaveCount(1);
+    await page.keyboard.press('Space', { delay: 50 });
+    await expect(row).not.toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(async () => {
+      const first = await projectLink(page, 'Keyboard First').boundingBox();
+      const second = await projectLink(page, 'Keyboard Second').boundingBox();
+      return second!.y < first!.y;
+    }).toBe(true);
+  });
+
   test('dropping a project on a folder nests it inside', async ({ page }) => {
     await page.goto('/');
     await createProject(page, 'parallel', 'Top Project');

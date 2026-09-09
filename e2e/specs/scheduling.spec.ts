@@ -25,7 +25,7 @@ test.describe('Tier 6 — scheduling', () => {
     const reveal = pane.getByRole('button', { name: 'More… (defer date)' });
     if (await reveal.isVisible().catch(() => false)) await reveal.click();
     await detailField(pane, 'Defer until')
-      .getByRole('button', { name: 'Tomorrow', exact: true })
+      .getByRole('button', { name: '+1 day', exact: true })
       .click();
     await gotoFlushed(page, '/today');
     await expect(page.getByTestId('task-row').filter({ hasText: title })).toHaveCount(0);

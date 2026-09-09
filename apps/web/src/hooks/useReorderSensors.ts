@@ -1,4 +1,5 @@
-import { MouseSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import { MouseSensor, TouchSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
 
 /**
  * The single drag-to-reorder activation shared by every sortable list in the app
@@ -23,6 +24,7 @@ import { MouseSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core';
  */
 export function useReorderSensors() {
   return useSensors(
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
     useSensor(MouseSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );

@@ -1,4 +1,4 @@
-import webpush from 'web-push';
+import webpush from "web-push";
 import {
   type Db,
   getItem,
@@ -6,12 +6,27 @@ import {
   effectiveShares,
   heldTagIds,
   itemHasHeldTag,
-} from '@carbon/core';
-import { sendFcmToUser } from './fcm';
-import { alreadySent, markSent } from './reminders-sent';
+} from "@carbon/core";
+import { sendFcmToUser } from "./fcm";
+import { alreadySent, markSent } from "./reminders-sent";
+import { Semaphore } from "./concurrency";
+import { withSafeHttpsAgent } from "./safe-fetch";
+
+/** A2: bound on concurrent outbound web-push sends across ALL tenants. A task shared
+ *  with many users (each with several device subscriptions) would otherwise fan out into
+ *  a burst of unbounded concurrent HTTP calls to push providers. The semaphore caps both active sends and waiters; rejected sends remain undelivered
+ *  for the caller's retry policy.
+ *  Override with PUSH_MAX_CONCURRENT; 0 = unlimited. */
+const PUSH_MAX_CONCURRENT = Math.floor(
+  Number(process.env.PUSH_MAX_CONCURRENT) || 16,
+);
+const pushSendSem = new Semaphore(PUSH_MAX_CONCURRENT);
 
 function getMeta(db: Db, key: string): string | null {
-  return db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [key])?.value ?? null;
+  return (
+    db.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", [key])
+      ?.value ?? null
+  );
 }
 function setMeta(db: Db, key: string, value: string): void {
   db.run(
@@ -42,14 +57,14 @@ export function ensurePushTables(db: Db): void {
 
 /** Initialize VAPID keys (from env or generated + persisted) and return the public key. */
 export function initVapid(db: Db): string {
-  let pub = process.env.VAPID_PUBLIC_KEY || getMeta(db, 'vapid_public');
-  let priv = process.env.VAPID_PRIVATE_KEY || getMeta(db, 'vapid_private');
+  let pub = process.env.VAPID_PUBLIC_KEY || getMeta(db, "vapid_public");
+  let priv = process.env.VAPID_PRIVATE_KEY || getMeta(db, "vapid_private");
   if (!pub || !priv) {
     const keys = webpush.generateVAPIDKeys();
     pub = keys.publicKey;
     priv = keys.privateKey;
-    setMeta(db, 'vapid_public', pub);
-    setMeta(db, 'vapid_private', priv);
+    setMeta(db, "vapid_public", pub);
+    setMeta(db, "vapid_private", priv);
   }
   return pub;
 }
@@ -66,10 +81,15 @@ interface VapidDetails {
  *  sign every other tenant's pushes with the wrong key and the push services reject
  *  them all with 401 "VAPID public key mismatch". */
 function vapidDetailsFor(db: Db): VapidDetails | null {
-  const publicKey = process.env.VAPID_PUBLIC_KEY || getMeta(db, 'vapid_public');
-  const privateKey = process.env.VAPID_PRIVATE_KEY || getMeta(db, 'vapid_private');
+  const publicKey = process.env.VAPID_PUBLIC_KEY || getMeta(db, "vapid_public");
+  const privateKey =
+    process.env.VAPID_PRIVATE_KEY || getMeta(db, "vapid_private");
   if (!publicKey || !privateKey) return null;
-  return { subject: process.env.VAPID_SUBJECT || 'mailto:admin@carbon.local', publicKey, privateKey };
+  return {
+    subject: process.env.VAPID_SUBJECT || "mailto:admin@carbon.local",
+    publicKey,
+    privateKey,
+  };
 }
 
 interface BrowserSubscription {
@@ -77,7 +97,11 @@ interface BrowserSubscription {
   keys: { p256dh: string; auth: string };
 }
 
-export function saveSubscription(db: Db, userId: string, sub: BrowserSubscription): void {
+export function saveSubscription(
+  db: Db,
+  userId: string,
+  sub: BrowserSubscription,
+): void {
   db.run(
     `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -95,7 +119,7 @@ export function saveSubscription(db: Db, userId: string, sub: BrowserSubscriptio
 }
 
 export function removeSubscription(db: Db, endpoint: string): void {
-  db.run('DELETE FROM push_subscriptions WHERE endpoint = ?', [endpoint]);
+  db.run("DELETE FROM push_subscriptions WHERE endpoint = ?", [endpoint]);
 }
 
 interface SubRow {
@@ -118,40 +142,46 @@ export interface DeliveryResult {
   delivered: number;
 }
 
-async function sendToUser(db: Db, userId: string, payload: PushPayload): Promise<DeliveryResult> {
-  const subs = db.all<SubRow>('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?', [
-    userId,
-  ]);
+async function sendToUser(
+  db: Db,
+  userId: string,
+  payload: PushPayload,
+): Promise<DeliveryResult> {
   const vapid = vapidDetailsFor(db);
-  if (!vapid && subs.length > 0) {
-    console.error('[carbon] web push skipped: no VAPID keys for this tenant');
-  }
   const result: DeliveryResult = { targets: 0, delivered: 0 };
-  const [fcm] = await Promise.all([
-    // FCM (Capacitor / Android) — no-op unless a service account is configured
-    sendFcmToUser(db, userId, payload),
-    // Web Push (browser / desktop PWA)
-    ...subs.map(async (s) => {
-      if (!vapid) return; // nothing signable
-      result.targets++;
-      try {
-        await webpush.sendNotification(
-          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-          JSON.stringify(payload),
-          { vapidDetails: vapid },
-        );
-        result.delivered++;
-      } catch (err) {
-        const code = (err as { statusCode?: number }).statusCode;
-        if (code === 404 || code === 410) {
-          removeSubscription(db, s.endpoint); // gone
-          result.targets--;
-        } else {
-          console.error('[carbon] web push send failed:', err);
-        }
+  const fcm = await sendFcmToUser(db, userId, payload);
+  let after = "";
+  while (vapid) {
+    const s = db.get<SubRow>(
+      "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ? AND endpoint > ? ORDER BY endpoint LIMIT 1",
+      [userId, after],
+    );
+    if (!s) break;
+    after = s.endpoint;
+    result.targets++;
+    try {
+      // Admit before DNS, cap waiting work, pin the validated DNS answers and
+      // bound the entire send. Queued/rejected subscriptions remain stored.
+      await pushSendSem.run(() =>
+        withSafeHttpsAgent(s.endpoint, (agent) =>
+          webpush.sendNotification(
+            { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+            JSON.stringify(payload),
+            { vapidDetails: vapid, agent, timeout: 15_000 },
+          ),
+        ),
+      );
+      result.delivered++;
+    } catch (err) {
+      const code = (err as { statusCode?: number }).statusCode;
+      if (code === 404 || code === 410) {
+        removeSubscription(db, s.endpoint); // gone
+        result.targets--;
+      } else {
+        console.error("[carbon] web push send failed:", err);
       }
-    }),
-  ]);
+    }
+  }
   result.targets += fcm.targets;
   result.delivered += fcm.delivered;
   return result;
@@ -159,20 +189,25 @@ async function sendToUser(db: Db, userId: string, payload: PushPayload): Promise
 
 /** Notify everyone responsible for a task: its owner, assignees, and every user it
  *  is shared with (directly or inherited from an ancestor). */
-export async function notifyTask(db: Db, itemId: string, payload: PushPayload): Promise<DeliveryResult> {
+export async function notifyTask(
+  db: Db,
+  itemId: string,
+  payload: PushPayload,
+): Promise<DeliveryResult> {
   const item = getItem(db, itemId);
   if (!item) return { targets: 0, delivered: 0 };
   const recipients = new Set<string>();
   if (item.owner_id) recipients.add(item.owner_id);
   for (const a of listAssigneesForItem(db, itemId)) recipients.add(a.user_id);
   for (const s of effectiveShares(db, itemId)) recipients.add(s.user_id);
-  const results = await Promise.all([...recipients].map((uid) => sendToUser(db, uid, payload)));
-  return results.reduce(
-    (acc, r) => ({ targets: acc.targets + r.targets, delivered: acc.delivered + r.delivered }),
-    { targets: 0, delivered: 0 },
-  );
+  const result = { targets: 0, delivered: 0 };
+  for (const uid of recipients) {
+    const sent = await sendToUser(db, uid, payload);
+    result.targets += sent.targets;
+    result.delivered += sent.delivered;
+  }
+  return result;
 }
-
 
 interface DueRow {
   id: string;
@@ -186,9 +221,9 @@ interface DueRow {
  *  can't grow without bound. Gated to run ~hourly per tenant (A10). */
 function gcRemindersSent(db: Db): void {
   const now = Date.now();
-  const last = Number(getMeta(db, 'reminders_gc_at') ?? 0);
+  const last = Number(getMeta(db, "reminders_gc_at") ?? 0);
   if (now - last < 3_600_000) return;
-  setMeta(db, 'reminders_gc_at', String(now));
+  setMeta(db, "reminders_gc_at", String(now));
   const cutoff = new Date(now - 90 * 86_400_000).toISOString();
   db.run(
     `DELETE FROM reminders_sent
@@ -221,16 +256,16 @@ export async function checkReminders(db: Db): Promise<void> {
   for (const t of due) {
     if (itemHasHeldTag(db, t.id, held)) continue;
     const kinds = [
-      { kind: 'reminder', when: t.reminder_at, title: 'Reminder' },
-      { kind: 'due', when: t.due_date, title: 'Task due' },
-      { kind: 'defer', when: t.defer_date, title: 'Task now available' },
+      { kind: "reminder", when: t.reminder_at, title: "Reminder" },
+      { kind: "due", when: t.due_date, title: "Task due" },
+      { kind: "defer", when: t.defer_date, title: "Task now available" },
     ] as const;
     for (const { kind, when, title } of kinds) {
       if (!when || when > nowIso || alreadySent(db, t.id, kind, when)) continue;
       const sent = await notifyTask(db, t.id, {
         title,
-        body: t.title || 'Untitled task',
-        url: '/today',
+        body: t.title || "Untitled task",
+        url: "/today",
         tag: `${kind}:${t.id}`,
       });
       if (sent.delivered > 0 || sent.targets === 0 || when < retryCutoff) {
@@ -246,15 +281,28 @@ export async function checkReminders(db: Db): Promise<void> {
  * client is connected (push to a closed PWA). `onTick` (optional) piggybacks the SAME
  * timer — the federation exchange sweep rides here rather than adding a competing timer.
  */
-export function startReminderScheduler(dbs: () => Db[], onTick?: () => void | Promise<void>): void {
+export function startReminderScheduler(
+  dbs: () => Db[],
+  onTick?: () => void | Promise<void>,
+): void {
+  // A2: bounded background queue — at most ONE reminder scan per tenant at a time. A
+  // scan fans out pushes (itself bounded by pushSendSem) and can run a long time on a
+  // large workspace; without this, each 60s tick that fires while the previous scan is
+  // still running stacks another full scan on top, growing unbounded. Skip a tenant
+  // whose scan is still in flight; the next tick retries it.
+  const scanning = new WeakSet<Db>();
   setInterval(() => {
     for (const db of dbs()) {
-      void checkReminders(db).catch((e) => console.error('[carbon] reminder scan failed:', e));
+      if (scanning.has(db)) continue; // previous scan still running — don't stack
+      scanning.add(db);
+      void checkReminders(db)
+        .catch((e) => console.error("[carbon] reminder scan failed:", e))
+        .finally(() => scanning.delete(db));
     }
     if (onTick) {
       void Promise.resolve()
         .then(onTick)
-        .catch((e) => console.error('[carbon] sweep onTick failed:', e));
+        .catch((e) => console.error("[carbon] sweep onTick failed:", e));
     }
   }, 60_000);
 }

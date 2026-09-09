@@ -1,5 +1,6 @@
 import { isNative } from './platform';
 import { notifySettingsChanged } from './settings-events';
+import { settingsKey } from './identity';
 import {
   DEFAULT_COMPLEXITY,
   DEFAULT_FEATURE_PREFS,
@@ -101,6 +102,27 @@ export function splitServerUrl(url: string): { workspace: string; domain: string
   return { workspace: '', domain: host };
 }
 
+/** The canonical endpoint key of a server URL ('' when none) — the workspace
+ *  part of an identity key, and the namespacing key for all per-workspace
+ *  storage (`carbon.wsauth.<ws>`, `carbon.server.<ws>`, A3 identity/store keys).
+ *  `splitServerUrl` is the separate display helper for the sign-in UI.
+ *
+ *  The scheme is PRESERVED when present, so `http://host` and `https://host`
+ *  (distinct endpoints/stores) map to distinct keys instead of colliding on the
+ *  bare host. A scheme-less URL is unchanged from the legacy behaviour (bare
+ *  host:port, trailing-slash-stripped, lowercased) so every existing bare key is
+ *  byte-identical. */
+export function workspaceHostOf(url: string | undefined | null): string {
+  const s = (url || '').trim().toLowerCase();
+  const m = s.match(/^(https?):\/\/(.*)$/);
+  if (m) {
+    // Preserve the scheme; normalize the rest (strip trailing slashes).
+    return `${m[1]}://${m[2].replace(/\/+$/, '')}`;
+  }
+  // No scheme: bare host:port/path — identical to the legacy no-scheme key.
+  return s.replace(/\/+$/, '');
+}
+
 const DEFAULT_SERVER: ServerConfig = {
   url: '',
   username: '',
@@ -124,7 +146,125 @@ export function getServerConfig(): ServerConfig {
 export function saveServerConfig(cfg: ServerConfig): void {
   // Never persist the password — it lives only in memory during sign-in and is
   // exchanged for `token`. This guarantees no plaintext credential hits storage.
-  localStorage.setItem(SERVER_KEY, JSON.stringify({ ...cfg, password: '' }));
+  const prev = getServerConfig();
+  const prevWs = workspaceHostOf(prev.url);
+  const newWs = workspaceHostOf(cfg.url);
+  let toSave: ServerConfig = { ...cfg, password: '' };
+  if (prevWs && prevWs !== newWs) {
+    // Snapshot the outgoing workspace's credentials so switching back to it
+    // restores its token/username instead of forcing a re-auth.
+    localStorage.setItem(`carbon.server.${prevWs}`, JSON.stringify({ ...prev, password: '' }));
+  }
+  if (newWs && newWs !== prevWs) {
+    // Returning to a known workspace: restore its saved credentials when the
+    // caller didn't supply their own (the URL field alone doesn't carry them).
+    const snap = localStorage.getItem(`carbon.server.${newWs}`);
+    if (snap) {
+      try {
+        const s = JSON.parse(snap) as Partial<ServerConfig>;
+        if (!toSave.token && s.token) toSave = { ...toSave, token: s.token };
+        if (!toSave.username && s.username) toSave = { ...toSave, username: s.username };
+      } catch {
+        /* unreadable snapshot — fall through with the fresh config */
+      }
+    }
+  }
+  localStorage.setItem(SERVER_KEY, JSON.stringify(toSave));
+  if (newWs) localStorage.setItem(`carbon.server.${newWs}`, JSON.stringify(toSave));
+
+  // A URL/host change can change the identity (workspace part). Listeners
+  // (sync.ts registers one that re-binds the app) run after the write and are
+  // told the old/new workspace so they can ignore saves that don't switch
+  // workspaces (e.g. a 401 that only clears the token on the SAME server).
+  for (const fn of serverConfigListeners) {
+    try {
+      fn(prevWs, newWs);
+    } catch {
+      /* listener errors must never break a config save */
+    }
+  }
+}
+
+const serverConfigListeners = new Set<(prevWs: string, newWs: string) => void>();
+
+/** Register a callback for server-config saves (returns an unregister fn).
+ *  Called with the previous and new workspace hosts after each save, so callers
+ *  can re-bind the app only when the workspace actually changed. */
+export function onServerConfigSaved(fn: (prevWs: string, newWs: string) => void): () => void {
+  serverConfigListeners.add(fn);
+  return () => {
+    serverConfigListeners.delete(fn);
+  };
+}
+
+// ----- per-workspace auth-state record (SAFE DEFAULT) ------------------------
+//
+// Mirrors the `carbon.server.<ws>` credential snapshots. Auto-restore on return
+// requires a POSITIVE 'in' record (written on explicit sign-in). An 'out'
+// record (written on explicit sign-out) OR an ABSENT record — the safe default,
+// since a storage clear removes the record — both present the sign-in gate
+// instead of auto-restoring. A clear can therefore only ever GATE, never
+// produce a false signed-in. See restoreSessionOrGate in sync.ts.
+
+const WS_AUTH_PREFIX = 'carbon.wsauth.';
+
+/** Per-workspace auth-state. 'in' = signed in (may auto-restore), 'out' =
+ *  explicitly signed out (gate), null = absent (safe default: gate). */
+export type WorkspaceAuthState = 'in' | 'out';
+
+/** Read the per-workspace auth-state record. Returns 'in' / 'out' / null
+ *  (absent). A storage clear removes the record → null → gate. */
+export function getWorkspaceAuthState(ws: string): WorkspaceAuthState | null {
+  if (!ws || ws === 'local') return null;
+  try {
+    const raw = localStorage.getItem(`${WS_AUTH_PREFIX}${ws}`);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as { s?: string };
+    return p.s === 'in' || p.s === 'out' ? p.s : null;
+  } catch {
+    return null; // localStorage unavailable (node) or unreadable record
+  }
+}
+
+/** Write the per-workspace auth-state record: 'in' (signed in), 'out' (signed
+ *  out), or null (clear the record → safe default of gate). */
+export function setWorkspaceAuthState(ws: string, state: WorkspaceAuthState | null): void {
+  if (!ws || ws === 'local') {
+    if (state === null) {
+      try {
+        localStorage.removeItem(`${WS_AUTH_PREFIX}${ws}`);
+      } catch {
+        /* ignore */
+      }
+    }
+    return;
+  }
+  try {
+    if (state === null) localStorage.removeItem(`${WS_AUTH_PREFIX}${ws}`);
+    else localStorage.setItem(`${WS_AUTH_PREFIX}${ws}`, JSON.stringify({ s: state, t: Date.now() }));
+  } catch {
+    /* localStorage unavailable (node) — nothing to record */
+  }
+}
+
+/**
+ * Clear the saved TOKEN (only) in a workspace's `carbon.server.<ws>` credential
+ * snapshot, keeping the username for pre-fill. Called on explicit sign-out so
+ * that even if the auth-state record were reset, no surviving credential could
+ * be auto-restored. A later re-sign-in re-snapshots it via saveServerConfig.
+ */
+export function clearWorkspaceSnapshotToken(ws: string): void {
+  if (!ws || ws === 'local') return;
+  try {
+    const raw = localStorage.getItem(`carbon.server.${ws}`);
+    if (!raw) return;
+    const s = JSON.parse(raw) as Partial<ServerConfig>;
+    if (!s.token) return; // nothing to clear
+    s.token = '';
+    localStorage.setItem(`carbon.server.${ws}`, JSON.stringify(s));
+  } catch {
+    /* unreadable snapshot — nothing to clear */
+  }
 }
 
 // ----- UI / gesture preferences --------------------------------------------
@@ -145,6 +285,7 @@ export interface UiPrefs {
   /** Edge zones drive the panes (and the centre drives task swipes). When off,
    *  task swipes use the full row width and panes open only via the menu. */
   paneGestures: boolean;
+  firstTapDetails: boolean;
   /** Action for the right-edge right-to-left swipe. */
   edgeGestureAction: EdgeGestureAction;
   /** What the pie ring and remaining-work counts measure. */
@@ -168,7 +309,8 @@ export interface UiPrefs {
   cupConvention: CupConvention;
 }
 
-const UI_KEY = 'carbon.ui';
+/** Per-user UI prefs (A3): namespaced by the current identity's user part. */
+const UI_KEY = () => settingsKey('carbon.ui');
 
 export const DEFAULT_ROW_ICONS: RowIcons = {
   focus: false,
@@ -182,6 +324,7 @@ export const DEFAULT_ROW_ICONS: RowIcons = {
 const DEFAULT_UI: UiPrefs = {
   swipeLeftAction: 'plan',
   paneGestures: true,
+  firstTapDetails: false,
   edgeGestureAction: 'projectRoot',
   countScope: 'all',
   planGrouping: 'nested',
@@ -195,14 +338,18 @@ const DEFAULT_UI: UiPrefs = {
 
 export function getUiPrefs(): UiPrefs {
   try {
-    const raw = localStorage.getItem(UI_KEY);
+    const raw = localStorage.getItem(UI_KEY());
     if (!raw) return { ...DEFAULT_UI, rowIcons: { ...DEFAULT_ROW_ICONS } };
-    const parsed = JSON.parse(raw) as Partial<UiPrefs>;
+    const { tapOpensDetail, ...parsed } = JSON.parse(raw) as Partial<UiPrefs> & { tapOpensDetail?: boolean };
+    // Consolidate the duplicate merge-era setting, preserving either enabled choice.
+    // The legacy field is excluded so the next save cannot re-enable it.
+    const firstTapDetails = parsed.firstTapDetails === true || tapOpensDetail === true;
     // rowIcons and features are nested, so merge them explicitly to pick up
     // newly-added icons / feature ids without dropping a saved partial.
     return {
       ...DEFAULT_UI,
       ...parsed,
+      firstTapDetails,
       rowIcons: { ...DEFAULT_ROW_ICONS, ...parsed.rowIcons },
       features: { ...DEFAULT_FEATURE_PREFS, ...parsed.features },
     };
@@ -212,7 +359,7 @@ export function getUiPrefs(): UiPrefs {
 }
 
 export function saveUiPrefs(p: UiPrefs): void {
-  localStorage.setItem(UI_KEY, JSON.stringify(p));
+  localStorage.setItem(UI_KEY(), JSON.stringify(p));
   notifySettingsChanged('ui');
 }
 

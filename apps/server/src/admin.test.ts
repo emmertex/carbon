@@ -225,7 +225,7 @@ describe('admin agent management', () => {
       headers: { Authorization: basic, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'Hermes',
-        username: 'hermes',
+        username: 'mybot',
         kind: 'anthropic',
         model: 'claude-sonnet-4-6',
       }),

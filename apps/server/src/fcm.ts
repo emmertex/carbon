@@ -1,3 +1,5 @@
+import { Semaphore } from "./concurrency";
+const fcmSem = new Semaphore(16, 128);
 // Firebase Cloud Messaging (HTTP v1) sender for the Capacitor/Android shell.
 //
 // Self-contained: mints an OAuth access token from a service-account JSON using
@@ -10,10 +12,11 @@
 // Device tokens live in their own table (separate from Web Push subscriptions so
 // the existing NOT NULL p256dh/auth constraints stay intact).
 
-import { createSign } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { type Db } from '@carbon/core';
-import type { PushPayload } from './push';
+import { createSign } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { type Db } from "@carbon/core";
+import type { PushPayload } from "./push";
+import { safeFetch } from "./safe-fetch";
 
 // ----- token store ----------------------------------------------------------
 
@@ -33,21 +36,31 @@ export function saveFcmToken(db: Db, userId: string, token: string): void {
   // token that happens to collide) reuse the existing id/created_at rather than generating a
   // fresh id that ON CONFLICT then silently discards, leaving the row's id inconsistent with
   // what was actually inserted.
-  const existing = db.get<{ id: string }>('SELECT id FROM fcm_tokens WHERE token = ?', [token]);
+  const existing = db.get<{ id: string }>(
+    "SELECT id FROM fcm_tokens WHERE token = ?",
+    [token],
+  );
   db.run(
     `INSERT INTO fcm_tokens (id, user_id, token, created_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id`,
-    [existing?.id ?? crypto.randomUUID(), userId, token, new Date().toISOString()],
+    [
+      existing?.id ?? crypto.randomUUID(),
+      userId,
+      token,
+      new Date().toISOString(),
+    ],
   );
 }
 
 export function removeFcmToken(db: Db, token: string): void {
-  db.run('DELETE FROM fcm_tokens WHERE token = ?', [token]);
+  db.run("DELETE FROM fcm_tokens WHERE token = ?", [token]);
 }
 
 function tokensForUser(db: Db, userId: string): string[] {
   return db
-    .all<{ token: string }>('SELECT token FROM fcm_tokens WHERE user_id = ?', [userId])
+    .all<{ token: string }>("SELECT token FROM fcm_tokens WHERE user_id = ?", [
+      userId,
+    ])
     .map((r) => r.token);
 }
 
@@ -66,22 +79,26 @@ function loadServiceAccount(): ServiceAccount | null {
   const inline = process.env.FCM_SERVICE_ACCOUNT_JSON;
   const file = process.env.FCM_SERVICE_ACCOUNT_FILE;
   try {
-    const raw = inline ?? (file ? readFileSync(file, 'utf8') : null);
+    const raw = inline ?? (file ? readFileSync(file, "utf8") : null);
     serviceAccount = raw ? (JSON.parse(raw) as ServiceAccount) : null;
   } catch (e) {
-    console.error('[carbon] failed to load FCM service account:', e);
+    console.error("[carbon] failed to load FCM service account:", e);
     serviceAccount = null;
   }
   if (serviceAccount === null) {
     console.warn(
-      '[carbon] FCM disabled: set FCM_SERVICE_ACCOUNT_JSON or FCM_SERVICE_ACCOUNT_FILE to push to native apps',
+      "[carbon] FCM disabled: set FCM_SERVICE_ACCOUNT_JSON or FCM_SERVICE_ACCOUNT_FILE to push to native apps",
     );
   }
   return serviceAccount;
 }
 
 const b64url = (b: Buffer | string): string =>
-  Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  Buffer.from(b)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 
 let cachedToken: { value: string; expiresAt: number } | null = null;
 
@@ -89,34 +106,43 @@ async function getAccessToken(sa: ServiceAccount): Promise<string | null> {
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken && cachedToken.expiresAt - 60 > now) return cachedToken.value;
 
-  const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = b64url(
     JSON.stringify({
       iss: sa.client_email,
-      scope: 'https://www.googleapis.com/auth/firebase.messaging',
-      aud: 'https://oauth2.googleapis.com/token',
+      scope: "https://www.googleapis.com/auth/firebase.messaging",
+      aud: "https://oauth2.googleapis.com/token",
       iat: now,
       exp: now + 3600,
     }),
   );
   const signature = b64url(
-    createSign('RSA-SHA256').update(`${header}.${claims}`).sign(sa.private_key),
+    createSign("RSA-SHA256").update(`${header}.${claims}`).sign(sa.private_key),
   );
   const assertion = `${header}.${claims}.${signature}`;
 
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  // A2: route through safeFetch (the fixed public URL is SSRF-safe, but this still gets
+  // the response-size cap + socket timeout + redirect policy).
+  const res = await safeFetch("https://oauth2.googleapis.com/token", false, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion,
     }),
   });
   if (!res.ok) {
-    console.error('[carbon] FCM token exchange failed:', res.status, await res.text());
+    console.error(
+      "[carbon] FCM token exchange failed:",
+      res.status,
+      await res.text(),
+    );
     return null;
   }
-  const json = (await res.json()) as { access_token: string; expires_in: number };
+  const json = (await res.json()) as {
+    access_token: string;
+    expires_in: number;
+  };
   cachedToken = { value: json.access_token, expiresAt: now + json.expires_in };
   return json.access_token;
 }
@@ -134,21 +160,39 @@ export async function sendFcmToUser(
   const result = { targets: 0, delivered: 0 };
   const sa = loadServiceAccount();
   if (!sa) return result;
-  const tokens = tokensForUser(db, userId);
-  if (tokens.length === 0) return result;
-  result.targets = tokens.length;
-  const accessToken = await getAccessToken(sa);
+  result.targets =
+    db.get<{ n: number }>(
+      "SELECT COUNT(*) n FROM fcm_tokens WHERE user_id = ?",
+      [userId],
+    )?.n ?? 0;
+  if (!result.targets) return result;
+  let accessToken: string | null;
+  try {
+    accessToken = await fcmSem.run(() => getAccessToken(sa));
+  } catch {
+    return result;
+  }
   if (!accessToken) return result;
 
   const endpoint = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
-  await Promise.all(
-    tokens.map(async (token) => {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
+  let after = "";
+  while (true) {
+    const row = db.get<{ token: string }>(
+      "SELECT token FROM fcm_tokens WHERE user_id = ? AND token > ? ORDER BY token LIMIT 1",
+      [userId, after],
+    );
+    if (!row) break;
+    const token = row.token;
+    after = token;
+    try {
+      // A2: safeFetch — bounded response + timeout; the FCM Bearer token is stripped if
+      // (and only if) a redirect ever left the Google origin.
+      await fcmSem.run(async () => {
+        const res = await safeFetch(endpoint, false, {
+          method: "POST",
           headers: {
             Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
             message: {
@@ -167,12 +211,17 @@ export async function sendFcmToUser(
           removeFcmToken(db, token); // token gone — drop it
           result.targets--;
         } else {
-          console.error('[carbon] FCM send failed:', res.status, await res.text());
+          console.error(
+            "[carbon] FCM send failed:",
+            res.status,
+            await res.text(),
+          );
         }
-      } catch (e) {
-        console.error('[carbon] FCM send error:', e);
-      }
-    }),
-  );
+        await res.body?.cancel();
+      });
+    } catch (e) {
+      console.error("[carbon] FCM send error:", e);
+    }
+  }
   return result;
 }

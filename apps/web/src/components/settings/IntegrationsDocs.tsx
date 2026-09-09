@@ -3,7 +3,6 @@ import { SettingsSection } from './SettingsSection';
 import { DocLink } from './controls';
 
 const DOCS: { href: string; label: string; desc: string }[] = [
-  { href: LINKS.hermes, label: 'Hermes integration', desc: 'Drive Carbon from the Hermes agent gateway.' },
   { href: LINKS.agentsApi, label: 'Carbon Agents API', desc: 'Wire AI agents into tasks and the inbox.' },
   { href: LINKS.restApi, label: 'REST API', desc: 'Token-authenticated HTTP access to your data.' },
   { href: LINKS.homeAssistant, label: 'Home Assistant integration', desc: 'Location-aware reminders via HA zones.' },

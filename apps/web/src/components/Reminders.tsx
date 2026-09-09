@@ -23,6 +23,7 @@ import {
 import { trackingGpsPrefOn, trackingGpsPrefOff } from '@/lib/trackingLifecycle';
 import { requestNativePermission } from '@/lib/nativeReminders';
 import { isCapacitor } from '@/lib/platform';
+import { IS_PLAY_STORE } from '@/lib/variant';
 import { SettingsSection } from './settings/SettingsSection';
 import { SettingsToggle } from './settings/controls';
 
@@ -159,17 +160,19 @@ export function Reminders() {
           hint="Uses this device's location while the app is open — no server needed. For background geofencing, link your Home Assistant person (under Home Assistant below) and let HA call the server on zone changes."
         />
 
-        <SettingsToggle
-          label="Record GPS while time-tracking"
-          checked={gpsOn}
-          disabled={!gpsTrackSupported()}
-          onChange={() => void toggleGpsTrack()}
-          hint={
-            isCapacitor
-              ? 'While a timer is running, records a denoised track (≤1 min between points) and attaches it as a note when you stop. Uses a background notification on Android.'
-              : 'While a timer is running and this tab is open, records a denoised track and attaches it as a note when you stop. Background recording requires the Android app.'
-          }
-        />
+        {!IS_PLAY_STORE && (
+          <SettingsToggle
+            label="Record GPS while time-tracking"
+            checked={gpsOn}
+            disabled={!gpsTrackSupported()}
+            onChange={() => void toggleGpsTrack()}
+            hint={
+              isCapacitor
+                ? 'While a timer is running, records a denoised track (≤1 min between points) and attaches it as a note when you stop. Uses a background notification on Android.'
+                : 'While a timer is running and this tab is open, records a denoised track and attaches it as a note when you stop. Background recording requires the Android app.'
+            }
+          />
+        )}
       </div>
     </SettingsSection>
   );

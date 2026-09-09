@@ -13,7 +13,7 @@
 // see src/index.ts for where those are defined.
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { backupWorkspace } from '../src/backup';
 
 const DB_PATH = resolve(process.env.DATABASE_PATH ?? './data/carbon.db');
 const DATA_DIR = dirname(DB_PATH);
@@ -26,6 +26,7 @@ interface Target {
   /** Sub-directory of BACKUP_DIR this DB's snapshots live in. */
   label: string;
   srcPath: string;
+  blobsDir?: string;
 }
 
 /** Find every tenant DB under TENANTS_DIR/<id>/carbon.db (mirrors provisionTenant's layout). */
@@ -35,6 +36,7 @@ function findTenantDbs(): Target[] {
   return ids.map((e) => ({
     label: `tenants/${e.name}`,
     srcPath: join(TENANTS_DIR, e.name, 'carbon.db'),
+    blobsDir: join(TENANTS_DIR, e.name, 'blobs'),
   }));
 }
 
@@ -50,18 +52,8 @@ function backupOne(target: Target): string | null {
   }
   const destDir = join(BACKUP_DIR, target.label);
   mkdirSync(destDir, { recursive: true });
-  const destPath = join(destDir, `${timestamp()}.db`);
-
-  // Open read-only: VACUUM INTO only reads the source, and read-only avoids
-  // accidentally creating/locking WAL side-files on a DB we don't otherwise touch.
-  const db = new DatabaseSync(target.srcPath, { readOnly: true });
-  try {
-    // Escape single quotes in the path for the SQL string literal.
-    const escaped = destPath.replace(/'/g, "''");
-    db.exec(`VACUUM INTO '${escaped}'`);
-  } finally {
-    db.close();
-  }
+  const destPath = join(destDir, timestamp());
+  backupWorkspace(target.srcPath, destPath, target.blobsDir);
   return destPath;
 }
 
@@ -74,8 +66,8 @@ function pruneOld(label: string): number {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     const stat = statSync(path);
-    if (stat.isFile() && stat.mtimeMs < cutoff) {
-      rmSync(path);
+    if (!name.includes(".partial-") && stat.mtimeMs < cutoff) {
+      rmSync(path, { recursive: true });
       removed++;
     }
   }
@@ -84,7 +76,7 @@ function pruneOld(label: string): number {
 
 function main(): void {
   const targets: Target[] = [
-    { label: 'default', srcPath: DB_PATH },
+    { label: 'default', srcPath: DB_PATH, blobsDir: resolve(process.env.BLOBS_DIR ?? join(DATA_DIR, 'blobs')) },
     { label: 'control', srcPath: CONTROL_DB_PATH },
     ...findTenantDbs(),
   ];
@@ -94,6 +86,7 @@ function main(): void {
   let ok = 0;
   let failed = 0;
   let skipped = 0;
+  const succeeded: string[] = [];
 
   for (const target of targets) {
     try {
@@ -102,9 +95,9 @@ function main(): void {
         skipped++;
         continue;
       }
-      const sizeKb = (statSync(dest).size / 1024).toFixed(1);
-      console.log(`backed up ${target.label} -> ${dest} (${sizeKb} KiB)`);
+      console.log(`backed up ${target.label} -> ${dest} (verified database and referenced content)`);
       ok++;
+      succeeded.push(target.label);
     } catch (err) {
       failed++;
       console.error(`FAILED backing up ${target.label} (${target.srcPath}):`, err);
@@ -112,11 +105,11 @@ function main(): void {
   }
 
   let pruned = 0;
-  for (const target of targets) {
+  for (const label of succeeded) {
     try {
-      pruned += pruneOld(target.label);
+      pruned += pruneOld(label);
     } catch (err) {
-      console.error(`FAILED pruning ${target.label}:`, err);
+      console.error(`FAILED pruning ${label}:`, err);
       failed++;
     }
   }

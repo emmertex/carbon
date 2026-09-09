@@ -9,8 +9,9 @@ import {
 } from '@/lib/config';
 import { isNative } from '@/lib/platform';
 import { useStore } from '@/lib/store';
-import { signIn, syncNow, resetLocalDataAndReload, saveSessionToken } from '@/lib/sync';
-import { localItemCount } from '@/lib/db';
+import { signIn, syncNow, saveSessionToken } from '@/lib/sync';
+import { localNamespaceItemCount, mergeLocalCapture, discardLocalCapture } from '@/lib/db';
+import { getCurrentUser } from '@/lib/config';
 import {
   mfaEnrollEmailStart,
   mfaEnrollEmailConfirm,
@@ -78,7 +79,9 @@ export function SignInGate() {
   }
 
   async function afterSession(): Promise<void> {
-    const n = localItemCount();
+    // Pre-sign-in work is namespaced under the device-local store, separate from
+    // the signed-in identity's — count THAT to decide whether to offer the merge.
+    const n = await localNamespaceItemCount();
     if (n > 0) {
       setLocalCount(n);
       setStep('merge');
@@ -264,14 +267,32 @@ export function SignInGate() {
     }
   }
 
-  function mergeLocal() {
-    closeLogin();
-    void syncNow();
+  // Merge: replay the device-local capture into the signed-in identity, claim
+  // the previously-unowned items for the user, consume the capture, then sync.
+  async function mergeLocal() {
+    setBusy(true);
+    const user = getCurrentUser();
+    try {
+      if (user) await mergeLocalCapture(user.id);
+      closeLogin();
+      await syncNow();
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function replaceLocal() {
+  // Replace: discard the device-local capture (don't merge it) and use only the
+  // account's data — re-pull from the server. The signed-in identity's own store
+  // is left intact (it is the account's data, not the local capture).
+  async function replaceLocal() {
     setBusy(true);
-    void resetLocalDataAndReload();
+    try {
+      await discardLocalCapture();
+      closeLogin();
+      await syncNow();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function copyRecovery() {

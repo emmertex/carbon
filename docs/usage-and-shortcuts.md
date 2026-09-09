@@ -48,7 +48,7 @@ left as literal text:
 The server fuzzy-matches names to lists/tags/tasks, runs the agent's tool-loop in-process,
 and replies with exactly what changed. Token usage per command is tracked under
 **Settings → Natural-language commands**. The same capability is available to external bots
-(Telegram, Hermes, scripts) over the [agent API](carbon-agent-api.md).
+(Telegram, external clients, scripts) over the [agent API](carbon-agent-api.md).
 
 ### Notes
 
@@ -286,3 +286,16 @@ complexity**.
 > Local-only mode keeps everything on this device — nothing is sent anywhere until you
 > configure a sync server. See [`data-security.md`](data-security.md) for the full data-handling
 > picture.
+
+
+### Detail panes and long-list movement
+
+Details dock when the space remaining beside navigation can fit both list and detail.
+On narrow panes, details fill the width. The default remains two taps; enable
+**Open task details on the first tap** in Settings → Gestures & mobile to change it.
+Dependency and project pickers search on demand instead of loading every option.
+
+Manual task lists remain draggable above 200 items. Hold a row to drag; the highlighted
+target shows before/after placement. Keyboard users can focus a sortable row, press
+Space, use arrow keys, and press Space to drop or Escape to cancel. For distant moves,
+select the task and use **Move selected task to position** above the list.

@@ -196,7 +196,7 @@ works fully offline, local-only, with no account.
 ## AI & agents (sync server)
 
 - Bot/agent accounts backed by **OpenAI / Anthropic** direct integration or an
-  **agentic-framework webhook** (Hermes / OpenClaw).
+  **generic external webhook**.
 - Server-side tool loop so API keys and prompts never reach the client.
 - In-app NL commands, NL → filter, `@mention`/assign agent triggers, and configurable agent
   prompts.

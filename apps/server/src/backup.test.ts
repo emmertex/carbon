@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { createItem, createUser, addComment, migrate } from '@carbon/core';
+import { openDb } from './sqlite';
+import { backupWorkspace } from './backup';
+
+test('backup includes verified comment images and fails atomically for missing/corrupt content', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'carbon-backup-test-'));
+  const source = join(dir, 'source.db');
+  const blobs = join(dir, 'blobs');
+  mkdirSync(blobs);
+  const db = openDb(source);
+  migrate(db);
+  const user = createUser(db, { username: 'owner' });
+  const item = createItem(db, 'device', { title: 'task', ownerId: user.id });
+  const content = Buffer.from('comment image');
+  const hash = createHash('sha256').update(content).digest('hex');
+  addComment(db, 'device', { itemId: item.id, authorId: user.id, body: `![image](/api/blobs/${hash})` });
+  const destination = join(dir, 'complete');
+  assert.throws(() => backupWorkspace(source, destination, blobs));
+  assert.equal(existsSync(destination), false);
+  writeFileSync(join(blobs, hash), 'corrupt');
+  assert.throws(() => backupWorkspace(source, destination, blobs), /Corrupt blob/);
+  assert.equal(existsSync(destination), false);
+  writeFileSync(join(blobs, hash), content);
+  backupWorkspace(source, destination, blobs);
+  assert.deepEqual(readFileSync(join(destination, 'blobs', hash)), content);
+  const manifest = JSON.parse(readFileSync(join(destination, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.files[`blobs/${hash}`].sha256, hash);
+  assert.equal(manifest.complete, true);
+  db.raw.close();
+});

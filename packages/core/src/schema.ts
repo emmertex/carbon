@@ -520,4 +520,12 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 23,
+  // Index to speed up the trash/recently-deleted view: deletedRoots() queries
+  // tombstones filtered by updated_at. Without this, a large workspace with
+  // many historical (purged) items scans the entire table.
+  up: `CREATE INDEX IF NOT EXISTS idx_items_deleted_updated ON items(deleted, updated_at);`,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

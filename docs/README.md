@@ -1,8 +1,9 @@
 # Carbon documentation
 
-Carbon is a self-hosted, offline-first task manager — simple on the surface, with a full GTD
-toolbox underneath (projects, tags/contexts, defer & due dates, review, recurrence, flags). It
-runs fully offline in the browser and syncs to your own server whenever it's reachable.
+Carbon is a task manager for projects and next actions. Use it locally without an
+account, connect to a hosted workspace, or run your own sync server. Locally stored
+tasks are available without a connection; online integrations and uncached files
+need internet access.
 
 ## Guides
 
@@ -37,13 +38,23 @@ runs fully offline in the browser and syncs to your own server whenever it's rea
   locations, "nearest place" reminders, and two-way task flows.
 - [**Telegram bot**](telegram-bot.md) — run a per-server bot so users can control Carbon from
   Telegram in plain language (add/complete/tag tasks, ask what's due) via the same AI agent.
-- [**Hermes / agent integration**](hermes.md) — connecting an agentic framework or direct LLM
+- [**Personal API keys**](api.md) — scoped access for external clients
   for natural-language task control.
 
 ### Developer / API reference
 
 - [**REST API guide**](api.md) — endpoints, authentication, scopes.
 - [**Agent API**](carbon-agent-api.md) — webhook contract + callbacks for building a skill.
+
+### Releasing
+
+- [**Landing page setup**](landing-page.md) — static marketing entry, custom domains and preview.
+
+- [**Releasing (CI build + auto-update)**](RELEASING.md) — how a version tag turns into
+  published desktop + Android builds, signing keys, and auto-update.
+- [**Google Play Store launch**](PLAY-STORE.md) — the Play variant (no background location),
+  building the signed AAB, store listing, Data safety, content rating, and the closed-testing
+  requirement.
 
 ### Credits
 

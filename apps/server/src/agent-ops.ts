@@ -61,9 +61,20 @@ import {
   sessionAnchor,
   type ItemPatch,
   type RemoveTimeNoteMode,
-} from '@carbon/core';
-import { bestMatch, rankBy } from './fuzzy';
-import { makeOsmProvider, geocodeConfigFromEnv, type GeocodeProvider } from './geocode';
+} from "@carbon/core";
+import {
+  canReadItem,
+  canWriteItem,
+  isItemOwner,
+  isDestinationAllowed,
+  sessionCredentialFor,
+} from "./authorize";
+import { bestMatch, rankBy } from "./fuzzy";
+import {
+  makeOsmProvider,
+  geocodeConfigFromEnv,
+  type GeocodeProvider,
+} from "./geocode";
 
 export interface AgentApiDeps {
   db: Db;
@@ -88,12 +99,18 @@ export function buildAgentApiDeps(
   deviceId: string,
   opts: { multiTenant: boolean; allowPrivate: boolean },
 ): AgentApiDeps {
-  const isBot = (userId: string): boolean => userId !== 'local' && !!getUser(db, userId)?.is_bot;
+  const isBot = (userId: string): boolean =>
+    userId !== "local" && !!getUser(db, userId)?.is_bot;
+  // Read visibility via the shared authorization module: a local user or bot sees everything
+  // (full access); a human is limited to items they can read (owned/ancestor or a share).
   const canSee = (userId: string, itemId: string): boolean =>
-    userId === 'local' || isBot(userId) || visibleItemIds(db, userId).has(itemId);
+    canReadItem(db, sessionCredentialFor(userId), itemId);
   const botAssigned = (userId: string, itemId: string): boolean =>
     listAssigneesForItem(db, itemId).some((a) => a.user_id === userId);
-  const geocode = makeOsmProvider(geocodeConfigFromEnv(process.env, opts.multiTenant), opts.allowPrivate);
+  const geocode = makeOsmProvider(
+    geocodeConfigFromEnv(process.env, opts.multiTenant),
+    opts.allowPrivate,
+  );
   return { db, deviceId, isBot, canSee, botAssigned, geocode };
 }
 
@@ -101,8 +118,16 @@ export type OpResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; status: number; error: string };
 
-const ok = <T>(data: T, status = 200): OpResult<T> => ({ ok: true, status, data });
-const fail = (error: string, status = 400): OpResult<never> => ({ ok: false, status, error });
+const ok = <T>(data: T, status = 200): OpResult<T> => ({
+  ok: true,
+  status,
+  data,
+});
+const fail = (error: string, status = 400): OpResult<never> => ({
+  ok: false,
+  status,
+  error,
+});
 
 // Bounds on bulk input, so a single request (or a runaway/injected model turn) can't
 // create thousands of items or store megabyte titles. Generous for real use.
@@ -114,9 +139,9 @@ const tooMany = (...arrs: Array<unknown[] | undefined>): boolean =>
 /** Accept a RecurrenceRule object (the model's natural form) or a JSON string; store as the
  *  JSON string the Item column expects. null/empty clears the rule. */
 function normalizeRecurrence(value: unknown): string | null {
-  if (value == null || value === '') return null;
-  if (typeof value === 'string') return value;
-  if (typeof value === 'object') return JSON.stringify(value);
+  if (value == null || value === "") return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return JSON.stringify(value);
   return null;
 }
 
@@ -128,11 +153,13 @@ const NOTE_BODY_MAX = 2000;
 /** Parse an item's metadata column, tolerating junk. Mirrors the client's `readNoteMeta`:
  *  the column is hand-editable and syncs from other builds, so anything that isn't a JSON
  *  object reads as `{}` rather than throwing. */
-export function readMeta(raw: string | null | undefined): Record<string, unknown> {
+export function readMeta(
+  raw: string | null | undefined,
+): Record<string, unknown> {
   if (!raw) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : {};
   } catch {
@@ -153,8 +180,12 @@ export function mergeMeta(
   const baseRecipe = base.recipe;
   const patchRecipe = patch.recipe;
   if (
-    baseRecipe && typeof baseRecipe === 'object' && !Array.isArray(baseRecipe) &&
-    patchRecipe && typeof patchRecipe === 'object' && !Array.isArray(patchRecipe)
+    baseRecipe &&
+    typeof baseRecipe === "object" &&
+    !Array.isArray(baseRecipe) &&
+    patchRecipe &&
+    typeof patchRecipe === "object" &&
+    !Array.isArray(patchRecipe)
   ) {
     merged.recipe = { ...(baseRecipe as object), ...(patchRecipe as object) };
   }
@@ -165,9 +196,9 @@ export function mergeMeta(
 /** The note editor mode stored in metadata ('recipe' opens the recipe editor), or null. Only
  *  reported on notes — a task carries the same column but no editor mode. */
 function noteModeOf(it: Item): string | null {
-  if (it.type !== 'note') return null;
+  if (it.type !== "note") return null;
   const mode = readMeta(it.metadata).noteMode;
-  return typeof mode === 'string' ? mode : null;
+  return typeof mode === "string" ? mode : null;
 }
 
 const noteModeField = (it: Item): { note_mode?: string } => {
@@ -188,10 +219,30 @@ function noteBodyFields(
  *  (push.ts) compare due_date/reminder_at as plain strings — a non-UTC offset the model
  *  emits despite the prompt's instructions would sort wrong and fire at the wrong time.
  *  Invalid input passes through unchanged so obviously-bad values still surface as-is. */
-function normalizeDateTime<T extends string | null | undefined>(value: T): T | string {
+function normalizeDateTime<T extends string | null | undefined>(
+  value: T,
+): T | string {
   if (!value) return value;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toISOString();
+}
+
+export function normalizeItemType(
+  t: string | undefined,
+  fallback: 'task' | 'note' | 'all' = 'task',
+): 'task' | 'note' | 'all' {
+  if (!t) return fallback;
+  const lower = t.toLowerCase();
+  if (lower === 'task' || lower === 'note' || lower === 'all') {
+    return lower;
+  }
+  return fallback;
+}
+
+/** Return a short text snippet: first 100 chars (or full text if shorter). */
+export function noteSnippet(text: string | null): string | null {
+  if (!text) return null;
+  return text.length > 100 ? text.slice(0, 100) : text;
 }
 
 // ----- input shapes (shared by routes and the command loop) -----------------
@@ -376,15 +427,34 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   // null = unrestricted (bot / open-mode local); otherwise the user's visible-item set.
   const scopeItems = (userId: string): Set<string> | null =>
-    userId === 'local' || isBot(userId) ? null : visibleItemIds(db, userId);
+    userId === "local" || isBot(userId) ? null : visibleItemIds(db, userId);
 
-  // Per-item write gate, identical to POST /api/tasks/:id/complete.
+  // Per-item write gate, identical to POST /api/tasks/:id/complete. A bot may write only the
+  // items it is assigned to; a local user or human is gated by the shared authorization module
+  // (owner or a write share — the single source of truth for write access).
   const canWrite = (userId: string, itemId: string): boolean =>
-    userId === 'local' ||
-    (isBot(userId) ? botAssigned(userId, itemId) : hasWriteAccess(db, itemId, userId));
+    isBot(userId)
+      ? botAssigned(userId, itemId)
+      : canWriteItem(db, sessionCredentialFor(userId), itemId);
 
-  const ownerOf = (userId: string): string | null => (userId === 'local' ? null : userId);
-  const tagNames = (itemId: string): string[] => getItemTags(db, itemId).map((t) => t.name);
+  // Owner-only onward sharing: the item's owner (or the single local user) controls who is
+  // granted/revoked access. A sharee who can edit but does not own may only remove their OWN
+  // grant — never grant a third party, never revoke another user's grant.
+  const canControlShare = (
+    userId: string,
+    itemId: string,
+    targetUserId: string,
+    isRemove: boolean,
+  ): boolean => {
+    if (userId === "local") return true; // open single-user mode
+    if (isItemOwner(db, sessionCredentialFor(userId), itemId)) return true; // the owner
+    return isRemove && targetUserId === userId; // a sharee revoking their own grant
+  };
+
+  const ownerOf = (userId: string): string | null =>
+    userId === "local" ? null : userId;
+  const tagNames = (itemId: string): string[] =>
+    getItemTags(db, itemId).map((t) => t.name);
 
   // note_mode rides along even in the minimal shape: it is one short string, and without it a
   // plain read of a notebook can't tell a recipe from any other note.
@@ -392,7 +462,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     id: it.id,
     title: it.title,
     tags: tagNames(it.id),
-    done: it.status === 'done',
+    done: it.status === "done",
     ...noteModeField(it),
   });
   /** A detail shape, with note bodies capped unless `full`. The cap is what keeps a read of a
@@ -419,13 +489,23 @@ export function createAgentOps(deps: AgentApiDeps) {
   const findList = (userId: string, ref: ListRef | undefined): Item | null => {
     if (!ref) return null;
     const scope = scopeItems(userId);
-    if (typeof ref === 'object') {
+    if (typeof ref === "object") {
       if (!ref.id) return null;
       const p = getItem(db, ref.id);
-      return p && p.type === 'project' && !p.deleted && (!scope || scope.has(p.id)) ? p : null;
+      return p &&
+        p.type === "project" &&
+        !p.deleted &&
+        (!scope || scope.has(p.id))
+        ? p
+        : null;
     }
     const direct = getItem(db, ref);
-    if (direct && direct.type === 'project' && !direct.deleted && (!scope || scope.has(direct.id))) {
+    if (
+      direct &&
+      direct.type === "project" &&
+      !direct.deleted &&
+      (!scope || scope.has(direct.id))
+    ) {
       return direct;
     }
     const projects = getProjects(db).filter((p) => !scope || scope.has(p.id));
@@ -437,7 +517,10 @@ export function createAgentOps(deps: AgentApiDeps) {
     const tags = listTags(db);
     const byId = tags.find((t) => t.id === ref || t.id === tagId(ref));
     if (byId) return byId;
-    return bestMatch(ref, tags, [(t) => t.name, (t) => tagLeaf(t.name)]).matched?.item ?? null;
+    return (
+      bestMatch(ref, tags, [(t) => t.name, (t) => tagLeaf(t.name)]).matched
+        ?.item ?? null
+    );
   };
 
   // Assignable/shareable people: real (non-bot, non-deleted) users. Matched by id first, then
@@ -448,7 +531,12 @@ export function createAgentOps(deps: AgentApiDeps) {
     const users = assignable();
     const byId = users.find((u) => u.id === ref || u.username === ref);
     if (byId) return byId;
-    return bestMatch(ref, users, [(u) => u.display_name ?? u.username, (u) => u.username]).matched?.item ?? null;
+    return (
+      bestMatch(ref, users, [
+        (u) => u.display_name ?? u.username,
+        (u) => u.username,
+      ]).matched?.item ?? null
+    );
   };
   const userName = (u: User): string => u.display_name ?? u.username;
 
@@ -459,8 +547,12 @@ export function createAgentOps(deps: AgentApiDeps) {
   ): { item: Item; created: boolean } | null => {
     const found = findList(userId, ref);
     if (found) return { item: found, created: false };
-    if (!createIfMissing || typeof ref !== 'string' || !ref.trim()) return null;
-    const item = createItem(db, deviceId, { type: 'project', title: ref, ownerId: ownerOf(userId) });
+    if (!createIfMissing || typeof ref !== "string" || !ref.trim()) return null;
+    const item = createItem(db, deviceId, {
+      type: "project",
+      title: ref,
+      ownerId: ownerOf(userId),
+    });
     return { item, created: true };
   };
 
@@ -487,7 +579,7 @@ export function createAgentOps(deps: AgentApiDeps) {
   //   'taggable' - task OR note OR project (never folders) — used only by tag_items, which
   //                pre-notes let a tag match a project too (getItemsByTag had no type filter
   //                at all); notes join that same "everything you'd reasonably tag" set.
-  type ItemTypeFilter = 'task' | 'note' | 'all' | 'taggable';
+  type ItemTypeFilter = "task" | "note" | "all" | "taggable";
   const taskPool = (
     userId: string,
     list: Item | null,
@@ -495,17 +587,18 @@ export function createAgentOps(deps: AgentApiDeps) {
     opts: { includeDone?: boolean; itemType?: ItemTypeFilter } = {},
   ): Item[] => {
     const scope = scopeItems(userId);
-    const itemType = opts.itemType ?? 'task';
+    const itemType = opts.itemType ?? "task";
     const matchesType = (i: Item) =>
-      itemType === 'all'
-        ? i.type === 'task' || i.type === 'note'
-        : itemType === 'taggable'
-          ? i.type === 'task' || i.type === 'note' || i.type === 'project'
+      itemType === "all"
+        ? i.type === "task" || i.type === "note"
+        : itemType === "taggable"
+          ? i.type === "task" || i.type === "note" || i.type === "project"
           : i.type === itemType;
     // A note's status is preserved-but-inert (never cleared while type==='note'), so a done/
     // dropped-looking note is still just as findable-by-name as an active one — includeDone
     // only gates *tasks*.
-    const statusOk = (i: Item) => opts.includeDone || i.type === 'note' || i.status !== 'done';
+    const statusOk = (i: Item) =>
+      opts.includeDone || i.type === "note" || i.status !== "done";
     let items: Item[];
     if (list) items = getChildren(db, list.id).filter(matchesType);
     else if (tag) {
@@ -514,19 +607,25 @@ export function createAgentOps(deps: AgentApiDeps) {
       // 'task' pool here specifically, rather than narrowing it to strictly type==='task' like
       // the list/global branches below. 'note'/'all'/'taggable' still narrow as usual.
       items = getItemsByTag(db, tag.id).filter((i) =>
-        itemType === 'task' ? i.type === 'task' || i.type === 'project' : matchesType(i),
+        itemType === "task"
+          ? i.type === "task" || i.type === "project"
+          : matchesType(i),
       );
-    } else if (itemType === 'note') {
+    } else if (itemType === "note") {
       items = queryItems(db, { activeOnly: false }).filter(matchesType);
-    } else if (itemType === 'all' || itemType === 'taggable') {
-      items = queryItems(db, { tasksOnly: false, activeOnly: false }).filter(matchesType);
+    } else if (itemType === "all" || itemType === "taggable") {
+      items = queryItems(db, { tasksOnly: false, activeOnly: false }).filter(
+        matchesType,
+      );
     } else {
       // Strict, unscoped 'task' pool — matches the pre-notes `tasksOnly: true` behaviour so a
       // bare fuzzy query (complete/resolve/share/timer with no list or tag) can never match a
       // project or folder.
       items = queryItems(db, { tasksOnly: true, activeOnly: false });
     }
-    return items.filter((i) => !i.deleted && statusOk(i) && (!scope || scope.has(i.id)));
+    return items.filter(
+      (i) => !i.deleted && statusOk(i) && (!scope || scope.has(i.id)),
+    );
   };
 
   // ----- operations ----------------------------------------------------------
@@ -547,8 +646,9 @@ export function createAgentOps(deps: AgentApiDeps) {
         return {
           ...base,
           open_count: p.notes_project
-            ? children.filter((t) => t.type === 'note').length
-            : children.filter((t) => t.type === 'task' && t.status === 'active').length,
+            ? children.filter((t) => t.type === "note").length
+            : children.filter((t) => t.type === "task" && t.status === "active")
+                .length,
         };
       });
     return ok({ lists: out });
@@ -558,7 +658,14 @@ export function createAgentOps(deps: AgentApiDeps) {
     const out = listTags(db).map((t) => {
       const g = parseGeo(t.geo);
       return input.detail
-        ? { id: t.id, name: t.name, hasGeo: g !== null, color: t.color, status: t.status, geo: g }
+        ? {
+            id: t.id,
+            name: t.name,
+            hasGeo: g !== null,
+            color: t.color,
+            status: t.status,
+            geo: g,
+          }
         : { id: t.id, name: t.name, hasGeo: g !== null };
     });
     return ok({ tags: out });
@@ -568,37 +675,50 @@ export function createAgentOps(deps: AgentApiDeps) {
   // `fallback` rather than silently matching everything.
   function normalizeItemType(
     t: string | undefined,
-    fallback: 'task' | 'note' | 'all' = 'task',
-  ): 'task' | 'note' | 'all' {
-    return t === 'task' || t === 'note' || t === 'all' ? t : fallback;
+    fallback: "task" | "note" | "all" = "task",
+  ): "task" | "note" | "all" {
+    return t === "task" || t === "note" || t === "all" ? t : fallback;
   }
 
   function items(userId: string, input: ItemsInput) {
-    const status = input.status ?? 'active';
+    const status = input.status ?? "active";
     const limit = Math.min(input.limit || 50, 200);
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
     // Reading a notes container with the 'task' default returns nothing — its contents are all
     // notes. An unstated type follows the container instead, mirroring how new items there are
     // notes (repo.ts `defaultChildType`). An explicit type is still honoured.
-    const itemType = normalizeItemType(input.type, list?.notes_project ? 'note' : 'task');
+    const itemType = normalizeItemType(
+      input.type,
+      list?.notes_project ? "note" : "task",
+    );
     // 'done'/'all' need the done-inclusive pool; 'active' keeps the default. Notes carry an
     // inert status, so "active" should still include them.
-    let pool = taskPool(userId, list, tag, { includeDone: status !== 'active', itemType });
-    if (status === 'active') pool = pool.filter((i) => i.type === 'note' || i.status === 'active');
-    else if (status === 'done') pool = pool.filter((i) => i.status === 'done');
+    let pool = taskPool(userId, list, tag, {
+      includeDone: status !== "active",
+      itemType,
+    });
+    if (status === "active")
+      pool = pool.filter((i) => i.type === "note" || i.status === "active");
+    else if (status === "done") pool = pool.filter((i) => i.status === "done");
     // Date-window questions ("what's due this week?"). Bounds are normalized to the same
     // UTC form due_date is stored in, so plain string compares are correct. Only items WITH
     // a due date can match; soonest-first so the limit keeps the most urgent ones instead
     // of an arbitrary 50 on big workspaces.
-    const dueBefore = input.due_before ? normalizeDateTime(input.due_before) : null;
-    const dueAfter = input.due_after ? normalizeDateTime(input.due_after) : null;
+    const dueBefore = input.due_before
+      ? normalizeDateTime(input.due_before)
+      : null;
+    const dueAfter = input.due_after
+      ? normalizeDateTime(input.due_after)
+      : null;
     const dueFiltered = !!(dueBefore || dueAfter);
     if (dueFiltered) {
       pool = pool
         .filter(
           (i) =>
-            i.due_date && (!dueBefore || i.due_date <= dueBefore) && (!dueAfter || i.due_date >= dueAfter),
+            i.due_date &&
+            (!dueBefore || i.due_date <= dueBefore) &&
+            (!dueAfter || i.due_date >= dueAfter),
         )
         .sort((a, b) => (a.due_date! < b.due_date! ? -1 : 1));
     }
@@ -626,8 +746,8 @@ export function createAgentOps(deps: AgentApiDeps) {
     if (idx < 0) return null;
     const start = Math.max(0, idx - SNIPPET_RADIUS);
     const end = Math.min(text.length, idx + q.length + SNIPPET_RADIUS);
-    const prefix = start > 0 ? '…' : '';
-    const suffix = end < text.length ? '…' : '';
+    const prefix = start > 0 ? "…" : "";
+    const suffix = end < text.length ? "…" : "";
     const before = text.slice(start, idx);
     const hit = text.slice(idx, idx + q.length);
     const after = text.slice(idx + q.length, end);
@@ -639,14 +759,15 @@ export function createAgentOps(deps: AgentApiDeps) {
    *  caller (conversational prompt) can summarize/quote rather than dumping the whole body. */
   function searchNotes(userId: string, input: SearchNotesInput) {
     const q = input.q?.trim();
-    if (!q) return fail('q required', 400);
+    if (!q) return fail("q required", 400);
     const limit = Math.min(input.limit || 20, 100);
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
     // Notes default to inert status, so completed/dropped notes are still worth finding —
     // include_done defaults true here (unlike items/update) unless the caller says otherwise.
     const includeDone = input.include_done !== false;
-    const itemType = input.type === 'task' || input.type === 'all' ? input.type : 'note';
+    const itemType =
+      input.type === "task" || input.type === "all" ? input.type : "note";
     const pool = taskPool(userId, list, tag, { includeDone, itemType });
     const hits: Array<{
       id: string;
@@ -659,7 +780,13 @@ export function createAgentOps(deps: AgentApiDeps) {
       if (!it.note) continue;
       const snippet = noteSnippet(it.note, q);
       if (snippet) {
-        hits.push({ id: it.id, title: it.title, type: it.type, ...noteModeField(it), snippet });
+        hits.push({
+          id: it.id,
+          title: it.title,
+          type: it.type,
+          ...noteModeField(it),
+          snippet,
+        });
       }
       if (hits.length >= limit) break;
     }
@@ -668,7 +795,8 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   function item(userId: string, id: string) {
     const it = getItem(db, id);
-    if (!it || it.deleted || !canSee(userId, it.id)) return fail('not found', 404);
+    if (!it || it.deleted || !canSee(userId, it.id))
+      return fail("not found", 404);
     const proj = projectAncestor(db, it.id);
     return ok({
       ...it,
@@ -679,24 +807,29 @@ export function createAgentOps(deps: AgentApiDeps) {
   }
 
   function resolve(userId: string, input: ResolveInput) {
-    const q = (input.q ?? '').trim();
+    const q = (input.q ?? "").trim();
     const limit = Math.min(input.limit || 5, 20);
-    if (!q) return fail('q required', 400);
+    if (!q) return fail("q required", 400);
 
     let ranked;
     let nameOf: (x: { id: string }) => string;
     // Item kinds report `type` on each candidate, so a caller that must act on a task (only a
     // task can be completed) can tell a note apart from one.
     let itemKind = false;
-    if (input.kind === 'list') {
+    if (input.kind === "list") {
       const scope = scopeItems(userId);
       const projects = getProjects(db).filter((p) => !scope || scope.has(p.id));
       ranked = rankBy(q, projects, [(p) => p.title], { limit });
       nameOf = (x) => (x as Item).title;
-    } else if (input.kind === 'tag') {
-      ranked = rankBy(q, listTags(db), [(t) => t.name, (t) => tagLeaf(t.name)], { limit });
+    } else if (input.kind === "tag") {
+      ranked = rankBy(
+        q,
+        listTags(db),
+        [(t) => t.name, (t) => tagLeaf(t.name)],
+        { limit },
+      );
       nameOf = (x) => (x as Tag).name;
-    } else if (input.kind === 'task' || input.kind === 'note') {
+    } else if (input.kind === "task" || input.kind === "note") {
       const list = findList(userId, input.list);
       // kind:'task' matches notes too. It is the existence check both prompts tell the model to
       // run before acting ("is there something called X?"), and a task-only pool answered "no"
@@ -706,7 +839,7 @@ export function createAgentOps(deps: AgentApiDeps) {
         q,
         taskPool(userId, list, null, {
           includeDone: input.include_done === true,
-          itemType: input.kind === 'note' ? 'note' : 'all',
+          itemType: input.kind === "note" ? "note" : "all",
         }),
         [(i) => i.title],
         { limit },
@@ -714,33 +847,43 @@ export function createAgentOps(deps: AgentApiDeps) {
       nameOf = (x) => (x as Item).title;
       itemKind = true;
     } else {
-      return fail('kind must be list, tag, task, or note', 400);
+      return fail("kind must be list, tag, task, or note", 400);
     }
 
     const candidates = ranked.map((s) => ({
       id: (s.item as { id: string }).id,
       name: nameOf(s.item as { id: string }),
-      ...(itemKind ? { type: (s.item as Item).type, ...noteModeField(s.item as Item) } : {}),
+      ...(itemKind
+        ? { type: (s.item as Item).type, ...noteModeField(s.item as Item) }
+        : {}),
       score: Math.round(s.score * 100) / 100,
       reason: s.reason,
     }));
     const top = candidates[0];
     const second = ranked[1];
     const confident =
-      !!ranked[0] && ranked[0].score >= 0.55 && (!second || ranked[0].score - second.score >= 0.15);
+      !!ranked[0] &&
+      ranked[0].score >= 0.55 &&
+      (!second || ranked[0].score - second.score >= 0.15);
     return ok({ candidates, best: top ? { id: top.id, confident } : null });
   }
 
   function addTasks(userId: string, input: AddTasksInput) {
-    const taskInputs: TaskInput[] = input.tasks ?? (input.titles ?? []).map((title) => ({ title }));
-    if (!taskInputs.length || taskInputs.some((t) => !t.title || typeof t.title !== 'string')) {
-      return fail('provide titles[] or tasks[] with a title each', 400);
+    const taskInputs: TaskInput[] =
+      input.tasks ?? (input.titles ?? []).map((title) => ({ title }));
+    if (
+      !taskInputs.length ||
+      taskInputs.some((t) => !t.title || typeof t.title !== "string")
+    ) {
+      return fail("provide titles[] or tasks[] with a title each", 400);
     }
-    if (taskInputs.length > MAX_BATCH) return fail(`too many tasks (max ${MAX_BATCH})`, 400);
+    if (taskInputs.length > MAX_BATCH)
+      return fail(`too many tasks (max ${MAX_BATCH})`, 400);
     if (taskInputs.some((t) => t.title.length > MAX_TITLE_LEN)) {
       return fail(`task title too long (max ${MAX_TITLE_LEN} chars)`, 400);
     }
-    if (tooMany(input.tags)) return fail(`too many tags (max ${MAX_BATCH})`, 400);
+    if (tooMany(input.tags))
+      return fail(`too many tags (max ${MAX_BATCH})`, 400);
     if (taskInputs.some((t) => tooMany(t.tags))) {
       return fail(`too many tags on a task (max ${MAX_BATCH})`, 400);
     }
@@ -748,14 +891,33 @@ export function createAgentOps(deps: AgentApiDeps) {
     let listOut: { id: string; name: string; created: boolean } | null = null;
     let listItem: Item | null = null;
     if (input.list !== undefined) {
-      const r = resolveOrCreateList(userId, input.list, input.create_list_if_missing !== false);
-      if (!r) return fail('list not found', 404);
+      const r = resolveOrCreateList(
+        userId,
+        input.list,
+        input.create_list_if_missing !== false,
+      );
+      if (!r) return fail("list not found", 404);
       listItem = r.item;
       listOut = { id: r.item.id, name: r.item.title, created: r.created };
+      // Destination authorization: you can only add into a list you can write. A read sharee
+      // of a project may browse it but not create inside it — the same parent-write rule the
+      // shared module enforces for a create/move's parent (sync, REST, agent surfaces agree).
+      if (!canWrite(userId, r.item.id))
+        return fail("you do not have write access to that list", 403);
     }
 
+    if (
+      !isDestinationAllowed(db, sessionCredentialFor(userId), {
+        itemId: "new",
+        type: "task",
+        parentId: listItem?.id ?? null,
+      })
+    )
+      return fail("invalid destination", 403);
+
     const createTags = input.create_tags_if_missing !== false;
-    const sharedTagOut: Array<{ id: string; name: string; created: boolean }> = [];
+    const sharedTagOut: Array<{ id: string; name: string; created: boolean }> =
+      [];
     for (const name of input.tags ?? []) {
       const r = resolveOrCreateTag(name, createTags);
       if (r) sharedTagOut.push(r);
@@ -763,21 +925,33 @@ export function createAgentOps(deps: AgentApiDeps) {
 
     // Resolve all unique per-task tag names once before the creation loop.
     const perTaskTagNames = new Set<string>();
-    for (const t of taskInputs) for (const n of t.tags ?? []) perTaskTagNames.add(n);
+    for (const t of taskInputs)
+      for (const n of t.tags ?? []) perTaskTagNames.add(n);
     const perTaskTagById = new Map<string, string>();
     for (const name of perTaskTagNames) {
       const r = resolveOrCreateTag(name, createTags);
       if (r) perTaskTagById.set(name, r.id);
     }
 
-    const created: Array<{ id: string; title: string; type: string; note_mode?: string }> = [];
+    const created: Array<{
+      id: string;
+      title: string;
+      type: string;
+      note_mode?: string;
+    }> = [];
     for (const t of taskInputs) {
       // note_mode is a note-editor setting, so asking for one is asking for a note.
-      const noteMode = t.note_mode === 'recipe' ? 'recipe' : null;
+      const noteMode = t.note_mode === "recipe" ? "recipe" : null;
       // An unstated type is left to createItem, which follows the destination container:
       // notes inside a notes container (notebook), tasks everywhere else — the same rule
       // quick-add and the outliner use. Forcing 'task' here put checkbox tasks in notebooks.
-      const type = noteMode ? 'note' : t.type === 'note' ? 'note' : t.type === 'task' ? 'task' : undefined;
+      const type = noteMode
+        ? "note"
+        : t.type === "note"
+          ? "note"
+          : t.type === "task"
+            ? "task"
+            : undefined;
       const it = createItem(db, deviceId, {
         type,
         title: t.title,
@@ -788,13 +962,15 @@ export function createAgentOps(deps: AgentApiDeps) {
         dueDate: normalizeDateTime(t.due_date) ?? null,
         deferDate: normalizeDateTime(t.defer_date) ?? null,
         flagged: !!t.flagged,
-        priority: typeof t.priority === 'number' ? t.priority : 0,
+        priority: typeof t.priority === "number" ? t.priority : 0,
       });
       // Scheduling fields createItem doesn't take: patch them on after creation.
       const sched: ItemPatch = {};
       if (t.reminder_at) sched.reminder_at = normalizeDateTime(t.reminder_at);
-      if (t.recurrence != null) sched.recurrence = normalizeRecurrence(t.recurrence);
-      if (typeof t.estimate_minutes === 'number') sched.estimate_minutes = t.estimate_minutes;
+      if (t.recurrence != null)
+        sched.recurrence = normalizeRecurrence(t.recurrence);
+      if (typeof t.estimate_minutes === "number")
+        sched.estimate_minutes = t.estimate_minutes;
       if (Object.keys(sched).length) updateItem(db, deviceId, it.id, sched);
       const tagIds = new Set(sharedTagOut.map((x) => x.id));
       for (const name of t.tags ?? []) {
@@ -802,13 +978,19 @@ export function createAgentOps(deps: AgentApiDeps) {
         if (id) tagIds.add(id);
       }
       for (const id of tagIds) setItemTagLink(db, deviceId, it.id, id, false);
-      created.push({ id: it.id, title: it.title, type: it.type, ...noteModeField(it) });
+      created.push({
+        id: it.id,
+        title: it.title,
+        type: it.type,
+        ...noteModeField(it),
+      });
     }
     return ok({ list: listOut, tags: sharedTagOut, created }, 201);
   }
 
   function complete(userId: string, input: CompleteInput) {
-    if (tooMany(input.ids, input.queries)) return fail(`too many targets (max ${MAX_BATCH})`, 400);
+    if (tooMany(input.ids, input.queries))
+      return fail(`too many targets (max ${MAX_BATCH})`, 400);
     const done = input.done !== false;
     const list = findList(userId, input.list);
     const tag = findTag(input.tag);
@@ -820,12 +1002,12 @@ export function createAgentOps(deps: AgentApiDeps) {
       // Task-only op: a note has no "done" state (its status is inert), so an id addressing a
       // note must be rejected rather than passed to setCompleted. The name-resolution path
       // already excludes notes via taskPool; this closes the raw-id hole.
-      if (!it || it.deleted || it.type === 'note' || !canSee(userId, id)) {
-        unmatched.push({ query: id, reason: 'no_match' });
+      if (!it || it.deleted || it.type === "note" || !canSee(userId, id)) {
+        unmatched.push({ query: id, reason: "no_match" });
         continue;
       }
       if (!canWrite(userId, id)) {
-        unmatched.push({ query: id, reason: 'forbidden' });
+        unmatched.push({ query: id, reason: "forbidden" });
         continue;
       }
       setCompleted(db, deviceId, id, done);
@@ -844,13 +1026,13 @@ export function createAgentOps(deps: AgentApiDeps) {
     if (!input.ids?.length && !input.queries?.length) {
       if (!list && !tag) {
         return input.list || input.tag
-          ? fail('list or tag not found', 404)
-          : fail('specify queries, ids, list, or tag', 400);
+          ? fail("list or tag not found", 404)
+          : fail("specify queries, ids, list, or tag", 400);
       }
       for (const it of pool) {
-        if (it.type !== 'task' || (it.status === 'done') === done) continue;
+        if (it.type !== "task" || (it.status === "done") === done) continue;
         if (!canWrite(userId, it.id)) {
-          unmatched.push({ query: it.title, reason: 'forbidden' });
+          unmatched.push({ query: it.title, reason: "forbidden" });
           continue;
         }
         setCompleted(db, deviceId, it.id, done);
@@ -862,12 +1044,12 @@ export function createAgentOps(deps: AgentApiDeps) {
     for (const query of input.queries ?? []) {
       const m = bestMatch(query, pool, [(i) => i.title]);
       if (!m.matched) {
-        unmatched.push({ query, reason: m.reason ?? 'no_match' });
+        unmatched.push({ query, reason: m.reason ?? "no_match" });
         continue;
       }
       const hit = m.matched.item;
       if (!canWrite(userId, hit.id)) {
-        unmatched.push({ query, reason: 'forbidden' });
+        unmatched.push({ query, reason: "forbidden" });
         continue;
       }
       setCompleted(db, deviceId, hit.id, done);
@@ -877,27 +1059,28 @@ export function createAgentOps(deps: AgentApiDeps) {
   }
 
   const PATCH_FIELDS = [
-    'title',
-    'note',
-    'type',
-    'due_date',
-    'defer_date',
-    'reminder_at',
-    'recurrence',
-    'estimate_minutes',
-    'flagged',
-    'priority',
-    'status',
-    'metadata',
+    "title",
+    "note",
+    "type",
+    "due_date",
+    "defer_date",
+    "reminder_at",
+    "recurrence",
+    "estimate_minutes",
+    "flagged",
+    "priority",
+    "status",
+    "metadata",
   ] as const;
 
   function update(userId: string, input: UpdateInput) {
-    if (tooMany(input.updates)) return fail(`too many updates (max ${MAX_BATCH})`, 400);
+    if (tooMany(input.updates))
+      return fail(`too many updates (max ${MAX_BATCH})`, 400);
     const includeDone = input.include_done === true;
     const matched: Array<{ query: string; id: string; title: string }> = [];
     const unmatched: Array<{ query: string; reason: string }> = [];
     for (const u of input.updates ?? []) {
-      const label = u.id ?? u.query ?? '';
+      const label = u.id ?? u.query ?? "";
       let target: Item | null = null;
       if (u.id) {
         const it = getItem(db, u.id);
@@ -906,68 +1089,86 @@ export function createAgentOps(deps: AgentApiDeps) {
         // itemType:'all' so a query can resolve either a task or a note — needed for
         // task<->note conversion ("turn my note X into a task") where the target isn't a
         // plain task while it's still a note.
-        const pool = taskPool(userId, findList(userId, u.list), findTag(u.tag), {
-          includeDone,
-          itemType: 'all',
-        });
-        target = bestMatch(u.query, pool, [(i) => i.title]).matched?.item ?? null;
+        const pool = taskPool(
+          userId,
+          findList(userId, u.list),
+          findTag(u.tag),
+          {
+            includeDone,
+            itemType: "all",
+          },
+        );
+        target =
+          bestMatch(u.query, pool, [(i) => i.title]).matched?.item ?? null;
       }
       if (!target) {
-        unmatched.push({ query: label, reason: 'no_match' });
+        unmatched.push({ query: label, reason: "no_match" });
         continue;
       }
       if (!canWrite(userId, target.id)) {
-        unmatched.push({ query: label, reason: 'forbidden' });
+        unmatched.push({ query: label, reason: "forbidden" });
         continue;
       }
       const patch: ItemPatch = {};
       for (const k of PATCH_FIELDS) {
-        if (u.patch && k in u.patch) (patch as Record<string, unknown>)[k] = u.patch[k];
+        if (u.patch && k in u.patch)
+          (patch as Record<string, unknown>)[k] = u.patch[k];
       }
       // Only 'task'/'note' are valid conversion targets via the agent; anything else in the
       // patch is dropped rather than corrupting the row with an unsupported type value.
-      if ('type' in patch && patch.type !== 'task' && patch.type !== 'note') {
+      if ("type" in patch && patch.type !== "task" && patch.type !== "note") {
         delete (patch as Record<string, unknown>).type;
       }
       // recurrence is stored as a JSON string; accept the model's object form.
-      if ('recurrence' in patch) patch.recurrence = normalizeRecurrence(patch.recurrence);
+      if ("recurrence" in patch)
+        patch.recurrence = normalizeRecurrence(patch.recurrence);
       // Appending is the common note edit ("add to my bread recipe: rest for 45 min"), and
       // doing it server-side is what makes it safe: the alternative is the caller reading the
       // body and writing it back, which loses everything it didn't read (or didn't fit in its
       // context). Applies on top of a same-call `note` replacement if both are given.
       const appendRaw = u.patch?.note_append;
-      if (typeof appendRaw === 'string' && appendRaw.trim()) {
-        const base = typeof patch.note === 'string' ? patch.note : (target.note ?? '');
-        const trimmed = base.replace(/\s+$/, '');
-        patch.note = trimmed ? `${trimmed}\n${appendRaw.trim()}` : appendRaw.trim();
+      if (typeof appendRaw === "string" && appendRaw.trim()) {
+        const base =
+          typeof patch.note === "string" ? patch.note : (target.note ?? "");
+        const trimmed = base.replace(/\s+$/, "");
+        patch.note = trimmed
+          ? `${trimmed}\n${appendRaw.trim()}`
+          : appendRaw.trim();
       }
       // note_mode is the note editor's mode, stored inside metadata — offered as a plain patch
       // key so a caller never has to hand-build that column to turn a note into a recipe.
       const metaPatch: Record<string, unknown> = {};
       const modeRaw = u.patch?.note_mode;
-      if (modeRaw === 'recipe' || modeRaw === 'notes') {
-        metaPatch.noteMode = modeRaw === 'recipe' ? 'recipe' : null;
+      if (modeRaw === "recipe" || modeRaw === "notes") {
+        metaPatch.noteMode = modeRaw === "recipe" ? "recipe" : null;
       }
       // metadata is TEXT JSON, and one whole-value LWW column shared by several features —
       // merge onto what's stored instead of replacing it (see mergeMeta), so setting a note's
       // mode can't wipe its recipe scaling or a GPS-track summary. An explicit null/"" still
       // clears the column outright; keys given alongside it then land on an empty base.
-      const rawMeta = 'metadata' in patch ? (patch.metadata as unknown) : undefined;
-      const clearMeta = rawMeta === null || rawMeta === '';
-      if (rawMeta != null && typeof rawMeta === 'object' && !Array.isArray(rawMeta)) {
+      const rawMeta =
+        "metadata" in patch ? (patch.metadata as unknown) : undefined;
+      const clearMeta = rawMeta === null || rawMeta === "";
+      if (
+        rawMeta != null &&
+        typeof rawMeta === "object" &&
+        !Array.isArray(rawMeta)
+      ) {
         Object.assign(metaPatch, rawMeta as Record<string, unknown>);
       }
-      if (rawMeta !== undefined) delete (patch as Record<string, unknown>).metadata;
+      if (rawMeta !== undefined)
+        delete (patch as Record<string, unknown>).metadata;
       if (clearMeta || Object.keys(metaPatch).length) {
         patch.metadata = Object.keys(metaPatch).length
           ? mergeMeta(clearMeta ? null : target.metadata, metaPatch)
           : null;
       }
-      for (const k of ['due_date', 'defer_date', 'reminder_at'] as const) {
-        if (k in patch) (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);
+      for (const k of ["due_date", "defer_date", "reminder_at"] as const) {
+        if (k in patch)
+          (patch as Record<string, unknown>)[k] = normalizeDateTime(patch[k]);
       }
       let resultTitle = target.title;
-      if (patch.status === 'done' && target.status !== 'done') {
+      if (patch.status === "done" && target.status !== "done") {
         // A status->'done' patch must go through setCompleted, not a raw field write,
         // so recurring tasks still spawn their next occurrence (mirrors complete()).
         delete (patch as Record<string, unknown>).status;
@@ -978,8 +1179,12 @@ export function createAgentOps(deps: AgentApiDeps) {
       } else {
         // A raw status patch must keep completed_at in step (mirrors setCompleted) —
         // completed-item age logic (e.g. the purge feature) relies on the stamp.
-        if (typeof patch.status === 'string' && patch.status !== target.status) {
-          patch.completed_at = patch.status === 'done' ? new Date().toISOString() : null;
+        if (
+          typeof patch.status === "string" &&
+          patch.status !== target.status
+        ) {
+          patch.completed_at =
+            patch.status === "done" ? new Date().toISOString() : null;
         }
         const updated = updateItem(db, deviceId, target.id, patch);
         if (updated) resultTitle = updated.title;
@@ -996,9 +1201,14 @@ export function createAgentOps(deps: AgentApiDeps) {
       return fail(`too many targets/tags (max ${MAX_BATCH})`, 400);
     }
     const createTags = input.create_tags_if_missing !== false;
-    const add = (input.add ?? []).map((n) => resolveOrCreateTag(n, createTags)).filter((r): r is NonNullable<typeof r> => !!r);
-    const removeTags = (input.remove ?? []).map((n) => findTag(n)).filter((t): t is Tag => !!t);
-    if (!add.length && !removeTags.length) return fail('specify add[] and/or remove[] tag names', 400);
+    const add = (input.add ?? [])
+      .map((n) => resolveOrCreateTag(n, createTags))
+      .filter((r): r is NonNullable<typeof r> => !!r);
+    const removeTags = (input.remove ?? [])
+      .map((n) => findTag(n))
+      .filter((t): t is Tag => !!t);
+    if (!add.length && !removeTags.length)
+      return fail("specify add[] and/or remove[] tag names", 400);
 
     const includeDone = input.include_done === true;
     const unmatched: Array<{ query: string; reason: string }> = [];
@@ -1010,33 +1220,43 @@ export function createAgentOps(deps: AgentApiDeps) {
         // Tagging is meaningful on tasks, notes, and projects — only folders (a visual
         // grouping layer, not a taggable "thing") are rejected. Matches the fuzzy/list/tag
         // pools below ('taggable'), so an id and a query/list can target the same set.
-        if (it && !it.deleted && it.type !== 'folder' && canSee(userId, id)) targets.push(it);
-        else unmatched.push({ query: id, reason: 'no_match' });
+        if (it && !it.deleted && it.type !== "folder" && canSee(userId, id))
+          targets.push(it);
+        else unmatched.push({ query: id, reason: "no_match" });
       }
-      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), {
-        includeDone,
-        itemType: 'taggable',
-      });
+      const pool = taskPool(
+        userId,
+        findList(userId, input.list),
+        findTag(input.tag),
+        {
+          includeDone,
+          itemType: "taggable",
+        },
+      );
       for (const q of input.queries ?? []) {
         const hit = bestMatch(q, pool, [(i) => i.title]).matched?.item;
         if (hit) targets.push(hit);
-        else unmatched.push({ query: q, reason: 'no_match' });
+        else unmatched.push({ query: q, reason: "no_match" });
       }
     } else {
       const list = findList(userId, input.list);
       const tag = findTag(input.tag);
-      if (!list && !tag) return fail('specify list, tag, ids, or queries', 404);
-      targets = taskPool(userId, list, tag, { includeDone, itemType: 'taggable' });
+      if (!list && !tag) return fail("specify list, tag, ids, or queries", 404);
+      targets = taskPool(userId, list, tag, {
+        includeDone,
+        itemType: "taggable",
+      });
     }
 
     const updated: Array<{ id: string; title: string }> = [];
     for (const t of targets) {
       if (!canWrite(userId, t.id)) {
-        unmatched.push({ query: t.title, reason: 'forbidden' });
+        unmatched.push({ query: t.title, reason: "forbidden" });
         continue;
       }
       for (const a of add) setItemTagLink(db, deviceId, t.id, a.id, false);
-      for (const r of removeTags) setItemTagLink(db, deviceId, t.id, r.id, true);
+      for (const r of removeTags)
+        setItemTagLink(db, deviceId, t.id, r.id, true);
       updated.push({ id: t.id, title: t.title });
     }
     return ok({
@@ -1048,81 +1268,122 @@ export function createAgentOps(deps: AgentApiDeps) {
   }
 
   async function tagGeo(_userId: string, input: TagGeoInput) {
-    if (!input.tag) return fail('tag required', 400);
-    const resolved = resolveOrCreateTag(input.tag, input.create_if_missing === true);
-    if (!resolved) return fail('tag not found', 404);
+    if (!input.tag) return fail("tag required", 400);
+    const resolved = resolveOrCreateTag(
+      input.tag,
+      input.create_if_missing === true,
+    );
+    if (!resolved) return fail("tag not found", 404);
 
     if (input.geo === null) {
       updateTag(db, deviceId, resolved.id, { geo: null });
-      return ok({ tag: { id: resolved.id, name: resolved.name }, geo: null, source: 'explicit' });
+      return ok({
+        tag: { id: resolved.id, name: resolved.name },
+        geo: null,
+        source: "explicit",
+      });
     }
 
     let reminder: GeoReminder;
-    let source: 'explicit' | 'geocoded' = 'explicit';
-    if (input.geo && typeof input.geo.lat === 'number' && typeof input.geo.lng === 'number') {
+    let source: "explicit" | "geocoded" = "explicit";
+    if (
+      input.geo &&
+      typeof input.geo.lat === "number" &&
+      typeof input.geo.lng === "number"
+    ) {
       reminder = {
         lat: input.geo.lat,
         lng: input.geo.lng,
-        radius: typeof input.geo.radius === 'number' && input.geo.radius > 0 ? input.geo.radius : 150,
+        radius:
+          typeof input.geo.radius === "number" && input.geo.radius > 0
+            ? input.geo.radius
+            : 150,
         label: input.geo.label,
       };
     } else if (input.near_name) {
-      if (!geocode) return fail('geocoding_disabled', 400);
+      if (!geocode) return fail("geocoding_disabled", 400);
       // near_name needs an anchor point with BOTH coordinates; a partial/absent anchor
       // (e.g. no recent location for the user) is reported distinctly so the caller can
       // say "no recent location" rather than misreporting a geocode failure.
-      if (!input.near || typeof input.near.lat !== 'number' || typeof input.near.lng !== 'number') {
-        return fail('no_anchor_location', 400);
+      if (
+        !input.near ||
+        typeof input.near.lat !== "number" ||
+        typeof input.near.lng !== "number"
+      ) {
+        return fail("no_anchor_location", 400);
       }
       const hit = await geocode.nearestBrand(input.near_name, input.near);
-      if (!hit) return fail('could_not_geocode', 400);
-      reminder = { lat: hit.point.lat, lng: hit.point.lng, radius: 150, label: hit.label };
-      source = 'geocoded';
+      if (!hit) return fail("could_not_geocode", 400);
+      reminder = {
+        lat: hit.point.lat,
+        lng: hit.point.lng,
+        radius: 150,
+        label: hit.label,
+      };
+      source = "geocoded";
     } else {
-      return fail('provide geo{lat,lng} or near_name+near{lat,lng}', 400);
+      return fail("provide geo{lat,lng} or near_name+near{lat,lng}", 400);
     }
 
     updateTag(db, deviceId, resolved.id, { geo: JSON.stringify(reminder) });
-    return ok({ tag: { id: resolved.id, name: resolved.name }, geo: reminder, source });
+    return ok({
+      tag: { id: resolved.id, name: resolved.name },
+      geo: reminder,
+      source,
+    });
   }
 
   async function nearby(userId: string, input: NearbyInput) {
     const scope = scopeItems(userId);
     if (input.tag) {
       const tag = findTag(input.tag);
-      if (!tag) return fail('tag not found', 404);
+      if (!tag) return fail("tag not found", 404);
       const out = getItemsByTag(db, tag.id).filter(
         (i) =>
-          i.type === 'task' && i.status === 'active' && !i.deleted && (!scope || scope.has(i.id)),
+          i.type === "task" &&
+          i.status === "active" &&
+          !i.deleted &&
+          (!scope || scope.has(i.id)),
       );
       return ok({ items: out.map(minimalItem) });
     }
 
-    const hasPoint = typeof input.lat === 'number' && typeof input.lng === 'number';
+    const hasPoint =
+      typeof input.lat === "number" && typeof input.lng === "number";
     let point: { lat: number; lng: number } | null = hasPoint
       ? { lat: input.lat!, lng: input.lng! }
       : null;
     let location: { lat: number; lng: number; label: string } | undefined;
     if (input.near_name && hasPoint && geocode) {
-      const hit = await geocode.nearestBrand(input.near_name, { lat: input.lat!, lng: input.lng! });
+      const hit = await geocode.nearestBrand(input.near_name, {
+        lat: input.lat!,
+        lng: input.lng!,
+      });
       if (hit) {
         point = hit.point;
         location = { lat: hit.point.lat, lng: hit.point.lng, label: hit.label };
       }
     }
-    if (!input.zone && !point) return fail('provide tag, zone, or lat+lng', 400);
+    if (!input.zone && !point)
+      return fail("provide tag, zone, or lat+lng", 400);
     let out = tasksNearLocation(db, { zone: input.zone, point });
     if (scope) out = out.filter((i) => scope.has(i.id));
     return ok({ items: out.map(minimalItem), location });
   }
 
   async function geocodeSearch(_userId: string, input: GeocodeSearchInput) {
-    if (!geocode) return fail('geocoding_disabled', 400);
+    if (!geocode) return fail("geocoding_disabled", 400);
     const q = input.q?.trim();
-    if (!q || !input.near || typeof input.near.lat !== 'number' || typeof input.near.lng !== 'number') {
-      return fail('q and near{lat,lng} required', 400);
+    if (
+      !q ||
+      !input.near ||
+      typeof input.near.lat !== "number" ||
+      typeof input.near.lng !== "number"
+    ) {
+      return fail("q and near{lat,lng} required", 400);
     }
-    const radius = typeof input.radius === 'number' && input.radius > 0 ? input.radius : 150;
+    const radius =
+      typeof input.radius === "number" && input.radius > 0 ? input.radius : 150;
     const hits = await geocode.search(q, input.near, { limit: 5 });
     return ok({
       candidates: hits.map((h) => ({
@@ -1138,17 +1399,32 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   /** People a task can be shared with or assigned to. */
   function users(_userId: string) {
-    return ok({ users: assignable().map((u) => ({ id: u.id, name: userName(u), username: u.username })) });
+    return ok({
+      users: assignable().map((u) => ({
+        id: u.id,
+        name: userName(u),
+        username: u.username,
+      })),
+    });
   }
 
   // Resolve the task target(s) for share/assign from id, queries, or a whole list/tag. Dedupes
   // and reports misses, mirroring the complete/tag envelope. Completed tasks are included so a
   // just-finished task can still be shared/assigned.
-  type TargetInput = { id?: string; query?: string; queries?: string[]; list?: ListRef; tag?: string };
+  type TargetInput = {
+    id?: string;
+    query?: string;
+    queries?: string[];
+    list?: ListRef;
+    tag?: string;
+  };
   const collectTargets = (
     userId: string,
     input: TargetInput,
-  ): { targets: Item[]; unmatched: Array<{ query: string; reason: string }> } => {
+  ): {
+    targets: Item[];
+    unmatched: Array<{ query: string; reason: string }>;
+  } => {
     const seen = new Set<string>();
     const targets: Item[] = [];
     const unmatched: Array<{ query: string; reason: string }> = [];
@@ -1162,29 +1438,43 @@ export function createAgentOps(deps: AgentApiDeps) {
       const it = getItem(db, input.id);
       // Task-only: the query/list/tag paths below already exclude notes via taskPool; guard
       // the raw-id path so a note id can't be shared/assigned as if it were a task.
-      if (it && !it.deleted && it.type !== 'note' && canSee(userId, it.id)) push(it);
-      else unmatched.push({ query: input.id, reason: 'no_match' });
+      if (it && !it.deleted && it.type !== "note" && canSee(userId, it.id))
+        push(it);
+      else unmatched.push({ query: input.id, reason: "no_match" });
     }
     const queries = input.queries ?? (input.query ? [input.query] : []);
     if (queries.length) {
-      const pool = taskPool(userId, findList(userId, input.list), findTag(input.tag), { includeDone: true });
+      const pool = taskPool(
+        userId,
+        findList(userId, input.list),
+        findTag(input.tag),
+        { includeDone: true },
+      );
       for (const q of queries) {
         const hit = bestMatch(q, pool, [(i) => i.title]).matched?.item;
         if (hit) push(hit);
-        else unmatched.push({ query: q, reason: 'no_match' });
+        else unmatched.push({ query: q, reason: "no_match" });
       }
     }
     // No explicit task → act on a whole list/tag (e.g. "share my Groceries list with Rachel").
-    if (!input.id && !queries.length && (input.list !== undefined || input.tag)) {
+    if (
+      !input.id &&
+      !queries.length &&
+      (input.list !== undefined || input.tag)
+    ) {
       const list = findList(userId, input.list);
       const tag = findTag(input.tag);
-      if (list || tag) for (const it of taskPool(userId, list, tag, { includeDone: true })) push(it);
+      if (list || tag)
+        for (const it of taskPool(userId, list, tag, { includeDone: true }))
+          push(it);
     }
     return { targets, unmatched };
   };
 
   // Resolve the user names once; report any that don't match a real person.
-  const resolveUsers = (names: string[]): { users: User[]; unknown: string[] } => {
+  const resolveUsers = (
+    names: string[],
+  ): { users: User[]; unknown: string[] } => {
     const out: User[] = [];
     const seen = new Set<string>();
     const unknown: string[] = [];
@@ -1200,26 +1490,42 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   function share(userId: string, input: ShareInput) {
     const names = input.users ?? [];
-    if (!names.length) return fail('specify users[] (names)', 400);
-    if (tooMany(input.queries, names)) return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
+    if (!names.length) return fail("specify users[] (names)", 400);
+    if (tooMany(input.queries, names))
+      return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
     const { users: people, unknown } = resolveUsers(names);
-    if (!people.length) return fail(`no such user${unknown.length ? `: ${unknown.join(', ')}` : ''}`, 404);
-    const permission: Permission = input.permission === 'read' ? 'read' : 'write';
+    if (!people.length)
+      return fail(
+        `no such user${unknown.length ? `: ${unknown.join(", ")}` : ""}`,
+        404,
+      );
+    const permission: Permission =
+      input.permission === "read" ? "read" : "write";
     const remove = input.remove === true;
 
     const { targets, unmatched } = collectTargets(userId, input);
-    if (!targets.length && !unmatched.length) return fail('specify a task by id, query, list, or tag', 404);
+    if (!targets.length && !unmatched.length)
+      return fail("specify a task by id, query, list, or tag", 404);
     const updated: Array<{ id: string; title: string }> = [];
     for (const t of targets) {
       if (!canWrite(userId, t.id)) {
-        unmatched.push({ query: t.title, reason: 'forbidden' });
+        unmatched.push({ query: t.title, reason: "forbidden" });
         continue;
       }
+      let changed = false;
       for (const u of people) {
+        if (!canControlShare(userId, t.id, u.id, remove)) {
+          unmatched.push({
+            query: t.title,
+            reason: "only the item owner controls sharing",
+          });
+          continue;
+        }
         if (remove) unshareItem(db, deviceId, t.id, u.id);
         else shareItem(db, deviceId, t.id, u.id, permission);
+        changed = true;
       }
-      updated.push({ id: t.id, title: t.title });
+      if (changed) updated.push({ id: t.id, title: t.title });
     }
     return ok({
       updated,
@@ -1233,27 +1539,39 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   function assign(userId: string, input: AssignInput) {
     const names = input.users ?? [];
-    if (!names.length) return fail('specify users[] (names)', 400);
-    if (tooMany(input.queries, names)) return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
+    if (!names.length) return fail("specify users[] (names)", 400);
+    if (tooMany(input.queries, names))
+      return fail(`too many targets/users (max ${MAX_BATCH})`, 400);
     const { users: people, unknown } = resolveUsers(names);
-    if (!people.length) return fail(`no such user${unknown.length ? `: ${unknown.join(', ')}` : ''}`, 404);
+    if (!people.length)
+      return fail(
+        `no such user${unknown.length ? `: ${unknown.join(", ")}` : ""}`,
+        404,
+      );
     const remove = input.remove === true;
 
     const { targets, unmatched } = collectTargets(userId, input);
-    if (!targets.length && !unmatched.length) return fail('specify a task by id, query, list, or tag', 404);
+    if (!targets.length && !unmatched.length)
+      return fail("specify a task by id, query, list, or tag", 404);
     const updated: Array<{ id: string; title: string }> = [];
     for (const t of targets) {
       if (!canWrite(userId, t.id)) {
-        unmatched.push({ query: t.title, reason: 'forbidden' });
+        unmatched.push({ query: t.title, reason: "forbidden" });
         continue;
       }
       for (const u of people) {
         if (remove) unassignItem(db, deviceId, t.id, u.id);
         else {
           assignItem(db, deviceId, t.id, u.id);
-          // Assigning grants edit access if the user doesn't already have it, matching
-          // every other assign call site (TaskDetail.tsx, RowQuickMenu.tsx, quickadd.ts).
-          if (!hasWriteAccess(db, t.id, u.id)) shareItem(db, deviceId, t.id, u.id, 'write');
+          // Assigning grants edit access if the user doesn't already have it, matching every
+          // other assign call site (TaskDetail.tsx, RowQuickMenu.tsx, quickadd.ts). Owner-only:
+          // only the item's owner (or the single local user) may grant that access, so a
+          // non-owner sharee cannot use assignment to re-grant a third party.
+          const owner =
+            userId === "local" ||
+            isItemOwner(db, sessionCredentialFor(userId), t.id);
+          if (owner && !hasWriteAccess(db, t.id, u.id))
+            shareItem(db, deviceId, t.id, u.id, "write");
         }
       }
       updated.push({ id: t.id, title: t.title });
@@ -1268,21 +1586,28 @@ export function createAgentOps(deps: AgentApiDeps) {
   }
 
   // Resolve a task or project for the v2 timer start op.
-  const findTimerTarget = (userId: string, input: TimerStartInput): Item | null => {
+  const findTimerTarget = (
+    userId: string,
+    input: TimerStartInput,
+  ): Item | null => {
     if (input.id) {
       const it = getItem(db, input.id);
-      return it && !it.deleted && it.type !== 'folder' && canSee(userId, it.id) ? it : null;
+      return it && !it.deleted && it.type !== "folder" && canSee(userId, it.id)
+        ? it
+        : null;
     }
     if (input.query) {
       // Prefer tasks; projects are also valid when `project` is set or nothing task-matched.
       const list = findList(userId, input.list);
       const tasks = taskPool(userId, list, null, { includeDone: true });
-      const taskHit = bestMatch(input.query, tasks, [(i) => i.title]).matched?.item;
+      const taskHit = bestMatch(input.query, tasks, [(i) => i.title]).matched
+        ?.item;
       if (taskHit && !input.project) return taskHit;
       const projects = getProjects(db).filter(
         (p) => !p.deleted && canSee(userId, p.id),
       );
-      const projHit = bestMatch(input.query, projects, [(i) => i.title]).matched?.item;
+      const projHit = bestMatch(input.query, projects, [(i) => i.title]).matched
+        ?.item;
       if (input.project) return projHit ?? null;
       return taskHit ?? projHit ?? null;
     }
@@ -1295,7 +1620,9 @@ export function createAgentOps(deps: AgentApiDeps) {
     const itemOf = (id: string | undefined) => {
       if (!id) return null;
       const it = getItem(db, id);
-      return it ? { id: it.id, title: it.title, type: it.type } : { id, title: '', type: 'task' as const };
+      return it
+        ? { id: it.id, title: it.title, type: it.type }
+        : { id, title: "", type: "task" as const };
     };
     return {
       session: ctx.session
@@ -1322,14 +1649,17 @@ export function createAgentOps(deps: AgentApiDeps) {
 
   function startTimer_(userId: string, input: TimerStartInput) {
     const target = findTimerTarget(userId, input);
-    if (!target) return fail('task not found', 404);
-    if (!canWrite(userId, target.id)) return fail('forbidden', 403);
+    if (!target) return fail("task not found", 404);
+    if (!canWrite(userId, target.id)) return fail("forbidden", 403);
     const uid = ownerOf(userId);
     const before = getTimeContext(db, uid);
     const prevTask = before.task ? getItem(db, before.task.item_id) : null;
-    const prevSession = before.session ? getItem(db, before.session.item_id) : null;
-    if (target.type === 'project' || input.project) {
-      const projectId = target.type === 'project' ? target.id : sessionAnchor(db, target.id);
+    const prevSession = before.session
+      ? getItem(db, before.session.item_id)
+      : null;
+    if (target.type === "project" || input.project) {
+      const projectId =
+        target.type === "project" ? target.id : sessionAnchor(db, target.id);
       startSession(db, deviceId, projectId, uid);
     } else {
       startTask(db, deviceId, target.id, uid);
@@ -1338,7 +1668,9 @@ export function createAgentOps(deps: AgentApiDeps) {
     const stopped =
       prevTask && prevTask.id !== target.id
         ? { id: prevTask.id, title: prevTask.title }
-        : prevSession && before.session && before.session.item_id !== (after.session?.project?.id ?? '')
+        : prevSession &&
+            before.session &&
+            before.session.item_id !== (after.session?.project?.id ?? "")
           ? { id: prevSession.id, title: prevSession.title }
           : null;
     return ok({
@@ -1351,7 +1683,8 @@ export function createAgentOps(deps: AgentApiDeps) {
   function stopTimer_(userId: string) {
     const uid = ownerOf(userId);
     const before = getTimeContext(db, uid);
-    if (!before.session) return ok({ stopped: null, context: serializeContext(userId) });
+    if (!before.session)
+      return ok({ stopped: null, context: serializeContext(userId) });
     const proj = getItem(db, before.session.item_id);
     const task = before.task ? getItem(db, before.task.item_id) : null;
     stopActive(db, deviceId, uid);
@@ -1368,16 +1701,19 @@ export function createAgentOps(deps: AgentApiDeps) {
   function pauseTimer_(userId: string, input: TimerPauseInput) {
     const uid = ownerOf(userId);
     const ctx = getTimeContext(db, uid);
-    if (!ctx.session) return fail('no active session', 409);
-    if (ctx.paused) return fail('already paused', 409);
+    if (!ctx.session) return fail("no active session", 409);
+    if (ctx.paused) return fail("already paused", 409);
     if (input.before) {
       const m = Number(input.minutes);
-      if (!(m > 0)) return fail('minutes required for before-pause', 400);
+      if (!(m > 0)) return fail("minutes required for before-pause", 400);
       pauseBefore(db, deviceId, uid, m);
     } else {
       const minutes =
-        input.minutes === undefined || input.minutes === null ? null : Number(input.minutes);
-      if (minutes != null && !(minutes > 0)) return fail('minutes must be positive', 400);
+        input.minutes === undefined || input.minutes === null
+          ? null
+          : Number(input.minutes);
+      if (minutes != null && !(minutes > 0))
+        return fail("minutes must be positive", 400);
       pauseNow(db, deviceId, uid, minutes);
     }
     return ok({ context: serializeContext(userId) });
@@ -1386,20 +1722,22 @@ export function createAgentOps(deps: AgentApiDeps) {
   function resumeTimer_(userId: string, input: TimerResumeInput = {}) {
     const uid = ownerOf(userId);
     if (input.session_id) {
-      const open = getTimeContext(db, uid).suspended.find((s) => s.id === input.session_id);
-      if (!open) return fail('suspended session not found', 404);
+      const open = getTimeContext(db, uid).suspended.find(
+        (s) => s.id === input.session_id,
+      );
+      if (!open) return fail("suspended session not found", 404);
       resumeSuspended(db, deviceId, uid, input.session_id);
     } else {
       const ctx = getTimeContext(db, uid);
-      if (!ctx.session || !ctx.paused) return fail('not paused', 409);
+      if (!ctx.session || !ctx.paused) return fail("not paused", 409);
       resume(db, deviceId, uid);
     }
     return ok({ context: serializeContext(userId) });
   }
 
   function addTimerNote_(userId: string, input: TimerNoteInput) {
-    const title = typeof input.title === 'string' ? input.title.trim() : '';
-    if (!title) return fail('title required', 400);
+    const title = typeof input.title === "string" ? input.title.trim() : "";
+    if (!title) return fail("title required", 400);
     const uid = ownerOf(userId);
     const result = addTimeNote(db, deviceId, uid, {
       title,
@@ -1407,7 +1745,7 @@ export function createAgentOps(deps: AgentApiDeps) {
       metadata: input.metadata ?? null,
       sessionId: input.session_id ?? null,
     });
-    if (!result) return fail('no active session', 409);
+    if (!result) return fail("no active session", 409);
     return ok({
       note: {
         id: result.note.id,
@@ -1415,23 +1753,34 @@ export function createAgentOps(deps: AgentApiDeps) {
         parent_id: result.note.parent_id,
         metadata: result.note.metadata,
       },
-      log: { id: result.log.id, session_id: result.log.session_id, start_time: result.log.start_time },
+      log: {
+        id: result.log.id,
+        session_id: result.log.session_id,
+        start_time: result.log.start_time,
+      },
       context: serializeContext(userId),
     });
   }
 
   function removeTimerNote_(userId: string, input: TimerRemoveNoteInput) {
-    if (!input.log_id) return fail('log_id required', 400);
-    const mode: RemoveTimeNoteMode = input.mode === 'note' ? 'note' : 'reference';
+    if (!input.log_id) return fail("log_id required", 400);
+    const mode: RemoveTimeNoteMode =
+      input.mode === "note" ? "note" : "reference";
     // Ownership: the time_log must belong to this user (or open-mode null).
-    const row = db.get<{ user_id: string | null; kind: string; deleted: number }>(
-      'SELECT user_id, kind, deleted FROM time_logs WHERE id = ?',
-      [input.log_id],
-    );
-    if (!row || row.deleted || row.kind !== 'note') return fail('note marker not found', 404);
+    const row = db.get<{
+      user_id: string | null;
+      kind: string;
+      deleted: number;
+    }>("SELECT user_id, kind, deleted FROM time_logs WHERE id = ?", [
+      input.log_id,
+    ]);
+    if (!row || row.deleted || row.kind !== "note")
+      return fail("note marker not found", 404);
     const uid = ownerOf(userId);
-    if (uid != null && row.user_id != null && row.user_id !== uid) return fail('forbidden', 403);
-    if (!removeTimeNote(db, deviceId, input.log_id, mode)) return fail('note marker not found', 404);
+    if (uid != null && row.user_id != null && row.user_id !== uid)
+      return fail("forbidden", 403);
+    if (!removeTimeNote(db, deviceId, input.log_id, mode))
+      return fail("note marker not found", 404);
     return ok({ removed: true, mode });
   }
 
@@ -1439,8 +1788,7 @@ export function createAgentOps(deps: AgentApiDeps) {
     const uid = ownerOf(userId);
     const to = input.to ?? new Date().toISOString();
     const from =
-      input.from ??
-      new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+      input.from ?? new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
     const sessions = listSessions(db, from, to, uid);
     const blocks = sessions.map((s) => {
       const b = getSessionBlock(db, s);
@@ -1449,7 +1797,7 @@ export function createAgentOps(deps: AgentApiDeps) {
           id: s.id,
           project: b.project
             ? { id: b.project.id, title: b.project.title }
-            : { id: s.item_id, title: 'Project' },
+            : { id: s.item_id, title: "Project" },
           start_time: s.start_time,
           end_time: s.end_time,
         },
@@ -1459,8 +1807,12 @@ export function createAgentOps(deps: AgentApiDeps) {
         segments: b.segments.map((seg) => ({
           id: seg.log.id,
           item: seg.item
-            ? { id: seg.item.id, title: seg.item.title, deleted: seg.item.deleted }
-            : { id: seg.log.item_id, title: 'Task', deleted: true },
+            ? {
+                id: seg.item.id,
+                title: seg.item.title,
+                deleted: seg.item.deleted,
+              }
+            : { id: seg.log.item_id, title: "Task", deleted: true },
           start_time: seg.log.start_time,
           end_time: seg.log.end_time,
           ms: seg.ms,
@@ -1469,13 +1821,13 @@ export function createAgentOps(deps: AgentApiDeps) {
           id: p.id,
           start_time: p.start_time,
           end_time: p.end_time,
-          suspend: p.note === 'suspend',
+          suspend: p.note === "suspend",
         })),
         completions: b.completions.map((c) => ({
           id: c.log.id,
           item: c.item
             ? { id: c.item.id, title: c.item.title }
-            : { id: c.log.item_id, title: 'Task' },
+            : { id: c.log.item_id, title: "Task" },
           at: c.log.start_time,
         })),
         notes: b.notes.map((n) => ({
@@ -1483,11 +1835,16 @@ export function createAgentOps(deps: AgentApiDeps) {
           item: n.item
             ? {
                 id: n.item.id,
-                title: n.item.deleted ? '(deleted note)' : n.item.title,
+                title: n.item.deleted ? "(deleted note)" : n.item.title,
                 deleted: n.item.deleted,
                 metadata: n.item.metadata,
               }
-            : { id: n.log.item_id, title: '(deleted note)', deleted: true, metadata: null },
+            : {
+                id: n.log.item_id,
+                title: "(deleted note)",
+                deleted: true,
+                metadata: null,
+              },
           at: n.log.start_time,
         })),
       };

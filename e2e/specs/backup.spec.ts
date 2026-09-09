@@ -24,7 +24,7 @@ test.describe('Tier 4 — export and import', () => {
     const raw = readFileSync(backupPath, 'utf8');
     const bundle = JSON.parse(raw) as { format: string; version: number; db: string };
     expect(bundle.format).toBe('carbon-backup');
-    expect(bundle.version).toBe(1);
+    expect(bundle.version).toBe(2);
     expect(bundle.db.length).toBeGreaterThan(100);
 
     const backupInfo = await page.evaluate(async (json) => {

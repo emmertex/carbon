@@ -28,6 +28,8 @@ export function GesturesSection() {
 
   return (
     <SettingsSection id="gestures" title="Gestures & mobile">
+      <SettingsToggle className="mb-4" label="Open task details on the first tap"
+        checked={uiPrefs.firstTapDetails} onChange={(v) => setUiPrefs({ firstTapDetails: v })} />
       <span className="mb-1 block text-sm font-medium">Swipe-left action</span>
       <SegmentedControl
         value={uiPrefs.swipeLeftAction}

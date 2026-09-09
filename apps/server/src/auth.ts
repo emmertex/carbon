@@ -14,6 +14,7 @@ import {
 } from '@carbon/core';
 import { notifyTask } from './push';
 import { alreadySent, markSent } from './reminders-sent';
+import { credentialFromVars, isDenied, hasScope } from './authorize';
 import { ensureMfaTables, validateMfaChallenge } from './mfa';
 import { stampedClientIp } from './client-ip';
 
@@ -27,6 +28,8 @@ export interface AuthVars {
   role: 'admin' | 'member';
   scopes: string[];
   authMethod: AuthMethod;
+  tokenProjectIds?: string[] | null;
+  tokenRestOnly?: boolean;
   /** Set when authMethod === 'mfa_challenge'. */
   mfaChallengeId?: string;
   mfaChallengePurpose?: 'enroll' | 'login';
@@ -283,6 +286,10 @@ export function ensureServerTables(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_device_locations_user ON device_locations(user_id);
   `);
+  const tokenColumns = new Set(db.all<{ name: string }>('PRAGMA table_info(api_tokens)').map((c) => c.name));
+  for (const [name, type] of [['expires_at', 'TEXT'], ['project_ids', 'TEXT'], ['rest_only', 'INTEGER NOT NULL DEFAULT 0']]) {
+    if (!tokenColumns.has(name!)) db.exec(`ALTER TABLE api_tokens ADD COLUMN ${name} ${type}`);
+  }
   // One-time migration: fold any existing single-row HA fix into device_locations so
   // the new read path has it. Idempotent (OR IGNORE on the PK).
   db.exec(`
@@ -359,7 +366,7 @@ export function revokeAllTokens(db: Db, userId: string): number {
   return n;
 }
 
-// ----- API tokens (for HA / integrations / Hermes) --------------------------
+// ----- API tokens (for HA / external integrations) --------------------------
 
 export interface TokenRow {
   id: string;
@@ -368,32 +375,34 @@ export interface TokenRow {
   scopes: string[];
   created_at: string;
   last_used_at: string | null;
+  expires_at?: string | null;
+  project_ids?: string[] | null;
 }
 
 /** Create a token; returns the plaintext secret (shown once) + the row. */
 export function createToken(
   db: Db,
-  input: { userId: string; name: string; scopes: string[] },
+  input: { userId: string; name: string; scopes: string[]; expiresAt?: string | null; projectIds?: string[] | null; restOnly?: boolean },
 ): { token: string; row: TokenRow } {
   const id = randomUUID();
   const secret = `carbon_${randomBytes(24).toString('hex')}`;
   const now = new Date().toISOString();
   db.run(
-    `INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    [id, input.userId, input.name, sha256Hex(secret), JSON.stringify(input.scopes), now],
+    `INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, created_at, expires_at, project_ids, rest_only) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, input.userId, input.name, sha256Hex(secret), JSON.stringify(input.scopes), now, input.expiresAt ?? null, input.projectIds == null ? null : JSON.stringify(input.projectIds), input.restOnly ? 1 : 0],
   );
   return {
     token: secret,
-    row: { id, user_id: input.userId, name: input.name, scopes: input.scopes, created_at: now, last_used_at: null },
+    row: { id, user_id: input.userId, name: input.name, scopes: input.scopes, created_at: now, last_used_at: null, expires_at: input.expiresAt ?? null, project_ids: input.projectIds ?? null },
   };
 }
 
-export function listTokens(db: Db): TokenRow[] {
+export function listTokens(db: Db, userId?: string): TokenRow[] {
   return db
-    .all<{ id: string; user_id: string; name: string; scopes: string; created_at: string; last_used_at: string | null }>(
-      'SELECT id, user_id, name, scopes, created_at, last_used_at FROM api_tokens WHERE revoked = 0 ORDER BY created_at DESC',
+    .all<{ id: string; user_id: string; name: string; scopes: string; created_at: string; last_used_at: string | null; expires_at: string | null; project_ids: string | null }>(
+      `SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at, project_ids FROM api_tokens WHERE revoked = 0${userId ? " AND user_id = ?" : ""} ORDER BY created_at DESC`, userId ? [userId] : [],
     )
-    .map((r) => ({ ...r, scopes: JSON.parse(r.scopes) as string[] }));
+    .map((r) => ({ ...r, scopes: JSON.parse(r.scopes) as string[], project_ids: r.project_ids ? JSON.parse(r.project_ids) : null }));
 }
 
 export function revokeToken(db: Db, id: string): void {
@@ -403,14 +412,14 @@ export function revokeToken(db: Db, id: string): void {
 function validateToken(
   db: Db,
   secret: string,
-): { userId: string; scopes: string[] } | null {
-  const row = db.get<{ id: string; user_id: string; scopes: string }>(
-    'SELECT id, user_id, scopes FROM api_tokens WHERE token_hash = ? AND revoked = 0',
+): { userId: string; scopes: string[]; projectIds: string[] | null; restOnly: boolean } | null {
+  const row = db.get<{ id: string; user_id: string; scopes: string; expires_at: string | null; project_ids: string | null; rest_only: number }>(
+    'SELECT id, user_id, scopes, expires_at, project_ids, rest_only FROM api_tokens WHERE token_hash = ? AND revoked = 0',
     [sha256Hex(secret)],
   );
-  if (!row) return null;
+  if (!row || (row.expires_at != null && !(Date.parse(row.expires_at) > Date.now()))) return null;
   db.run('UPDATE api_tokens SET last_used_at = ? WHERE id = ?', [new Date().toISOString(), row.id]);
-  return { userId: row.user_id, scopes: JSON.parse(row.scopes) as string[] };
+  return { userId: row.user_id, scopes: JSON.parse(row.scopes) as string[], projectIds: row.project_ids ? JSON.parse(row.project_ids) : null, restOnly: !!row.rest_only };
 }
 
 function userCount(db: Db): number {
@@ -784,6 +793,8 @@ export function basicAuth(
         c.set('username', user.username);
         c.set('role', user.role);
         c.set('scopes', validated.scopes);
+        c.set('tokenProjectIds', validated.projectIds);
+        c.set('tokenRestOnly', validated.restOnly);
         c.set('authMethod', 'token');
         return next();
       }
@@ -854,13 +865,20 @@ export const requireMfaChallenge: MiddlewareHandler<{ Variables: AuthVars }> = a
 /** Scope guard — session/open/basic pass; tokens must hold the scope; challenges never. */
 export function requireScope(scope: Scope): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
-    if (c.get('authMethod') === 'mfa_challenge') {
+    // Credential-level authorization via the shared module: a human session (session/open/
+    // basic) acts as its full user and passes; a token is bound to its own scopes; and an
+    // mfa_challenge / unknown credential is denied by default.
+    const cred = credentialFromVars({
+      authMethod: c.get('authMethod'),
+      userId: c.get('userId'),
+      role: c.get('role'),
+      scopes: c.get('scopes'),
+    });
+    if (c.get('authMethod') === 'mfa_challenge' || isDenied(cred)) {
       return c.json({ error: 'forbidden' }, 403);
     }
-    if (c.get('authMethod') !== 'token') return next();
-    const scopes = c.get('scopes') ?? [];
-    if (scopes.includes(scope)) return next();
-    return c.json({ error: `missing scope: ${scope}` }, 403);
+    if (!hasScope(cred, scope)) return c.json({ error: `missing scope: ${scope}` }, 403);
+    return next();
   };
 }
 

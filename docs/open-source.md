@@ -10,7 +10,7 @@ Thank you to all the maintainers and contributors behind these projects. 🙏
 ## Runtime & language
 
 - [TypeScript](https://www.typescriptlang.org/) — typed JavaScript, used across the whole codebase.
-- [Node.js](https://nodejs.org/) — server runtime, including its built-in `node:sqlite` and
+- [Node.js](https://nodejs.org/) (≥20) — server runtime, including its built-in `node:sqlite` and
   `node:crypto` modules (so no native SQLite or `firebase-admin` dependency is needed).
 
 ## Web app (`@carbon/web`)

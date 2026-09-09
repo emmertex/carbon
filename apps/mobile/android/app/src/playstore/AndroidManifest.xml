@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Play Store variant overlay. Google Play restricts background location to a
+     short approved-use list that does not include activity/trip tracking, so the
+     Play build ships without it. This removes the background-location permission
+     and the @capgo/background-geolocation foreground service (matched by name)
+     from the merged manifest via tools:node="remove", which strips every
+     contribution regardless of which library declared it.
+
+     What stays: foreground geofencing + location reminders (the coarse/fine
+     location permissions are untouched), push, local notifications, exact alarms.
+     The sideload flavor keeps the full GPS-track feature set.
+
+     The matching web toggle ("Record GPS while time-tracking") is hidden in the
+     Play build via VITE_PLAY_STORE=1 (apps/web/src/lib/variant.ts). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" tools:node="remove" />
+
+    <application>
+        <service
+            android:name="com.capgo.capacitor_background_geolocation.BackgroundGeolocationService"
+            tools:node="remove" />
+    </application>
+</manifest>

@@ -26,6 +26,12 @@ notes), opt-in **GPS tracks** on sessions, **Recently Deleted** recovery, sync r
   - **B4 Perspectives / filters / sorting** — saved perspectives, basic + advanced
     filters, sort + filter bar.
 
+- **Phase B5 — Personal API keys with project restrictions** ✅ done.
+  - Members can create scoped API keys for their own projects.
+  - Keys are restricted to specific project subtrees (read or write).
+  - One-time secret display, hashed storage, revocation, expiry, last-use tracking.
+  - Machine-readable OpenAPI contract and tested examples.
+
 - **Phase C — Multi-user foundation** ✅ done (the spine).
   - DB-backed user accounts; server **admin page** (onboarding: add/remove users,
     reset passwords, roles, mark bot users). `AUTH_USERS` env still bootstraps the
@@ -55,10 +61,10 @@ notes), opt-in **GPS tracks** on sessions, **Recently Deleted** recovery, sync r
     **"nearest place" geocoding** (OSM Overpass/Nominatim) so a reminder can pin itself
     to the closest matching shop without coordinates. See [`docs/home-assistant.md`](docs/home-assistant.md).
 
-- **Phase F — Hermes / LLM agents** ✅ done.
-  - A **bot user** (Hermes, or any OpenAI/Anthropic-compatible endpoint) configured on
-    the admin page: system prompt + provider/endpoint/key/model.
-  - **Triggers**: assigned a task/project, or `@Hermes` in a comment → a server-side job.
+- **Phase F — Agent integrations** ✅ done.
+  - A **bot user** (webhook-based or direct LLM) configured on the admin page:
+    system prompt + provider/endpoint/key/model.
+  - **Triggers**: assigned a task/project, or `@botname` in a comment → a server-side job.
   - **Permissions**: reads *all* tasks; comments/acts *only* where assigned or @'d; may
     attach links/images/files; may mark an assigned task complete.
   - Hermes-side tools (HA, Obsidian KB, general AI) are Hermes's concern — Carbon hands
@@ -67,7 +73,7 @@ notes), opt-in **GPS tracks** on sessions, **Recently Deleted** recovery, sync r
     plus an **in-app NL command box** (keyword-triggered, server-side tool-loop, per-command
     token tracking) and a `carbon-nl` Hermes skill + webhook listener, so plain-language
     task control works in-app and from any bot (Telegram, Hermes, scripts). See
-    [`docs/carbon-agent-api.md`](docs/carbon-agent-api.md) and [`docs/hermes.md`](docs/hermes.md).
+    [`docs/carbon-agent-api.md`](docs/carbon-agent-api.md).
   - A **built-in, per-server Telegram bot**: users link their individual account with a
     one-time code (Settings → Telegram), then drive the same AI agent over chat with
     conversational replies. See [`docs/telegram-bot.md`](docs/telegram-bot.md).
@@ -122,12 +128,12 @@ agents           id, name, kind(hermes|openai|anthropic|openai-compatible), endp
     from materialized state, bumps workspace `sync_epoch`, clients must wipe and re-pull
     (or stay offline). Federation links must be revoked first; peers re-bootstrap manually.
 
-## Hermes integration (Phase F) — intent
+## Agent integrations (Phase F) — intent
 
-Hermes is modeled as a normal **bot user**, so sharing/assignment/comments/permissions
-all apply uniformly. Carbon's only jobs: expose task context, accept Hermes's
-actions (comment, attach, complete) via the API, and enforce that it can only write
-where assigned or @'d. The agentic intelligence (HA control, Obsidian KB, web) lives in
-Hermes; for plain OpenAI/Anthropic endpoints Carbon runs a simpler comment-reply loop
-with less autonomy. Provider + system prompt are admin-configured server-side so usage
-can be tuned per deployment.
+External agent frameworks and direct LLMs are modeled as normal **bot users**, so
+sharing/assignment/comments/permissions all apply uniformly. Carbon's only jobs:
+expose task context, accept the agent's actions (comment, attach, complete) via the
+API, and enforce that it can only write where assigned or @'d. For plain
+OpenAI/Anthropic endpoints Carbon runs a simpler comment-reply loop with less
+autonomy. Provider + system prompt are admin-configured server-side so usage can be
+tuned per deployment.

@@ -25,7 +25,14 @@ import {
   Undo2,
   Redo2,
 } from 'lucide-react';
-import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
+import {
+  DndContext,
+  closestCenter,
+  type DragStartEvent,
+  type DragOverEvent,
+  type DragEndEvent,
+  DragOverlay,
+} from '@dnd-kit/core';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
   SortableContext,
@@ -35,22 +42,17 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  allItems,
-  inbox,
-  today,
-  flagged,
   getProjects,
   getFolders,
   needsReview,
   createItem,
-  deletedRoots,
+  trashCount,
   updateItem,
   reorderItem,
   moveProjectToFolder,
   deleteFolder,
   subtaskProgress,
   openCountsByContainer,
-  isOverdue,
   sharedRoots,
   tasksNearLocation,
   listTags,
@@ -65,7 +67,9 @@ import {
   type Item,
   type OrderMode,
 } from '@carbon/core';
+import { countOverdueTasks } from '@/lib/sidebarCounts';
 import { queryRoots } from '@/lib/listQuery';
+import { DEFAULT_PREFS, baseDefaultFilters } from '@/lib/views';
 import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { useSuppressClickAfterDrag } from '@/hooks/useSuppressClickAfterDrag';
@@ -300,6 +304,8 @@ function ProjectsSection() {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
 
   const data = useDeferredQuery(
     (db) => {
@@ -360,11 +366,21 @@ function ProjectsSection() {
     setEditingId(folder.id); // open the inline editor so it can be named right away
   }
 
+  function onDragStart({ active }: DragStartEvent) {
+    setActiveId(String(active.id));
+  }
+
+  function onDragOver({ over }: DragOverEvent) {
+    setOverId(over ? String(over.id) : null);
+  }
+
   function onDragEnd(e: DragEndEvent) {
     // Mark first, before any early return: a drag that ends without a reorder
     // still fires a stray click that must be swallowed.
     markDragEnd();
     const { active, over } = e;
+    setActiveId(null);
+    setOverId(null);
     if (!over || active.id === over.id) return;
     const oldIndex = rows.findIndex((r) => r.id === active.id);
     const overIndex = rows.findIndex((r) => r.id === over.id);
@@ -428,6 +444,9 @@ function ProjectsSection() {
   const menuItemCls =
     'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-surface-2';
 
+  // Find the item currently being dragged for the overlay
+  const activeRow = activeId ? rows.find((r) => r.id === activeId) : null;
+
   return (
     <>
       <div className="mt-5 flex items-center justify-between px-4 pb-1">
@@ -489,23 +508,44 @@ function ProjectsSection() {
           sensors={sensors}
           collisionDetection={closestCenter}
           modifiers={[restrictToVerticalAxis]}
+          onDragStart={onDragStart}
+          onDragOver={onDragOver}
           onDragEnd={onDragEnd}
+          onDragCancel={() => { setActiveId(null); setOverId(null); }}
         >
           <SortableContext items={rows.map((r) => r.id)} strategy={verticalListSortingStrategy}>
             <div className="flex flex-col">
               {rows.map((row) => (
-                <SidebarRow
-                  key={row.id}
-                  row={row}
-                  editing={editingId === row.id}
-                  onToggleCollapse={toggleCollapsed}
-                  onOpenProject={close}
-                  onEditFolder={onEditFolder}
-                  onCloseEditor={onCloseEditor}
-                />
+                <div key={row.id} className="relative">
+                  {/* Drop indicator: blue line showing where item will be placed */}
+                  {overId === row.id && activeId !== row.id && (
+                    <div
+                      className="absolute left-0 right-0 top-0 h-0.5 bg-accent z-20"
+                      style={{ boxShadow: '0 0 4px var(--accent)' }}
+                    />
+                  )}
+                  <SidebarRow
+                    row={row}
+                    editing={editingId === row.id}
+                    onToggleCollapse={toggleCollapsed}
+                    onOpenProject={close}
+                    onEditFolder={onEditFolder}
+                    onCloseEditor={onCloseEditor}
+                  />
+                </div>
               ))}
             </div>
           </SortableContext>
+          {/* Drag overlay: shows a static copy of the dragged item */}
+          <DragOverlay>
+            {activeRow && (
+              <div className="rounded-xl border border-border bg-surface shadow-xl w-56">
+                <div className="px-2.5 py-1.5 text-sm font-medium text-text">
+                  {activeRow.item?.title || 'Untitled'}
+                </div>
+              </div>
+            )}
+          </DragOverlay>
         </DndContext>
       </div>
     </>
@@ -607,7 +647,6 @@ function TagsSection() {
     [data, collapsed],
   );
 
-  // Press-and-hold to drag (~200ms), matching the task list and Projects.
   const sensors = useReorderSensors();
 
   const openTag = useCallback(
@@ -925,9 +964,17 @@ export function Sidebar() {
   const countScope = useStore((s) => s.uiPrefs.countScope);
   const data = useDeferredQuery(
     (db) => {
-      const items = allItems(db);
+      // Use queryRoots for each count — it applies SQL prefetch and caches
+      // the result by revision, so repeated sidebar re-renders at the same
+      // revision (or view switches) hit the cache instead of re-querying.
+      // At large workspace sizes (10k+ active), this avoids loading every
+      // row into memory on every mutation.
+      const todayItems = queryRoots(db, 'today', { ...DEFAULT_PREFS, filters: baseDefaultFilters('today') });
+      const inboxItems = queryRoots(db, 'inbox', { ...DEFAULT_PREFS, filters: baseDefaultFilters('inbox') });
+      const flaggedItems = queryRoots(db, 'flagged', { ...DEFAULT_PREFS, filters: baseDefaultFilters('flagged') });
       const projects = getProjects(db);
       const me = getCurrentUserId();
+
       // Remaining work in scope (recursive for 'all'), kept consistent with the pie.
       const remaining = (id: string) => {
         const { done, total } = subtaskProgress(db, id, countScope);
@@ -937,17 +984,17 @@ export function Sidebar() {
         .map((p) => getItem(db, p.item_id))
         .filter((i): i is Item => !!i && !i.deleted && i.status === 'active').length;
       return {
-        todayCount: today(items).length,
-        inboxCount: inbox(items).length,
-        flaggedCount: flagged(items).length,
-        overdueCount: items.filter((i) => i.type === 'task' && isOverdue(i)).length,
+        todayCount: todayItems.length,
+        inboxCount: inboxItems.length,
+        flaggedCount: flaggedItems.length,
+        overdueCount: countOverdueTasks(db),
         nearbyCount:
           where.hasLocation
             ? tasksNearLocation(db, { zone: where.zone, point: where.point }).length
             : 0,
         planCount,
         reviewCount: projects.filter((p) => needsReview(p)).length,
-        trashCount: deletedRoots(db).length,
+        trashCount: trashCount(db),
         shared: (me ? sharedRoots(db, me) : []).map((it) => ({
           item: it,
           open: remaining(it.id),
