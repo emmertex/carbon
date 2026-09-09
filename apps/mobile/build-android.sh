@@ -9,8 +9,8 @@
 #   - System Java defaults to 26, which AGP rejects. We force Java 21
 #     (Capacitor 8 needs JDK 21; 17 fails "invalid source release: 21").
 #   - SDK lives at /opt/android-sdk (root-owned, read-only to the user), populated via AUR:
-#       paru -S --needed android-sdk-platform-tools android-sdk-build-tools android-platform-35
-#     compileSdk/targetSdk is 35 (Play Store requirement); build-tools is pinned to the
+#       paru -S --needed android-sdk-platform-tools android-sdk-build-tools android-platform-37
+#     compileSdk is 37 (AndroidX requirement), targetSdk is 36; build-tools is pinned to the
 #     installed version in variables.gradle because AGP can't auto-install into the RO SDK.
 #   - Because the SDK is read-only, Gradle can't write license-acceptance files itself.
 #     Create them once (root): /opt/android-sdk/licenses/android-sdk-license with the

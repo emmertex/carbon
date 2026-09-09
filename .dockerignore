@@ -8,7 +8,7 @@ node_modules
 .git
 .gitignore
 
-# Native shells (need Rust / Android SDK, not built in this image)
+# Native shells / Android (need Rust / Android SDK, not built in this image)
 apps/desktop
 apps/mobile
 
@@ -26,8 +26,16 @@ data
 **/.env.*
 *.log
 
-# Editor / agent / docs
+# Editor / agent / docs / CI / examples / tests
 .vscode
 .idea
 .claude
+.codex
 docs
+.github
+.gitattributes
+e2e
+examples
+release
+perf
+android-sdk

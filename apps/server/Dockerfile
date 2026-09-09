@@ -1,6 +1,6 @@
 # Build stage: install, build web (Vite) + server (esbuild bundle).
 # Node 24+ provides node:sqlite built in, so there is no native module to compile.
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json turbo.json ./
@@ -22,7 +22,7 @@ RUN npm run build:server
 
 # Runtime stage: just the server bundle + built web assets. Fully self-contained
 # (everything is bundled; SQLite is a Node builtin), so no node_modules needed.
-FROM node:24-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     STATIC_DIR=web \

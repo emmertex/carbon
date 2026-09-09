@@ -5,9 +5,9 @@ starts with the pushed tag (e.g. `## v1.0.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 
-## v1.1.2
+## v1.1.3
 **Clean up for public launch, bump library versions**
-
+v1.1.0 -> v1.1.3 are related to CI only
 
 ## v1.0.0
 **First stable release — notebooks, recipes, recovery, and polish**
