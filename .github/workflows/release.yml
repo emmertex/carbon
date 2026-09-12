@@ -216,11 +216,16 @@ jobs:
           CARBON_ANDROID_KEY_ALIAS: ${{ secrets.CARBON_ANDROID_KEY_ALIAS }}
           CARBON_ANDROID_KEY_PASSWORD: ${{ secrets.CARBON_ANDROID_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon
-
+      
       - name: Stage APK with a versioned name
         run: |
           set -euo pipefail
-          SRC="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          # For flavor-based builds, the APK is in a flavor-specific subdirectory
+          SRC="$(find apps/mobile/android/app/build/outputs/apk/sideload/release -name '*.apk' | head -n1)"
+          if [ -z "$SRC" ]; then
+            echo "Error: No APK found in sideload/release directory"
+            exit 1
+          fi
           cp "$SRC" "$RUNNER_TEMP/Carbon_${{ needs.prepare.outputs.tag }}_android.apk"
 
       - name: Attach APK to the release
