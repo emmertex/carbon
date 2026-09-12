@@ -107,15 +107,22 @@ export function SignInGate() {
       await afterSession();
     } else if (result === 'error') {
       setError('Could not reach the server. Check the address and try again.');
+    } else if (typeof result === 'object' && result.status === 'error') {
+      // LoginError with a specific message (network failure, HTTP error, etc.)
+      setError(
+        result.message
+          ? `Could not reach the server: ${result.message}`
+          : 'Could not reach the server. Check the address and try again.',
+      );
     } else if (result === 'badCredentials') {
       setError('Sign-in failed — check your username and password.');
-    } else if (result.status === 'needs_enrollment') {
+    } else if (typeof result === 'object' && result.status === 'needs_enrollment') {
       setChallenge(result.challenge);
       setEnrollMode('pick');
       setEnrolledEmail(false);
       setEnrolledTotp(false);
       setStep('enroll');
-    } else {
+    } else if (typeof result === 'object' && result.status === 'needs_2fa') {
       setChallenge(result.challenge);
       setFactors(result.factors);
       setEmailHint('');

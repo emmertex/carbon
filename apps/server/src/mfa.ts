@@ -492,50 +492,54 @@ export async function sendMfaEmailCode(
 ): Promise<void> {
   const e = normalizeEmail(email);
   if (!isValidEmail(e)) throw new Error('invalid email');
-  const ch = db.get<{ email_sends: number; last_email_sent_at: string | null }>(
-    `SELECT email_sends, last_email_sent_at FROM mfa_challenges WHERE id = ?`,
-    [challengeId],
-  );
-  if (!ch) throw new Error('invalid challenge');
-  if (ch.email_sends >= MFA_EMAIL_SENDS_MAX) {
-    throw new MfaEmailSendLimitError('send_limit');
-  }
-  if (
-    ch.last_email_sent_at &&
-    MFA_EMAIL_SEND_COOLDOWN_MS > 0 &&
-    Date.now() - Date.parse(ch.last_email_sent_at) < MFA_EMAIL_SEND_COOLDOWN_MS
-  ) {
-    throw new MfaEmailSendLimitError('send_cooldown');
-  }
-  db.run(`DELETE FROM mfa_email_codes WHERE challenge_id = ?`, [challengeId]);
-  const code = sixDigitCode();
-  const id = randomUUID();
-  const now = Date.now();
-  const sentAt = new Date(now).toISOString();
-  db.run(
-    `INSERT INTO mfa_email_codes (id, challenge_id, code_hash, email, expires_at, attempts, created_at)
-     VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    [
-      id,
-      challengeId,
-      sha256Hex(code),
-      e,
-      new Date(now + MFA_OTC_TTL_MS).toISOString(),
-      sentAt,
-    ],
-  );
+  const code = db.transaction(() => {
+    const ch = db.get<{ email_sends: number; last_email_sent_at: string | null }>(
+      `SELECT email_sends, last_email_sent_at FROM mfa_challenges WHERE id = ?`,
+      [challengeId],
+    );
+    if (!ch) throw new Error('invalid challenge');
+    if (ch.email_sends >= MFA_EMAIL_SENDS_MAX) {
+      throw new MfaEmailSendLimitError('send_limit');
+    }
+    const now = Date.now();
+    if (
+      ch.last_email_sent_at &&
+      MFA_EMAIL_SEND_COOLDOWN_MS > 0 &&
+      now - Date.parse(ch.last_email_sent_at) < MFA_EMAIL_SEND_COOLDOWN_MS
+    ) {
+      throw new MfaEmailSendLimitError('send_cooldown');
+    }
+
+    const nextCode = sixDigitCode();
+    const sentAt = new Date(now).toISOString();
+    db.run(`DELETE FROM mfa_email_codes WHERE challenge_id = ?`, [challengeId]);
+    db.run(
+      `INSERT INTO mfa_email_codes (id, challenge_id, code_hash, email, expires_at, attempts, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      [
+        randomUUID(),
+        challengeId,
+        sha256Hex(nextCode),
+        e,
+        new Date(now + MFA_OTC_TTL_MS).toISOString(),
+        sentAt,
+      ],
+    );
+    // Reserve the send budget in the same transaction as the checks and code
+    // replacement. This prevents two server workers sharing a DB from sending.
+    db.run(
+      `UPDATE mfa_challenges SET email_sends = email_sends + 1, last_email_sent_at = ? WHERE id = ?`,
+      [sentAt, challengeId],
+    );
+    return nextCode;
+  });
   const subject = `Your Carbon sign-in code`;
   const text =
     `Your Carbon verification code is:\n\n  ${code}\n\n` +
     `Enter it to finish signing in. It expires shortly. ` +
     `If you didn't request this, you can ignore this email.`;
-  // Reserve the send budget before yielding to SMTP: overlapping requests must
-  // not send another code and invalidate the one already on its way. Count failed
-  // attempts too, since a transport error can occur after SMTP accepted the email.
-  db.run(
-    `UPDATE mfa_challenges SET email_sends = email_sends + 1, last_email_sent_at = ? WHERE id = ?`,
-    [sentAt, challengeId],
-  );
+  // Keep SMTP outside the transaction, but count failures: the transport can
+  // report an error after the remote server has already accepted the message.
   await sendEmail(e, subject, text);
 }
 

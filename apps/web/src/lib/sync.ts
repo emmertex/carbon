@@ -268,6 +268,7 @@ export type SignInResult =
   | "open"
   | "badCredentials"
   | "error"
+  | { status: "error"; message?: string }
   | { status: "needs_enrollment"; challenge: string }
   | {
       status: "needs_2fa";
@@ -287,8 +288,8 @@ export async function signIn(password: string): Promise<SignInResult> {
   const { loginWithPassword } = await import("./mfa");
   const result = await loginWithPassword(cfg.username, password);
   if (JSON.stringify(getServerConfig()) !== start) return "error";
-  if (result.status === "badCredentials" || result.status === "error")
-    return result.status;
+  if (result.status === "badCredentials") return result.status;
+  if (result.status === "error") return result;
   if (result.status === "open") return "open";
   if (result.status === "ok") {
     saveServerConfig({

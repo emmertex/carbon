@@ -1,8 +1,9 @@
 # Changelog
 
-## v1.0.0`) and uses it verbatim as both the
-GitHub Release body and the public mirror commit message — so keep each heading's
-first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
+## v1.2.1
+**Login Issues**
+- Improved login error messages for Tauri Apps
+- Fixed race condition causing duplicate OTC emails
 
 ## v1.2.0
 **Guided project reviews**
@@ -31,9 +32,6 @@ first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
 **Server Side Fix**
 - Server translates older database formats for client version.
 - CORS fixes
-
-// Web and Server Update Only //
-
 
 ## v1.1.3
 **Clean up for public launch, bump library versions**

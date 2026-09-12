@@ -15,6 +15,7 @@ dev-dist/
 # Editor / agent tooling
 .claude/
 .codex/
+*.erc
 
 # Environment (all variants — never commit real env files)
 .env

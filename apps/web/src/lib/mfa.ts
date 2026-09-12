@@ -24,7 +24,13 @@ function challengeHeaders(challenge: string): HeadersInit {
   };
 }
 
-export type LoginStatus = "ok" | "open" | "needs_enrollment" | "needs_2fa";
+export type LoginStatus =
+  | "ok"
+  | "open"
+  | "needs_enrollment"
+  | "needs_2fa"
+  | "badCredentials"
+  | "error";
 
 export interface LoginOk {
   status: "ok";
@@ -47,8 +53,22 @@ export interface LoginNeeds2fa {
   factors: { email: boolean; totp: boolean };
 }
 
+export interface LoginBadCredentials {
+  status: "badCredentials";
+}
+
+export interface LoginError {
+  status: "error";
+  message?: string;
+}
+
 export type LoginResponse =
-  LoginOk | LoginOpen | LoginNeedsEnrollment | LoginNeeds2fa;
+  | LoginOk
+  | LoginOpen
+  | LoginNeedsEnrollment
+  | LoginNeeds2fa
+  | LoginBadCredentials
+  | LoginError;
 
 export interface MfaStatusResponse {
   email: string | null;
@@ -77,7 +97,7 @@ async function errMsg(res: Response, fallback: string): Promise<string> {
 export async function loginWithPassword(
   username: string,
   password: string,
-): Promise<LoginResponse | { status: "badCredentials" } | { status: "error" }> {
+): Promise<LoginResponse> {
   const cfg = getServerConfig();
   if (!cfg.url || !username) return { status: "badCredentials" };
   try {
@@ -94,7 +114,12 @@ export async function loginWithPassword(
       }),
     });
     if (res.status === 401) return { status: "badCredentials" };
-    if (!res.ok) return { status: "error" };
+    if (!res.ok) {
+      return {
+        status: "error",
+        message: await errMsg(res, "login request failed"),
+      };
+    }
     const data = (await res.json()) as {
       token?: string;
       open?: boolean;
@@ -126,8 +151,15 @@ export async function loginWithPassword(
       };
     }
     return { status: "error" };
-  } catch {
-    return { status: "error" };
+  } catch (err) {
+    const msg =
+      typeof err === "object" &&
+      err !== null &&
+      "message" in err &&
+      typeof err.message === "string"
+        ? err.message
+        : "Failed to reach server";
+    return { status: "error", message: msg };
   }
 }
 
