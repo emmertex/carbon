@@ -3,12 +3,11 @@
 **App:** Carbon (`com.emmertex.carbon`)
 **Last updated:** 17 July 2026
 
-Carbon is an offline-first task manager. This policy explains what the app does with your
-data. In short: **the developer does not collect, receive, or have access to your data.**
+
 
 ## What we collect
 
-**Nothing beyond what's described below.** The app itself runs no analytics, advertising, or
+The app runs no analytics, advertising, or
 tracking. If you never enable sync, the developer operates no server in your data path at all,
 and we do not see your tasks, notes, files, account details, or usage. If you choose to use the
 Carbon-hosted sync server, see "Where your data lives" below for exactly what that server
@@ -67,17 +66,9 @@ matters to you.
 
 ## External images in notes
 
-Notes in Carbon can embed images from external URLs. When you view a note that contains an
-embedded image from an external URL (e.g. a publicly hosted image), your browser or device
-will send a request directly to that remote host to fetch the image bytes. Carbon is not
-involved in that request — it does not proxy, cache, or see the image content. The remote
-host receives your request just as it would if you had visited their site directly, with no
-Carbon authentication or identifiers attached.
-
-This means that if you embed an image from a third-party URL in a note, viewing that note
-causes a request to that third party. If you want to avoid sending requests to external
-hosts, use Carbon's attachment feature (which stores image bytes locally or on your sync
-server) instead of embedding external image URLs.
+External image URLs in notes are fetched directly by your device. The image host
+receives the request without Carbon credentials. Use attachments to store image
+bytes locally or on your sync server instead.
 
 ## Children
 

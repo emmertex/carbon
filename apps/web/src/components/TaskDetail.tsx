@@ -478,9 +478,6 @@ export function TaskDetail({ id }: { id: string }) {
     const raw = pathname.match(/^\/note\/(.+)$/)?.[1];
     return !!raw && decodeURIComponent(raw) === id;
   })();
-  // Whether the pane's note body is the read-only recipe view rather than an editor.
-  // Drives the body's height rule below — the two need opposite treatment.
-  const showRecipe = isNote && !onOwnPage && noteMode === "recipe" && !noteEditing;
   const rosterById = new Map(roster.map((u) => [u.id, u]));
   // "From @host" provenance: the owner is a federation shadow (remote) user.
   const ownerUser = item.owner_id ? rosterById.get(item.owner_id) : undefined;
@@ -909,12 +906,9 @@ export function TaskDetail({ id }: { id: string }) {
           </div>
         </div>
 
-        {/* `h-full` makes a note's editor fill the pane — NoteEditor is a scrollable
-            box, so a fixed height is what it wants. RecipeView is a document that
-            grows instead, and `height: 100%` clipped the box to the pane while its
-            content kept rendering past it (overflow is visible), painting the
-            ingredients over Attachments/Project/Tags below. It sizes to its content. */}
-        <div className={cn(isNote && !showRecipe && "flex h-full flex-col")}>
+        {/* Keep the body in document flow so images and long notes push the
+            following fields down, and empty notes do not reserve a whole pane. */}
+        <div>
           <Label>Notes</Label>
           {onOwnPage ? (
             // The note page behind this pane already has a live editor over this
@@ -948,8 +942,6 @@ export function TaskDetail({ id }: { id: string }) {
                 remoteNote={note}
                 onSave={commitNote}
                 placeholder="Add notes…  (Markdown supported)"
-                className={cn(isNote && "flex flex-1 flex-col")}
-                minHeightClassName={isNote ? "min-h-[60vh]" : undefined}
               />
             </>
           )}

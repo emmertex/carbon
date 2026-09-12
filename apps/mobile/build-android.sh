@@ -20,7 +20,8 @@
 #     the firebase-adminsdk service-account key is server-side only, NOT in the app.
 #
 # Usage:
-#   ./build-android.sh              # sideload debug APK (default)
+#   ./build-android.sh              # both sideload and playstore release APK + AAB
+#   ./build-android.sh debug        # sideload debug APK + AAB
 #   ./build-android.sh release      # sideload signed APK + AAB (GitHub release)
 #   ./build-android.sh playstore    # Google Play signed AAB + APK (local keystore.properties
 #                                   #   = Play upload key; web built with VITE_PLAY_STORE=1)
@@ -37,7 +38,18 @@ MOBILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$MOBILE_DIR/android"
 OUT_BASE="$ANDROID_DIR/app/build/outputs"
 
-MODE="${1:-debug}"
+REPO_DIR="$(cd "$MOBILE_DIR/../.." && pwd)"
+RELEASE_DIR="$REPO_DIR/release"
+MODE="${1:-all}"
+
+case "$MODE" in
+  all|debug|install|release|playstore) ;;
+  *)
+    echo "Unknown mode: $MODE (use: all | debug | release | playstore | install)" >&2
+    exit 1
+    ;;
+esac
+VERSION="$(node -p 'require(process.argv[1]).version' "$REPO_DIR/package.json")"
 
 # Ensure local.properties exists (gitignored, machine-specific).
 if [[ ! -f "$ANDROID_DIR/local.properties" ]]; then
@@ -45,42 +57,59 @@ if [[ ! -f "$ANDROID_DIR/local.properties" ]]; then
   echo "==> wrote $ANDROID_DIR/local.properties"
 fi
 
-# Mode -> (flavor, build type, web env). AGP qualifies every task/output with the
-# flavor: assembleSideloadRelease / bundlePlaystoreRelease, etc.
-case "$MODE" in
-  debug|install) FLAVOR="sideload"; BT="Debug";   WEB_ENV=() ;;
-  release)       FLAVOR="sideload"; BT="Release"; WEB_ENV=() ;;
-  playstore)     FLAVOR="playstore"; BT="Release"; WEB_ENV=(VITE_PLAY_STORE=1) ;;
-  *)
-    echo "Unknown mode: $MODE (use: debug | release | playstore | install)" >&2
-    exit 1
-    ;;
-esac
+# Build and collect each flavor before syncing the next flavor's web assets.
+build_variant() {
+  local mode="$1" flavor bt variant btl apk_file aab_file name artifact
+  local -a web_env
+  case "$mode" in
+    debug|install) flavor="sideload"; bt="Debug"; web_env=(VITE_PLAY_STORE=0) ;;
+    release)       flavor="sideload"; bt="Release"; web_env=(VITE_PLAY_STORE=0) ;;
+    playstore)     flavor="playstore"; bt="Release"; web_env=(VITE_PLAY_STORE=1) ;;
+  esac
 
-VARIANT="${FLAVOR}${BT}"                           # e.g. sideloadRelease / playstoreRelease
-BTL="$(echo "$BT" | tr '[:upper:]' '[:lower:]')"   # release
-APK_DIR="$OUT_BASE/apk/$VARIANT"
-AAB_FILE="$OUT_BASE/bundle/$VARIANT/app-${FLAVOR}-${BTL}.aab"
+  variant="${flavor}${bt}"
+  btl="${bt,,}"
+  apk_file="$OUT_BASE/apk/$flavor/$btl/app-${flavor}-${btl}.apk"
+  aab_file="$OUT_BASE/bundle/$variant/app-${flavor}-${btl}.aab"
+  # Keep the original sideload artifact name; only Play Store adds a suffix.
+  name="Carbon_${VERSION}_android"
+  [[ "$flavor" != "playstore" ]] || name="${name}_playstore"
+  [[ "$bt" != "Debug" ]] || name="${name}_debug"
 
-echo "==> Building web bundle (@carbon/web)${WEB_ENV:+ with ${WEB_ENV[*]}}"
-env "${WEB_ENV[@]}" npm run --prefix "$MOBILE_DIR" build:web
+  echo "==> Building web bundle (@carbon/web) with ${web_env[*]}"
+  env "${web_env[@]}" npm run --prefix "$MOBILE_DIR" build:web
 
-echo "==> Capacitor sync (copies dist + plugins into android/)"
-( cd "$MOBILE_DIR" && npx cap sync android )
+  echo "==> Capacitor sync (copies dist + plugins into android/)"
+  ( cd "$MOBILE_DIR" && npx cap sync android )
 
-echo "==> Gradle assemble$VARIANT + bundle$VARIANT (Java 21)"
-( cd "$ANDROID_DIR" && ./gradlew "assemble$VARIANT" "bundle$VARIANT" --no-daemon )
+  echo "==> Gradle assemble$variant + bundle$variant (Java 21)"
+  ( cd "$ANDROID_DIR" && ./gradlew "assemble$variant" "bundle$variant" --no-daemon )
 
-echo "==> Artifacts:"
-find "$APK_DIR" -name '*.apk' 2>/dev/null || true
-[[ -f "$AAB_FILE" ]] && echo "$AAB_FILE"
+  # Require both expected artifacts before collecting a successful build.
+  for artifact in "$apk_file" "$aab_file"; do
+    if [[ ! -s "$artifact" ]]; then
+      echo "Missing or empty build artifact: $artifact" >&2
+      return 1
+    fi
+  done
+  mkdir -p "$RELEASE_DIR"
+  cp "$apk_file" "$RELEASE_DIR/$name.apk"
+  cp "$aab_file" "$RELEASE_DIR/$name.aab"
+  echo "==> Artifacts:"
+  echo "$RELEASE_DIR/$name.apk"
+  echo "$RELEASE_DIR/$name.aab"
 
-if [[ "$MODE" == "install" ]]; then
-  APK="$(ls -t "$APK_DIR"/*.apk 2>/dev/null | head -n1 || true)"
-  if [[ -n "$APK" ]]; then
-    echo "==> adb install -r $APK"
-    "$ADB" install -r "$APK"
+  if [[ "$mode" == "install" ]]; then
+    echo "==> adb install -r $RELEASE_DIR/$name.apk"
+    "$ADB" install -r "$RELEASE_DIR/$name.apk"
   fi
+}
+
+if [[ "$MODE" == "all" ]]; then
+  build_variant release
+  build_variant playstore
+else
+  build_variant "$MODE"
 fi
 
 echo "==> Done."

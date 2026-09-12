@@ -529,11 +529,14 @@ export async function sendMfaEmailCode(
     `Your Carbon verification code is:\n\n  ${code}\n\n` +
     `Enter it to finish signing in. It expires shortly. ` +
     `If you didn't request this, you can ignore this email.`;
-  await sendEmail(e, subject, text);
+  // Reserve the send budget before yielding to SMTP: overlapping requests must
+  // not send another code and invalidate the one already on its way. Count failed
+  // attempts too, since a transport error can occur after SMTP accepted the email.
   db.run(
     `UPDATE mfa_challenges SET email_sends = email_sends + 1, last_email_sent_at = ? WHERE id = ?`,
     [sentAt, challengeId],
   );
+  await sendEmail(e, subject, text);
 }
 
 export function verifyMfaEmailCode(

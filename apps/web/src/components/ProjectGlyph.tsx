@@ -5,7 +5,7 @@ import type { OrderMode } from '@carbon/core';
  * project's colour, exactly like the old Folder icon was):
  *  - parallel   — two rows, each: filled circle left → line → empty circle right
  *  - sequential — one row: filled, filled, empty, joined by a line
- *  - single     — same three dots as sequential, but no connecting line
+ *  - single     — three separate checklist rows for independent actions
  */
 export function ProjectGlyph({
   mode = 'parallel',
@@ -65,9 +65,21 @@ export function ProjectGlyph({
       )}
       {mode === 'single' && (
         <>
-          {dot(5, 12, true)}
-          {dot(12, 12, true)}
-          {dot(19, 12, false)}
+          {[5, 12, 19].map((y) => (
+            <g key={y}>
+              <rect
+                x={3}
+                y={y - 2}
+                width={4}
+                height={4}
+                rx={0.8}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={sw}
+              />
+              {line(11, y, 21, y)}
+            </g>
+          ))}
         </>
       )}
     </svg>

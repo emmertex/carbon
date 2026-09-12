@@ -32,20 +32,12 @@ Enter:
 - **Sync every (seconds)** — minimum 60; default 3600.
 - **Default event length** — used for a dated task that has no time estimate.
 
-**Past events are never imported.** An inbound VEVENT whose end is already in the past
-is skipped, so a calendar's history never floods the project — this is unconditional
-(there is no toggle). A recurring series is always treated as ongoing, so it is
-imported even when its first occurrence is in the past. This only gates *new* imports:
-an event already linked as a task is kept even after it passes. To-dos are never
-filtered on time.
+Past events are skipped on initial import. Recurring series, already-linked events
+and to-dos remain eligible.
 
-Use **Test** to PROPFIND the collection(s), and **Sync now** to run a pass
-immediately. **Sync now** is fire-and-forget — it queues the run on the server (a full
-pass can outlast a reverse-proxy timeout) and the UI then polls the last-sync status
-for the result. The scheduler also runs each enabled config on its own interval.
-
-Both flavours may be enabled at once: a dated task then appears **both** as a VTODO
-and as a VEVENT (intentional — a to-do that also blocks time on your calendar).
+Use **Test** to check collections and **Sync now** to queue a sync. The panel shows
+the result when it finishes. Both sync types can be enabled together; a dated task
+then appears as both a VTODO and a VEVENT.
 
 ## iCal feed (read-only)
 
@@ -90,7 +82,7 @@ items are matched by `UID` and re-applied only when their mapped fields change.
 The VEVENT mappings are exact inverses (`DTSTART ↔ due_date`,
 duration ↔ `estimate_minutes`) so a push → pull round-trip is stable. All-day
 values use Carbon's 23:59 marker — resolved in the **project owner's** timezone
-(see [Time zones](#limitations-mvp)) — ⇄ `VALUE=DATE`.
+(see [Time zones](#limitations)) — ⇄ `VALUE=DATE`.
 
 ## Behaviour
 
@@ -100,13 +92,9 @@ values use Carbon's 23:59 marker — resolved in the **project owner's** timezon
   the trash); a deleted VEVENT just clears the task's due date and keeps the task.
 - **Local deletion** removes the remote object; clearing a task's due date removes
   its VEVENT.
-- **Loop-safe**: the connector writes inbound changes as its own CRDT device, and
-  uses stored ETags so it never re-ingests the echo of its own writes. Pulled
-  resources are reconciled by **UID** as well as href, so a server that stores or
-  returns our PUT under a different path (e.g. re-encoding the `@` in the UID, or
-  relocating the resource) can't slip through as a duplicate re-import.
+- Changes are matched by UID and ETag to prevent duplicate imports.
 
-## Limitations (MVP)
+## Limitations
 
 - **Recurrence is one-way (Carbon → server).** Inbound `RRULE` is ignored; the task
   list mirrors the recurrence master only.
@@ -114,20 +102,10 @@ values use Carbon's 23:59 marker — resolved in the **project owner's** timezon
 - **Conflict resolution favours the server.** On a simultaneous edit (a `412` on
   push), the connector re-fetches the remote object and the remote values win for
   mapped fields.
-- **Time zones**: `Z` (UTC) and `TZID`-qualified times carry their own zone and are
-  converted to the correct UTC instant via the IANA tz database bundled with Node (DST
-  included), independent of where the server runs. Values that carry **no** zone of their
-  own — all-day (`VALUE=DATE`) dates and *floating* times (no `Z`, no `TZID`) — are
-  anchored to the **project owner's** timezone: the IANA zone their client last reported
-  (the same per-user preference the natural-language date parser uses). That anchoring is
-  what keeps an all-day date on the right calendar day when the server's own timezone
-  differs from the user's — e.g. the documented Docker self-host defaults to UTC, so a
-  Melbourne user's "due July 10, all day" would otherwise export as a timed event and, on
-  import, land on July 11. If the owner has never reported a timezone, these values fall
-  back to the server process's local clock (the previous behaviour) and a warning is
-  logged per sync pass; a non-UTC self-hoster should either sign in once from a client
-  (which reports the zone) or set the container's `TZ` to their own zone. Outbound writes
-  of timed values are always UTC.
+- **Time zones:** UTC and `TZID` values use their specified zone. All-day and floating
+  times use the project owner’s last reported timezone, falling back to the server
+  timezone if none is available. Timed outbound values use UTC.
+
 - **Change detection (CalDAV)** uses `PROPFIND` + ETag diffing, not the WebDAV
   `sync-collection` REPORT — every sync pass lists the whole collection.
 - **Secrets**: the CalDAV password is stored in the tenant DB in plaintext (same as
@@ -140,25 +118,3 @@ Pointing at a private/LAN CalDAV host (e.g. a Radicale box on `10.x`) requires
 private endpoints to be enabled for the workspace — the same gate as private LLM
 endpoints (`ALLOW_PRIVATE_AGENT_ENDPOINTS=1` for self-host, or the host-admin
 `allow_private_endpoints` flag per tenant). Otherwise the SSRF guard blocks it.
-
-## Verifying against Radicale
-
-```sh
-# 1. run a throwaway Radicale
-pip install radicale
-python -m radicale --storage-filesystem-folder=/tmp/radicale-test \
-  --auth-type none --server-hosts 127.0.0.1:5232 &
-
-# 2. run the Carbon server allowing the private target
-ALLOW_PRIVATE_AGENT_ENDPOINTS=1 npm --workspace @carbon/server run dev
-
-# 3. in a project, set both collection URLs to e.g.
-#    http://127.0.0.1:5232/test/tasks/  and  .../calendar/
-#    then click Test, then Sync now.
-```
-
-The encode/decode mapping is unit-tested in `apps/server/src/caldav-ical.test.ts`;
-the full pull/push/conflict/delete engine is covered against an in-process mock
-CalDAV collection in `apps/server/src/caldav.integration.test.ts`. The read-only iCal
-feed path (multi-component pull, `304` short-circuit, pure-mirror deletion) is covered
-in `apps/server/src/caldav-ical-feed.test.ts`.

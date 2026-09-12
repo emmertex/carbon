@@ -137,6 +137,9 @@ export function TiptapEditor({
   const appliedExternalVersionRef = useRef(externalVersion);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirtyRef = useRef(false);
+  // A browser file dialog blurs the editable surface. Keep it mounted until
+  // change/cancel, including the asynchronous local blob write.
+  const pickingImageRef = useRef(false);
 
   const editor = useEditor({
     // Avoid create-during-render; TipTap's default can race Suspense remounts
@@ -181,6 +184,7 @@ export function TiptapEditor({
       onDirtyRef.current();
     },
     onBlur({ editor }) {
+      if (pickingImageRef.current) return;
       const md = flushMarkdown(editor);
       onBlurRef.current(md);
     },
@@ -253,6 +257,17 @@ export function TiptapEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input || !editor) return;
+    const cancel = () => {
+      pickingImageRef.current = false;
+      if (!editor.isDestroyed) editor.commands.focus();
+    };
+    input.addEventListener('cancel', cancel);
+    return () => input.removeEventListener('cancel', cancel);
+  }, [editor]);
+
   function handleDrop(e: React.DragEvent) {
     if (!editor) return;
     const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
@@ -261,18 +276,26 @@ export function TiptapEditor({
     for (const file of files) void insertImageFile(editor, file);
   }
 
-  function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
-    if (!editor) return;
+  async function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
     const files = [...(e.target.files ?? [])];
-    for (const file of files) void insertImageFile(editor, file);
     e.target.value = '';
+    try {
+      if (!editor || editor.isDestroyed) return;
+      for (const file of files) await insertImageFile(editor, file);
+    } finally {
+      pickingImageRef.current = false;
+      if (editor && !editor.isDestroyed) editor.commands.focus();
+    }
   }
 
   if (!editor) return null;
 
   return (
     <div className={className} onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}>
-      <NoteToolbar editor={editor} onInsertImage={() => fileInputRef.current?.click()} />
+      <NoteToolbar editor={editor} onInsertImage={() => {
+        pickingImageRef.current = true;
+        fileInputRef.current?.click();
+      }} />
       <input
         ref={fileInputRef}
         type="file"

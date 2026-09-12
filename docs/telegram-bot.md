@@ -1,37 +1,7 @@
 # Telegram bot
 
-Carbon can run a **Telegram bot** so you (and everyone on your server) can control tasks from
-a chat in plain language:
-
-- *"add milk and eggs to my shopping list"*
-- *"what's due tomorrow in the work project?"*
-- *"untick my weekly shopping items"* (items tagged `weekly`)
-- *"mark off bread and milk"* — it tells you exactly what it found and what it couldn't
-
-The bot drives the **same AI agent** as Carbon's in-app natural-language commands (Settings →
-AI agents / Natural-language commands). Unlike the in-app Add box — which replies tersely — the
-bot answers conversationally, so it's good for questions and summaries as well as actions.
-
-## How it works
-
-- **One bot per server, not per workspace.** A single bot serves every workspace on the host.
-- **Users link their own account.** Adding the bot isn't enough — each person links the bot to
-  their individual Carbon **user** in a chosen workspace, using a one-time code generated in
-  Carbon's Settings. After that, everything the bot does runs **as that user**: it sees and
-  changes only what the user can, and created tasks are owned by them.
-- **It reuses your configured AI agent.** No extra model setup — if natural-language commands
-  work in the app, the bot works. If a workspace hasn't set up an AI agent, the bot tells the
-  user to ask an admin to configure one.
-
-```
-Telegram ──webhook──► Carbon ──(chat → workspace+user)──► your AI agent ──► reply
-```
-
-> **Hosted service.** On the hosted Carbon offering the model is provided for you — the bot and
-> in-app natural-language commands run on a **basic model** (currently GPT-OSS-20B, may change)
-> under **fair-use limits**, with no API key to configure. Want higher limits or a stronger
-> model? Point your workspace's AI agent at your own OpenAI / Anthropic / webhook key. The rest
-> of this page covers **self-hosted** setup, where you supply the bot token and the model.
+The bot uses the workspace’s configured AI agent and acts with the linked user’s
+permissions. One bot serves all workspaces on a server.
 
 ## 1. Create a bot with BotFather
 
@@ -42,39 +12,26 @@ Telegram ──webhook──► Carbon ──(chat → workspace+user)──► 
 
 ## 2. Configure the server
 
-The bot needs a **public HTTPS URL** because it uses a Telegram **webhook** (Telegram POSTs
-updates to your server). If you already serve Carbon over HTTPS (e.g. behind nginx with a
-`BASE_DOMAIN`), point the webhook at that origin. Set these in the server's environment (see
-[`.env.example`](../apps/server/.env.example)):
+Set these variables in the [server environment](../apps/server/.env.example).
+The webhook must be reachable over HTTPS at `/telegram/webhook`.
 
 ```bash
-# Token from @BotFather. Setting it enables the bot.
+# BotFather token
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 
-# Public base URL of this server (HTTPS). The webhook is registered at
-# <TELEGRAM_WEBHOOK_URL>/telegram/webhook on startup.
+# Public server URL
 TELEGRAM_WEBHOOK_URL=https://carbon.example.com
 
-# A random secret you choose. Telegram echoes it back in a header so Carbon can verify
-# that incoming webhook calls are genuinely from Telegram. Generate one with:
+# Generate a webhook secret:
 #   node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
 TELEGRAM_WEBHOOK_SECRET=<random hex string>
 
-# Optional: the bot's @username, shown in Settings → Telegram. Auto-detected otherwise.
+# Optional; detected automatically if unset.
 TELEGRAM_BOT_USERNAME=my_carbon_bot
 ```
 
-Restart the server. On startup you should see:
-
-```
-[carbon] telegram webhook registered -> https://carbon.example.com/telegram/webhook
-[carbon] telegram bot @my_carbon_bot ready
-```
-
-> **nginx note.** The webhook is a plain `POST /telegram/webhook` on the same host that serves
-> the app/API. If nginx already forwards `/` (or `/api`) to Carbon, no extra config is needed —
-> just make sure `/telegram/` is forwarded too. TLS is required: Telegram only delivers webhooks
-> over HTTPS on ports 443/88/80/8443.
+Restart the server to register the webhook. Forward `/telegram/webhook` through
+your reverse proxy.
 
 If you don't set `TELEGRAM_WEBHOOK_URL`, Carbon won't auto-register the webhook; you can set it
 yourself once with:
@@ -107,7 +64,7 @@ Just talk to the bot:
 | `add milk and eggs to my shopping list` | Creates two tasks in *shopping list* (made if missing). |
 | `what's due tomorrow in the work project?` | Reads the *work* project and answers with what's due. |
 | `untick my weekly shopping items` | Re-opens every task tagged `weekly`. |
-| `tag everything in groceries with woolworths` | Bulk-tags the whole list. |
+| `tag everything in groceries with groceries` | Bulk-tags the whole list. |
 | `mark off bread and milk` | Completes both; reports anything it couldn't find. |
 | `write down that the spare key is under the pot` | Creates a note (not a task). |
 | `what did I write about the rental car?` | Searches inside note bodies and summarises the hit. |
@@ -135,10 +92,8 @@ You:  mark off bread
 Bot:  Marked off bread.
 ```
 
-It focuses on your latest message and only leans on the earlier conversation when the message is
-unclear on its own or refers back ("it", "that", "what about the work project?"). Send `/reset`
-(or `/clear`) to forget the context and start fresh; linking, unlinking, or relinking also clears
-it. The window is the last 6 messages by default — tune it with `TELEGRAM_HISTORY_MESSAGES`.
+Send `/reset` or `/clear` to clear context. Linking or unlinking also clears it.
+`TELEGRAM_HISTORY_MESSAGES` sets the history window (default: 6 messages).
 
 Bot commands: `/start` (link), `/whoami` (show your link), `/reset` (forget context), `/unlink`,
 `/help`.
@@ -157,12 +112,3 @@ Bot commands: `/start` (link), `/whoami` (show your link), `/reset` (forget cont
   generate a fresh one in Settings → Telegram.
 - **Token usage.** Bot traffic is metered separately under *telegram* in Settings → AI agents
   token usage.
-
-## Privacy & security notes
-
-- The bot only acts after a user links their account with a code from Carbon's Settings — a
-  random Telegram user can't reach anyone's tasks.
-- Every action runs as the linked Carbon user, with that user's normal visibility and
-  write-access. The bot has no special powers.
-- Outbound calls go only to `api.telegram.org`. Your LLM endpoint is whatever the workspace's AI
-  agent is configured to use.

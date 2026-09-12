@@ -1915,12 +1915,13 @@ export function getItemsByTag(db: Db, tag: string): Item[] {
     .map(rowToItem);
 }
 
-/** Count of non-deleted items carrying each tag, keyed by tag id. */
+/** Count of non-deleted, incomplete items carrying each tag, keyed by tag id. */
 export function tagCounts(db: Db): Record<string, number> {
   const rows = db.all<{ tag_id: string; n: number }>(
     `SELECT item_tags.tag_id AS tag_id, COUNT(*) AS n FROM item_tags
      JOIN items ON items.id = item_tags.item_id
-     WHERE items.deleted = 0 AND item_tags.deleted = 0 GROUP BY item_tags.tag_id`,
+     WHERE items.deleted = 0 AND items.status != 'done'
+       AND item_tags.deleted = 0 GROUP BY item_tags.tag_id`,
   );
   const out: Record<string, number> = {};
   for (const r of rows) out[r.tag_id] = Number(r.n);

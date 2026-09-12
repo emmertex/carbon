@@ -317,7 +317,7 @@ export function NoteEditor({
   }, [editing, expanded, mode, autoFocus]);
 
   const editorBody = (fullscreen: boolean) => (
-    <div className="flex h-full flex-col">
+    <div className={cn("flex flex-col", fullscreen && "h-full min-h-0")}>
       {remoteChanged && (
         <div className="mb-2 flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
           <span className="flex-1">
@@ -412,7 +412,7 @@ export function NoteEditor({
               }}
               autoFocus={autoFocus ?? true}
               placeholder={placeholder}
-              className={cn('flex-1 overflow-y-auto', !fullscreen && minHeightClassName)}
+              className={cn(fullscreen && 'min-h-0 flex-1 overflow-y-auto', !fullscreen && minHeightClassName)}
             />
           </Suspense>
         </EditorCrashBoundary>

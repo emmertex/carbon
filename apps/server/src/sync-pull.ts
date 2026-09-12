@@ -5,6 +5,7 @@ import {
   type Op,
   type RecordOp,
 } from "@carbon/core";
+import { legacyRecordData } from "./sync-legacy";
 
 export interface BackfillCursor {
   root: string;
@@ -107,7 +108,7 @@ export function pullSyncPage(
                 row_id: String(row.row_id),
                 ts: Number(row.ts),
                 device_id: String(row.device_id),
-                data,
+                data: legacyRecordData(String(row.entity), data),
               };
         const size = Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
         if (bytes + size > limits.bytes) break;

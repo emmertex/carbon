@@ -211,6 +211,24 @@ function Console({ creds, onSignOut }: { creds: HostCreds; onSignOut: () => void
   );
 }
 
+/** One read-only metric in a tenant's stats row: muted label + value. */
+function Stat({
+  label,
+  tone,
+  children,
+}: {
+  label: string;
+  tone?: 'warning';
+  children: React.ReactNode;
+}) {
+  return (
+    <span className="whitespace-nowrap text-xs">
+      <span className="text-text-faint">{label} </span>
+      <span className={tone === 'warning' ? 'text-warning' : 'text-text'}>{children}</span>
+    </span>
+  );
+}
+
 function TenantRow({
   t,
   usage,
@@ -266,141 +284,159 @@ function TenantRow({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{t.display_name || t.subdomain}</span>
-          <span
-            className={
-              'rounded px-1.5 py-0.5 text-xs ' +
-              (t.status === 'active'
-                ? 'bg-success/15 text-success'
-                : t.status === 'suspended'
-                  ? 'bg-warning/15 text-warning'
-                  : 'bg-surface-2 text-text-muted')
-            }
-          >
-            {t.status}
-          </span>
-          {locked && (
-            <span className="rounded bg-danger/15 px-1.5 py-0.5 text-xs text-danger">locked</span>
+    <div className="px-4 py-3">
+      {/* Identity + row actions. */}
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">{t.display_name || t.subdomain}</span>
+            <span
+              className={
+                'rounded px-1.5 py-0.5 text-xs ' +
+                (t.status === 'active'
+                  ? 'bg-success/15 text-success'
+                  : t.status === 'suspended'
+                    ? 'bg-warning/15 text-warning'
+                    : 'bg-surface-2 text-text-muted')
+              }
+            >
+              {t.status}
+            </span>
+            {locked && (
+              <span className="rounded bg-danger/15 px-1.5 py-0.5 text-xs text-danger">locked</span>
+            )}
+          </div>
+          <a href={t.url} className="block truncate font-mono text-xs text-text-muted">
+            {t.url}
+          </a>
+          {t.admin_email && (
+            <span className="block truncate text-xs text-text-faint">{t.admin_email}</span>
           )}
         </div>
-        <a href={t.url} className="block truncate font-mono text-xs text-text-muted">
-          {t.url}
-        </a>
-        {t.admin_email && (
-          <span className="block truncate text-xs text-text-faint">{t.admin_email}</span>
-        )}
-        <span className={'block text-xs ' + (near ? 'text-warning' : 'text-text-faint')}>
-          Storage {used} / {cap}
-        </span>
-        <span className={'block text-xs ' + (usersFull ? 'text-warning' : 'text-text-faint')}>
-          Users {usage ? usage.humanUsers : '…'} / {userCap}
-        </span>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={() => onLocked(t, !t.locked_at)}
+            title={t.locked_at ? 'Unlock workspace' : 'Lock workspace'}
+            className={cn(btnIcon, 'p-2')}
+          >
+            {t.locked_at ? <Unlock size={16} /> : <Lock size={16} />}
+          </button>
+          {t.status === 'suspended' ? (
+            <button
+              onClick={() => onStatus(t, 'active')}
+              title="Resume"
+              className={cn(btnIcon, 'p-2')}
+            >
+              <Play size={16} />
+            </button>
+          ) : (
+            <button
+              onClick={() => onStatus(t, 'suspended')}
+              title="Suspend"
+              className={cn(btnIcon, 'p-2')}
+            >
+              <Pause size={16} />
+            </button>
+          )}
+          <button
+            onClick={() => onRemove(t)}
+            title="Delete"
+            className={cn(btnIcon, 'p-2 text-danger hover:text-danger')}
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
       </div>
 
-      {/* Storage cap (MB): blank = server default, 0 = unlimited. */}
-      <label
-        className="flex items-center gap-1 text-xs text-text-muted"
-        title="Blob storage cap in MB (blank = server default, 0 = unlimited)"
-      >
-        <input
-          type="number"
-          min={0}
-          key={quotaMb ?? 'na'}
-          defaultValue={quotaMb ?? ''}
-          onBlur={commitQuota}
-          onKeyDown={(e) => e.key === 'Enter' && commitQuota(e)}
-          className="w-16 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
-        />
-        MB
-      </label>
+      {/* Read-only usage stats. */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1">
+        <Stat label="Storage" tone={near ? 'warning' : undefined}>
+          {used} / {cap}
+        </Stat>
+        <Stat label="Users" tone={usersFull ? 'warning' : undefined}>
+          {usage ? usage.humanUsers : '…'} / {userCap}
+        </Stat>
+        <Stat label="Tasks">{usage ? usage.taskCount : '…'}</Stat>
+        <Stat label="Last sign-in">
+          {usage && usage.lastSignIn ? new Date(usage.lastSignIn).toLocaleDateString() : 'never'}
+        </Stat>
+      </div>
 
-      {/* User cap: blank = server default (MAX_WORKSPACE_USERS), 0 = unlimited. */}
-      <label
-        className="flex items-center gap-1 text-xs text-text-muted"
-        title="Max human users (blank = server default, 0 = unlimited). Bot/agent accounts don't count."
-      >
-        <input
-          type="number"
-          min={0}
-          key={maxUsersVal ?? 'na'}
-          defaultValue={maxUsersVal ?? ''}
-          onBlur={commitMaxUsers}
-          onKeyDown={(e) => e.key === 'Enter' && commitMaxUsers(e)}
-          className="w-14 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
-        />
-        users
-      </label>
-
-      {/* Allow this workspace's agents to reach private/loopback/LAN endpoints. */}
-      <label
-        className="flex items-center gap-1 text-xs text-text-muted"
-        title="Allow this workspace's agents to reach private/loopback/LAN endpoints (e.g. a self-hosted LLM). Off by default to prevent SSRF."
-      >
-        <input
-          type="checkbox"
-          checked={!!t.allow_private_endpoints}
-          onChange={(e) => onAllowPrivate(t, e.target.checked)}
-          className="accent-accent"
-        />
-        Private LLM
-      </label>
-
-      {/* Expiry: set the date the workspace locks, or clear for "never". */}
-      <label className="flex items-center gap-1 text-xs text-text-muted" title="Workspace locks on">
-        <input
-          type="date"
-          value={expiryDate}
-          onChange={(e) =>
-            onExpiry(t, e.target.value ? new Date(`${e.target.value}T23:59:59`).toISOString() : null)
-          }
-          className="rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
-        />
-        {t.expires_at && (
-          <button
-            onClick={() => onExpiry(t, null)}
-            title="Clear expiry (never locks)"
-            className="rounded px-1 text-text-faint hover:text-text"
-          >
-            ✕
-          </button>
-        )}
-      </label>
-
-      <button
-        onClick={() => onLocked(t, !t.locked_at)}
-        title={t.locked_at ? 'Unlock workspace' : 'Lock workspace'}
-        className={cn(btnIcon, 'p-2')}
-      >
-        {t.locked_at ? <Unlock size={16} /> : <Lock size={16} />}
-      </button>
-
-      {t.status === 'suspended' ? (
-        <button
-          onClick={() => onStatus(t, 'active')}
-          title="Resume"
-          className={cn(btnIcon, 'p-2')}
+      {/* Editable limits. Set apart from the stats above so it reads as a control group. */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-2">
+        {/* Storage cap (MB): blank = server default, 0 = unlimited. */}
+        <label
+          className="flex items-center gap-1 text-xs text-text-muted"
+          title="Blob storage cap in MB (blank = server default, 0 = unlimited)"
         >
-          <Play size={16} />
-        </button>
-      ) : (
-        <button
-          onClick={() => onStatus(t, 'suspended')}
-          title="Suspend"
-          className={cn(btnIcon, 'p-2')}
+          <span className="text-text-faint">Storage cap</span>
+          <input
+            type="number"
+            min={0}
+            key={quotaMb ?? 'na'}
+            defaultValue={quotaMb ?? ''}
+            onBlur={commitQuota}
+            onKeyDown={(e) => e.key === 'Enter' && commitQuota(e)}
+            className="w-16 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+          />
+          MB
+        </label>
+
+        {/* User cap: blank = server default (MAX_WORKSPACE_USERS), 0 = unlimited. */}
+        <label
+          className="flex items-center gap-1 text-xs text-text-muted"
+          title="Max human users (blank = server default, 0 = unlimited). Bot/agent accounts don't count."
         >
-          <Pause size={16} />
-        </button>
-      )}
-      <button
-        onClick={() => onRemove(t)}
-        title="Delete"
-        className={cn(btnIcon, 'p-2 text-danger hover:text-danger')}
-      >
-        <Trash2 size={16} />
-      </button>
+          <span className="text-text-faint">User cap</span>
+          <input
+            type="number"
+            min={0}
+            key={maxUsersVal ?? 'na'}
+            defaultValue={maxUsersVal ?? ''}
+            onBlur={commitMaxUsers}
+            onKeyDown={(e) => e.key === 'Enter' && commitMaxUsers(e)}
+            className="w-14 rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+          />
+          users
+        </label>
+
+        {/* Allow this workspace's agents to reach private/loopback/LAN endpoints. */}
+        <label
+          className="flex items-center gap-1 text-xs text-text-muted"
+          title="Allow this workspace's agents to reach private/loopback/LAN endpoints (e.g. a self-hosted LLM). Off by default to prevent SSRF."
+        >
+          <input
+            type="checkbox"
+            checked={!!t.allow_private_endpoints}
+            onChange={(e) => onAllowPrivate(t, e.target.checked)}
+            className="accent-accent"
+          />
+          Private LLM
+        </label>
+
+        {/* Expiry: set the date the workspace locks, or clear for "never". */}
+        <label className="flex items-center gap-1 text-xs text-text-muted" title="Workspace locks on">
+          <span className="text-text-faint">Expires</span>
+          <input
+            type="date"
+            value={expiryDate}
+            onChange={(e) =>
+              onExpiry(t, e.target.value ? new Date(`${e.target.value}T23:59:59`).toISOString() : null)
+            }
+            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs outline-none focus:border-accent"
+          />
+          {t.expires_at && (
+            <button
+              onClick={() => onExpiry(t, null)}
+              title="Clear expiry (never locks)"
+              className="rounded px-1 text-text-faint hover:text-text"
+            >
+              ✕
+            </button>
+          )}
+        </label>
+      </div>
     </div>
   );
 }

@@ -1,14 +1,8 @@
-# Federation & cross-workspace sharing
+# Cross-workspace sharing
 
-Federation lets a **workspace** (tenant) share a project subtree with a **different
-workspace** — either another workspace on the same Carbon server, or one on an entirely
-separate Carbon host. The recipient gets a live, editable copy of the shared subtree;
-edits flow both ways within it. It rides on Carbon's op-log CRDT, so a peer's edits merge
-with no special conflict handling.
-
-Federation is **off by default** and is gated by three independent controls (a host
-ceiling, a workspace policy, and per-user approval). Nothing crosses a workspace boundary
-unless all three allow it.
+Federation shares a project subtree with another workspace. Read access allows
+viewing; write access allows edits in both directions. Federation is disabled by
+default and requires host, workspace and recipient approval.
 
 ## The three sharing tiers
 
@@ -99,37 +93,20 @@ and every participant's edits within it, and can push edits back; a **read** gra
 can't write back. **Share only what you'd hand the peer server's operator** — a malicious
 peer host learns the shared subtree's structure and content.
 
-Some things are deliberately **not** federated: tags are dropped on ingest (no cross-DB
-vocabulary pollution), and agents never fire on federated ingest (no cross-server
-LLM/credit/SSRF exposure). Attachment **bytes** are fetched on demand from the owning peer
+Some things are deliberately **not** federated: tags are dropped on ingest, and agents never fire on federated ingest. Attachment **bytes** are fetched on demand from the owning peer
 over the link and **hash-verified** before caching, so a peer cannot poison content.
 
-## The NAT reality (cross-server / L3 only)
+## Network access
 
-L3 is plain HTTPS between two Carbon servers, so **a cross-server peer must be reachable
-over HTTPS at its advertised host**. This has practical consequences for self-hosters:
+Cross-server peers must be reachable at their advertised HTTPS address. Private
+addresses require `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`. Same-server sharing uses
+in-process delivery. Federation requires a multi-tenant host with `BASE_DOMAIN` set.
 
-- **Behind NAT / no public IP** — put Carbon behind a **reverse proxy with TLS**
-  (e.g. nginx) on a routable hostname, or expose it over **Tailscale** (or another
-  overlay/VPN). The peer address you exchange must resolve to that reachable host.
-- **Private / LAN / Tailscale peers** — Carbon's outbound requests are **SSRF-guarded**:
-  by default the server refuses to connect to private, loopback, or LAN addresses. To
-  federate with a peer on a private range (a LAN box or a Tailscale `100.64/10` address),
-  the operator must **allow private endpoints** — either globally with
-  `ALLOW_PRIVATE_AGENT_ENDPOINTS=1`, or (single-tenant self-host) it is allowed
-  automatically. On a public multi-tenant host the guard stays on: private/loopback peers
-  are refused, which is intended — `cross_server` there is for reaching other *public*
-  Carbon hosts.
-
-L2 (same-host) federation needs none of this: it never leaves the process.
-
-## Limitations & known caveats
-
-Federation v1 is deliberately scoped. Known limitations:
+## Limitations
 
 - **No offer expiry.** A pending offer stays in the recipient's Inbox until they act on it.
   Pending links never sync anything, so an unanswered offer is inert — decline or dismiss it
-  to clear it. This is by design, not an oversight.
+  to clear it.
 - **Unsharing / moving out retracts the peer's copy.** If you revoke a link, or move an item
   *out* of the shared subtree, the owning side tells the peer, which **drops** its copy
   (rather than leaving a stale one behind or forking on a later edit). Revoking a link you
@@ -146,7 +123,7 @@ Federation v1 is deliberately scoped. Known limitations:
   re-establish links afterward so peers pull a fresh bootstrap — do not continue old
   `federation_cursors` across an epoch bump.
 
-## Environment variables (summary)
+## Environment variables
 
 | Variable | Effect |
 |---|---|

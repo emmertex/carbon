@@ -1,12 +1,8 @@
-# Carbon — usage & keyboard shortcuts
-
-A practical guide to driving Carbon by keyboard, gesture, and quick-add syntax. Shortcuts
-are taken directly from the code (`TaskTree.tsx`, `QuickAdd.tsx`, `TaskDetail.tsx`,
-`Comments.tsx`) so they reflect what actually ships.
+# Usage and shortcuts
 
 ## Quick capture
 
-The **quick-add bar** parses inline tokens as you type (`lib/quickadd.ts`); recognised
+The **quick-add bar** parses inline tokens as you type; recognised
 tokens are stripped from the title:
 
 | Token | Effect | Notes |
@@ -15,8 +11,8 @@ tokens are stripped from the title:
 | `@user` | assign to user | must match a roster username, else kept as literal text |
 | `!priority` | set priority | `!1`/`!low`/`!l` … `!3`/`!high`/`!h`; `!0`/`!none` clears |
 
-Example: `Email the landlord #home @andrew !2` → task "Email the landlord", tag `home`,
-assigned to andrew, priority medium.
+Example: `Email the landlord #home @user !2` → task "Email the landlord", tag `home`,
+assigned to user, priority medium.
 
 Quick-add bar keys: **↑/↓** move through the autocomplete suggestions, **Enter** or **Tab**
 accept the highlighted suggestion, **Esc** dismiss the menu. With the menu closed, **Enter**
@@ -24,19 +20,16 @@ submits the task.
 
 ### Natural-language commands
 
-When an admin has configured an LLM agent (**Settings → Integrations → AI agents**) and
-enabled NL commands (**Settings → Integrations → Natural-language commands**), and the
-**Assistant in add box** feature is on for your UI complexity, the quick-add bar doubles as
-a command box. The placeholder hints at this when commands are active
-(e.g. `· or add/remind…`).
+Enable an agent and natural-language commands in **Settings → Integrations**,
+then enable **Assistant in add box** under UI complexity.
 
 Start a line with a configured keyword (defaults: `add`, `remind`, `check off`, `mark off`,
 `mark as`, `can`) and write plainly — typing a date anywhere else in a normal task title is
 left as literal text:
 
 - `add milk and eggs to shopping` → creates both tasks in the *shopping* list.
-- `remind me to get milk at Coles` → adds the task, tags it `coles`, and geofences the tag
-  to the **nearest Coles** to your current location (no coordinates needed).
+- `remind me to get milk at Supermarket` → adds the task, tags it `supermarket`, and geofences the tag
+  to the **nearest Supermarket** to your current location (no coordinates needed).
 - `I got the milk` / `tick off milk and bread` → marks those tasks done (past tense works).
 - `delete the milk task` → removes it (rather than faking completion).
 - `rename milk to oat milk` → renames in place.
@@ -45,10 +38,8 @@ left as literal text:
 - `what's due tomorrow in work?` / `what's overdue?` → lists matching dated items.
 - `tag everything in shopping urgent` → bulk-tags the whole list.
 
-The server fuzzy-matches names to lists/tags/tasks, runs the agent's tool-loop in-process,
-and replies with exactly what changed. Token usage per command is tracked under
-**Settings → Natural-language commands**. The same capability is available to external bots
-(Telegram, external clients, scripts) over the [agent API](carbon-agent-api.md).
+The agent matches task, list and tag names. View command usage in
+**Settings → Natural-language commands**.
 
 ### Notes
 
@@ -73,10 +64,7 @@ in your inbox without switching windows. See [native apps](native-apps.md#quick-
 
 ## Copy as Markdown
 
-From any task or project's **row quick-menu**, **Copy as Markdown** puts that item and all
-its subtasks on the clipboard as a nested checklist (`lib/exportMarkdown.ts`) — a quick way
-to drop a project into a chat or note. It's a one-way export for sharing, kept deliberately
-minimal:
+Use **Copy as Markdown** in an item’s row menu to copy it and its subtasks as a checklist.
 
 ```
 * [ ] Plan the trip #travel @due:20260628
@@ -86,7 +74,7 @@ minimal:
 
 - **Checkbox** reflects status: `[ ]` active, `[x]` done, `[/]` dropped.
 - **Indentation** is two spaces per level; subtasks nest under their parent in sort order.
-- **`#tags`** are listed inline (full path for nested tags, e.g. `#Shopping:Coles`).
+- **`#tags`** are listed inline (full path for nested tags, e.g. `#Shopping:Supermarket`).
 - **`@due:`** appears only when a due date is set — `YYYYMMDD`, or `YYYYMMDDHHmm` when the
   due has a specific time.
 
@@ -105,17 +93,11 @@ Work from anywhere (ignored while typing in a field):
 | **Home / End** | scroll the list to top / bottom |
 | **PageUp / PageDown** | scroll the list up / down a page |
 
-> **Undo / redo** covers task edits made this session — complete/reopen, flag, priority,
-> add-to-Plan, and delete — and is also available from the **↶ / ↷ buttons** in the sidebar
-> footer. Each undo is applied as a normal edit, so it syncs to your other devices like any
-> other change. The stack is per session (it clears on reload). Deleting a task still shows
-> its **Undo** snackbar, which now shares the same stack.
+Undo/redo covers completion, flags, priorities, planning and deletion for the current
+session. Changes sync to other devices; the undo stack clears on reload.
 
-> **Recently Deleted** (`g` `d`) picks up where that stack stops: it lists the last 30 days of
-> deletes, so a delete is still recoverable after the snackbar has gone and after a reload. The
-> sidebar shows it whenever it isn't empty. Each entry is one delete — restoring a project, or a
-> task with sub-tasks, brings the whole subtree back where it was — and a restore is itself
-> undoable.
+**Recently Deleted** (`g` `d`) restores deletes from the last 30 days, including
+subtrees deleted with a parent.
 
 ## Outline / list keyboard navigation
 
@@ -149,10 +131,7 @@ keyboard-drivable (focus the list first — click it or press **Tab**). `mod` be
 - **Enter** in the detail title / a tag input commits that field.
 - **Ctrl/⌘ + Enter** in the comment box submits the comment.
 
-> **Large lists.** List views render only the rows on screen (plus a few above and
-> below), so they stay fast into the tens of thousands of tasks. Drag-to-reorder is
-> available on manually-sorted lists up to ~200 items; longer lists keep their order
-> but are reordered by editing rather than dragging.
+
 
 ## Gestures (touch / mobile)
 
@@ -166,8 +145,7 @@ Configured in **Settings → Gestures & mobile**:
 - **Right-edge swipe** → jump to a destination: *Project Root*, *Today*, *Inbox*, or *Plan*.
 - **Row quick-menu**: tap the row's menu affordance for quick assign / tag / flag actions
   without opening the detail pane. **Copy as Markdown** there copies the task (or project)
-  and all its subtasks to the clipboard as a nested checklist — handy for pasting into a
-  chat. See [Copy as Markdown](#copy-as-markdown) below.
+  and all its subtasks to the clipboard as a nested checklist. See [Copy as Markdown](#copy-as-markdown).
 
 ## Views & perspectives
 
@@ -217,8 +195,7 @@ in for you to review and tweak before applying. Token usage is recorded server-s
 
 ## Customizing the UI (Features)
 
-Carbon starts simple and unfolds as you need it. On first run a **welcome picker** asks how
-much to show — **Simple**, **Standard** or **Advanced** — and remembers your choice.
+Choose **Simple**, **Standard** or **Advanced** on first run.
 
 Fine-tune it any time in **Settings → Features & UI complexity**:
 
@@ -233,11 +210,8 @@ Fine-tune it any time in **Settings → Features & UI complexity**:
 Hidden features only disappear from the UI; their data and behaviour are untouched (a hidden
 filter bar still filters by the saved settings).
 
-The **task detail pane adapts too**: sections start expanded or collapsed to match your
-choices — Location expands when Nearby is on, Dependencies and the defer-until date appear
-with GTD Tools (otherwise behind a **More…** link), and Time tracking expands when it's
-enabled. Everything is still one click away, and **Record time** always sits at the top of the
-pane. This is presentation only — no feature is disabled or changed.
+Detail sections expand or collapse with your feature settings. Hidden sections
+remain accessible through **More…**.
 
 By default, your Features choices — along with saved views, per-view filters, and
 perspectives — **sync across your devices** (see below). Turn this off per device with
@@ -279,14 +253,8 @@ perspectives** (last-writer-wins, scoped to your account). It's on by default an
 you first sign in on a new device; toggle it per device in **Settings → Features & UI
 complexity**.
 
-> Durability: writes persist on a 250 ms debounce **and** flush immediately when the tab is
-> hidden or closed (`visibilitychange`/`pagehide`), so a reload or app-kill won't drop your
-> last edits.
->
-> Local-only mode keeps everything on this device — nothing is sent anywhere until you
-> configure a sync server. See [`data-security.md`](data-security.md) for the full data-handling
-> picture.
-
+Local changes are saved automatically. Export regular backups, especially when
+working without a sync server. See [data security](data-security.md).
 
 ### Detail panes and long-list movement
 

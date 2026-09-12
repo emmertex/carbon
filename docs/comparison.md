@@ -1,29 +1,8 @@
-# Carbon vs Todoist vs OmniFocus vs Microsoft To Do
+# App comparison
 
-In-depth, feature-specific comparison. The **Carbon** column reflects what's actually
-in this codebase. Competitor details are accurate to early **2026** — these are
-fast-moving cloud apps, so verify any single dealbreaker against current docs.
+Competitor details reflect early 2026.
 
-> **Project context (important).** Carbon was originally built to support real internal
-> workflows for Emmertex and its employees' families: GTD-capable task management with true
-> task-level time tracking for timesheets and invoicing. It is now being documented for broader
-> evaluation, but its shape still reflects that practical, operations-first origin.
-
-> **Read this first — honest framing.** Carbon is a self-hosted, offline-first task
-> manager. The apps it's measured against are mature, commercially-supported products with
-> years of polish, large user bases, and full native client suites. **OmniFocus in
-> particular is the GTD reference implementation**, and the standard the GTD community
-> measures everything else by. This table exists to map Carbon's strengths _and_ its
-> gaps honestly, not to declare a winner. Where a cell reads `✓` for Carbon next to `✓`
-> for a competitor, the capability exists but may be **narrower, broader or newer** than the
-> incumbent's. If one feature is key to you, check out their own solutions for yourself.
-> Read [Where Carbon falls short](#where-carbon-falls-short) and
-> [Where Carbon holds its own](#where-carbon-holds-its-own) before the feature tables.
-
-> This document is living — we update it as Carbon's features evolve. Cross-check any
-> must-have item against the current release notes and docs when making a decision.
-
-## 1. Platform, hosting & data ownership
+## Platform, hosting & data ownership
 
 | Specific                             | Carbon                                                                                                                  | Todoist                                        | OmniFocus                                              | MS To Do                    |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------ | --------------------------- |
@@ -35,7 +14,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Account required                     | None (local-only) or account on a sync server                                                                           | Todoist account                                | Omni account for sync                                  | Microsoft account mandatory |
 | Clients                              | Web/PWA **installable**, Win, **Linux**, Android (macOS / iOS planned)                                              | Web, Win, Mac, iOS, Android, watch, extensions | Mac, iPad, iPhone, Watch, web — **no Android/Windows** | Win, Mac, web, iOS, Android |
 
-## 2. Task structure & hierarchy
+## Task structure & hierarchy
 
 | Specific                            | Carbon                                                 | Todoist          | OmniFocus                             | MS To Do                |
 | ----------------------------------- | ------------------------------------------------------ | ---------------- | ------------------------------------- | ----------------------- |
@@ -50,7 +29,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Task status states                  | active / done / **dropped**, plus **on-hold via tags** | done / not       | active / done / **dropped / on-hold** | done / not              |
 | Focus / scope to one container      | ✓                                                      | ✗                | ✓ (Pro)                               | ✗                       |
 
-## 3. Scheduling: dates, defer, recurrence, reminders
+## Scheduling: dates, defer, recurrence, reminders
 
 | Specific                                                        | Carbon | Todoist      | OmniFocus               | MS To Do |
 | --------------------------------------------------------------- | ------ | ------------ | ----------------------- | -------- |
@@ -62,7 +41,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | **Completion-relative recurrence**                              | ✓      | ✓ ("every!") | ✓                       | Partial  |
 | Time-of-day on due                                              | ✓      | ✓            | ✓                       | ✓        |
 
-## 4. Organization: tags, priority, flags, filtering
+## Organization: tags, priority, flags, filtering
 
 | Specific                                                               | Carbon                                                                                                            | Todoist                 | OmniFocus                                          | MS To Do         |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------- | -------------------------------------------------- | ---------------- |
@@ -83,7 +62,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Sort options                                                           | Manual/Due/Priority/Title/Newest                                                                                  | Multiple                | Rule-based                                         | Limited          |
 | Hierarchy preserved while filtering                                    | ✓ (Optional)                                                                                                      | Partial                 | ✓                                                  | n/a              |
 
-## 5. Collaboration & multi-user
+## Collaboration & multi-user
 
 | Specific                          | Carbon                                    | Todoist           | OmniFocus         | MS To Do           |
 | --------------------------------- | ----------------------------------------- | ----------------- | ----------------- | ------------------ |
@@ -95,7 +74,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Auto-share on assign              | ✓ (sync server)                           | n/a               | n/a               | n/a                |
 | "Shared with me"                  | ✓ (sync server)                           | ✓                 | ✗                 | ✓                  |
 
-## 6. Notes, comments, attachments
+## Notes, comments, attachments
 
 | Specific                | Carbon                                                                  | Todoist          | OmniFocus   | MS To Do               |
 | ----------------------- | ----------------------------------------------------------------------- | ---------------- | ----------- | ---------------------- |
@@ -107,7 +86,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Attachments on comments | ✓ (incl. inline images)                                                 | ✓                | ✗           | ✗                      |
 | Markdown rendering      | ✓ (GFM)                                                                 | Partial          | ✗           | ✗                      |
 
-## 7. Reminders & location
+## Reminders & location
 
 | Specific                       | Carbon                                                                            | Todoist         | OmniFocus    | MS To Do |
 | ------------------------------ | --------------------------------------------------------------------------------- | --------------- | ------------ | -------- |
@@ -117,7 +96,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Multi-device location store    | ✓ each device reports GPS to server; **Nearby view** shows tasks at your location | ✗               | ✗            | ✗        |
 | Background geofence            | ✓ app or via sync server                                                          | ✓ native mobile | ✓ native iOS | ✗        |
 
-## 8. Time tracking & review
+## Time tracking & review
 
 | Specific                               | Carbon                                                                                                                                                                                              | Todoist | OmniFocus          | MS To Do |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------ | -------- |
@@ -125,24 +104,24 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | **GPS tracks on sessions**             | ✓ opt-in; background on Android via foreground service; track blob + summary on a time note                                                                                                         | ✗       | ✗                  | ✗        |
 | **Estimated duration**                 | ✓                                                                                                                                                                                                   | ✗       | ✓                  | ✗        |
 | **Review mode** (per-project interval) | ✓                                                                                                                                                                                                   | ✗       | ✓                  | ✗        |
-| Productivity stats / karma             | ✗ (not in current build)                                                                                                                                                                            | ✓ Karma | ✗                  | ✗        |
+| Productivity stats / karma             | ✗                                                                                                                                                                            | ✓ Karma | ✗                  | ✗        |
 
-## 9. Capture & input
+## Capture & input
 
 | Specific                      | Carbon                                                                 | Todoist                         | OmniFocus     | MS To Do          |
 | ----------------------------- | ---------------------------------------------------------------------- | ------------------------------- | ------------- | ----------------- |
 | Quick-add inline tokens       | ✓ `#tag` `@user` `!priority` w/ autocomplete; full NLP via sync server | ✓ **full NLP**                  | ✓ (dates)     | Basic             |
 | Natural-language **commands** | ✓ LLM-backed: add/complete/delete/rename/tag/schedule/share, list & due queries (sync server) | ✓ "AI Assistant" (Pro, limited) | ✗             | ✗                 |
 | Natural-language **dates**    | ✓ via LLM command flow (sync server)                                   | ✓                               | ✓             | ✓ partial         |
-| Email-to-task                 | ✗ (not in current build)                                               | ✓                               | ✓ (Mail drop) | ✓ (flagged email) |
+| Email-to-task                 | ✗                                               | ✓                               | ✓ (Mail drop) | ✓ (flagged email) |
 
-## 10. Views
+## Views
 
 | Specific                                    | Carbon                                                 | Todoist              | OmniFocus                  | MS To Do  |
 | ------------------------------------------- | ------------------------------------------------------ | -------------------- | -------------------------- | --------- |
 | List view                                   | ✓                                                      | ✓                    | ✓                          | ✓         |
 | Tree / outline                              | ✓                                                      | Partial              | ✓                          | ✗         |
-| Kanban board                                | ✗ (not in current build)                               | ✓                    | ✗                          | ✗         |
+| Kanban board                                | ✗                               | ✓                    | ✗                          | ✗         |
 | Calendar / Forecast                         | ✓ **Forecast**                                         | ✓                    | ✓ **Forecast**             | "Planned" |
 | Forecast shows **external calendar events** | ✗ (CalDAV sync exists, but no in-app calendar overlay) | ✓ Partial (cal sync) | ✓ system calendar overlaid | ✗         |
 | **Nearby** (location-based task view)       | ✓                                                      | ✗                    | ✗                          | ✗         |
@@ -150,7 +129,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Smart lists                                 | ✓                                                      | ✓                    | ✓                          | ✓         |
 | Daily planner ("My Day")                    | ✓                                                      | Partial              | ✗                          | ✓         |
 
-## 11. Automation, API & integrations
+## Automation, API & integrations
 
 | Specific                          | Carbon                                                                                       | Todoist          | OmniFocus                     | MS To Do            |
 | --------------------------------- | -------------------------------------------------------------------------------------------- | ---------------- | ----------------------------- | ------------------- |
@@ -163,7 +142,7 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Smart-home integration            | ✓ via API + **Home Assistant** (sync server)                                                 | Via IFTTT/Zapier | ✗                             | Via Power Automate  |
 | Integration marketplace           | REST + agent tooling (sync server)                                                           | ✓                | Limited                       | MS ecosystem        |
 
-## 12. AI / agents
+## AI / agents
 
 | Specific                           | Carbon                                                                       | Todoist                       | OmniFocus | MS To Do             |
 | ---------------------------------- | ---------------------------------------------------------------------------- | ----------------------------- | --------- | -------------------- |
@@ -175,22 +154,22 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | Trigger agent by `@mention`/assign | ✓ (sync server)                                                              | ✗                             | ✗         | ✗                    |
 | Configurable agent prompt          | ✓ (sync server)                                                              | ✗                             | ✗         | ✗                    |
 
-## 13. Native platform integration, capture & maturity
+## Native platform integration, capture & maturity
 
 | Specific                                  | Carbon                                                     | Todoist                       | OmniFocus                           | MS To Do                 |
 | ----------------------------------------- | ---------------------------------------------------------- | ----------------------------- | ----------------------------------- | ------------------------ |
-| Track record / maturity                   | Newer, actively developed, **Fully OSS**                   | Established, large team       | **Mature, GTD Gold Standard**       | Microsoft-backed         |
+| Track record / maturity                   | Newer, actively developed, **Fully OSS**                   | Established, large team       | Established       | Microsoft-backed         |
 | Native apps                               | Web, PWA, **Linux**, Win, Android (macOS / iOS planned) | ✓ Web, Win, Mac, Android, iOS | ✓ **native** Mac, iOS + limited web | ✓ Win, Mac, Android, iOS |
-| Apple Watch / wearable                    | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
-| Home-screen **widgets**                   | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
-| **Gemini / Siri / Shortcuts / voice**     | ✗ (not in current build)                                   | ✓                             | ✓ deep                              | ✓ (Cortana/Copilot)      |
-| OS **share sheet** capture                | ✗ (not in current build)                                   | ✓                             | ✓                                   | ✓                        |
+| Apple Watch / wearable                    | ✗                                   | ✓                             | ✓                                   | ✓                        |
+| Home-screen **widgets**                   | ✗                                   | ✓                             | ✓                                   | ✓                        |
+| **Gemini / Siri / Shortcuts / voice**     | ✗                                   | ✓                             | ✓ deep                              | ✓ (Cortana/Copilot)      |
+| OS **share sheet** capture                | ✗                                   | ✓                             | ✓                                   | ✓                        |
 | System-wide **quick capture** hotkey      | ✓ **desktop** `Ctrl+Shift+A`                               | ✓                             | ✓ (Quick Entry)                     | Partial                  |
 | Background reminders **without a server** | ✓ (foreground in web/PWA; background in native apps)       | ✓                             | ✓                                   | ✓                        |
 | Notification reliability                  | Web Push (sync server) / foreground scan / OS-level in app | ✓ OS-level                    | ✓ OS-level                          | ✓ OS-level               |
 | Scripting options                         | ✓ REST + agents (sync server)                              | Integrations                  | ✓ Omni Automation                   | Power Automate           |
 
-## 14. Customization, onboarding & editing
+## Customization, onboarding & editing
 
 | Specific                                                                                              | Carbon                                                                | Todoist              | OmniFocus         | MS To Do |
 | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------- | ----------------- | -------- |
@@ -201,59 +180,10 @@ fast-moving cloud apps, so verify any single dealbreaker against current docs.
 | **Undo / redo**                                                                                       | ✓ multi-level session stack (`Ctrl/⌘+Z` / `Ctrl/⌘+Shift+Z`) + buttons | ✓ recent-action undo | ✓ full undo/redo  | Partial  |
 | **Sync UI settings & saved views across devices**                                                     | ✓ optional, on by default; pulled on first sign-in (sync server)      | ✓                    | ✓                 | ✓        |
 
-## 15. Pricing & availability
+## Pricing & availability
 
 | Specific           | Carbon                                | Todoist                            | OmniFocus                  | MS To Do  |
 | ------------------ | ------------------------------------- | ---------------------------------- | -------------------------- | --------- |
-| Cost               | **Free / self-hosted**; optional hosted sync priced for **cost recovery** (not a premium tier) | Free + Pro + Business              | Paid (one-time/sub)        | **Free**  |
+| Cost               | Free self-hosting; optional paid hosting | Free + Pro + Business              | Paid (one-time/sub)        | **Free**  |
 | Paywalled features | **None**                              | Reminders/filters/comments/uploads | Custom perspectives, Focus | **None**  |
 | Vendor lock-in     | **None**, Fully OSS, Markdown Export  | Cloud                              | Omni ecosystem             | Microsoft |
-
----
-
-## Where Carbon falls short
-
-The honest list of what you give up by choosing Carbon today.
-
-**Against mature native incumbents (especially OmniFocus):**
-
-- **Native depth is still behind.** Carbon has desktop + Android shells and a strong web app, but
-  no iOS release yet, no Watch app, no mobile widgets, and no Siri/Shortcuts-grade integration.
-- **Forecast is task-centric.** Carbon syncs calendars via CalDAV, but does not currently overlay
-  external calendar events directly inside Forecast.
-- **Saved views are powerful but not fully "Omni-grade".** Carbon has advanced nested filters,
-  but not arbitrary custom grouping/sorting rules per perspective.
-- **Reliability history is younger.** Carbon is actively developed, but it has not yet had the
-  same multi-year enterprise-scale proof as older commercial products.
-
-**Against Todoist and Microsoft To Do specifically:**
-
-- **Ecosystem breadth.** Carbon offers API + agent-driven integrations, but does not have a large
-  one-click marketplace footprint like incumbent SaaS products.
-- **Discoverability is still limited.** External distribution is catching up to mature
-  incumbents (Google Play rollout underway), so Carbon is simply harder to find than the
-  big-brand apps.
-- **Polished platform extras.** Mobile widgets, share-sheet capture, and voice-assistant flows are
-  still weaker than mainstream consumer task apps.
-- **Brand/support expectations.** Carbon is open-source and self-host friendly, but some teams will
-  still prefer a large vendor's support model and market longevity.
-
-## Where Carbon holds its own
-
-Carbon's strongest differentiators, based on what is implemented in this repository today:
-
-- **Ownership-first architecture:** offline-first local database, self-hostable sync, full export/import, open source.
-- **GTD-heavy model without lock-in:** deep hierarchy, defer + due + reminders, recurrence, review workflows, dependencies.
-- **Built-in execution tooling:** deep time tracking (merge/split/segment edit, time notes,
-  optional GPS tracks), estimates, daily planning budget, and review surfaces in one product.
-- **Unusually strong time-accountability story:** true task-level tracking designed for practical
-  timesheet and invoicing workflows, not just personal pomodoro-style timers.
-- **First-class notes:** dedicated note items alongside tasks, convertible either way, with
-  notes projects, card rows + thumbnails, recipe mode, rich Markdown editing and zip export.
-- **Automation-first integration posture:** scoped REST API, `/api/agent/*`, Telegram bot path, Home Assistant, CalDAV.
-- **Configurable complexity:** Simple/Standard/Advanced presets plus per-feature/per-device visibility.
-- **Security stance is explicit, not accidental:** Carbon favors a trusted self-host/server model
-  for features like CalDAV, LLM tooling, and sharing/federation, with mandatory sync 2FA; if you
-  require distrust-by-default cryptography, this is the wrong architecture by design.
-
-This section intentionally stays implementation-first: it describes what ships now, not roadmap promises.

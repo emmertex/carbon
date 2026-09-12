@@ -7,6 +7,9 @@ import { observeTs } from './crdt';
 import { getUnsyncedRecordOps } from './records';
 import {
   createItem,
+  setCompleted,
+  updateItem,
+  tagCounts,
   createTag,
   updateTag,
   moveTag,
@@ -232,4 +235,23 @@ test('deleting a tag after observing its creation wins, even against a fast-cloc
   const tombstone = getUnsyncedRecordOps(dbB).find((o) => o.entity === 'tag')!;
   ingestRecordOps(dbA, [tombstone], true);
   assert.ok(!listTags(dbA).some((t) => t.name === 'Waiting'), 'delete wins on A too');
+});
+
+test('tag counts exclude completed and deleted items and removed links', () => {
+  const db = openMemoryDb();
+  const tag = createTag(db, DEV, 'Work');
+  const tasks = ['open', 'completed', 'deleted', 'unlinked'].map((title) => {
+    const task = createItem(db, DEV, { title });
+    setItemTags(db, DEV, task.id, [tag.id]);
+    return task;
+  });
+  assert.equal(tagCounts(db)[tag.id], 4);
+  setCompleted(db, DEV, tasks[1]!.id, true);
+  updateItem(db, DEV, tasks[2]!.id, { deleted: true });
+  setItemTags(db, DEV, tasks[3]!.id, []);
+  assert.equal(tagCounts(db)[tag.id], 1);
+  setCompleted(db, DEV, tasks[0]!.id, true);
+  assert.equal(tagCounts(db)[tag.id] ?? 0, 0);
+  setCompleted(db, DEV, tasks[1]!.id, false);
+  assert.equal(tagCounts(db)[tag.id], 1);
 });

@@ -1,13 +1,6 @@
-# Carbon ↔ Home Assistant
+# Home Assistant
 
-Carbon keeps the **sensing in Home Assistant** and lets HA push triggers to Carbon over a
-simple REST API. With it you can turn any HA event into a task, get **location reminders**
-that fire when you arrive somewhere (HA does the geofencing your phone browser can't), and
-do it for **everyone in the household** from a single HA token.
-
-This is a practical setup guide. The full REST reference is in [`api.md`](api.md).
-
----
+Use Home Assistant events to create tasks and report locations through the [REST API](api.md).
 
 ## 1. One-time setup
 
@@ -72,12 +65,10 @@ rest_command:
 > apostrophes won't break the JSON. After adding new `rest_command`s, **restart Home
 > Assistant** — a YAML reload doesn't pick them up.
 
----
 
 ## 2. Turn an HA event into a task
 
-The classic "low battery / device offline / leak detected → make me a task". Needs
-`inbox:write`.
+Requires `inbox:write`.
 
 ```yaml
 - alias: "Carbon: low battery task"
@@ -97,7 +88,6 @@ The classic "low battery / device offline / leak detected → make me a task". N
 like `defer_date` or reminders aren't set at creation — use `PATCH /api/tasks/:id` afterwards
 if you need those, see [`api.md`](api.md).)
 
----
 
 ## 3. Location reminders
 
@@ -110,7 +100,7 @@ use any combination, and let a place name geocode itself (§3e).
 ### 3a. Link your Carbon user to an HA person
 
 So Carbon knows whose tasks to check, map your Carbon account to your HA `person` entity:
-**Settings → HA person** while signed in (or see [§5](#5-multiple-people) for doing the whole
+**Settings → HA person** while signed in (or see [Multiple people](#4-multiple-people) for doing the whole
 household from one token).
 
 ### 3b. Zone-based (simple)
@@ -142,8 +132,7 @@ Carbon matches active tasks whose location **label** equals the zone name (case-
 whitespace-insensitive) and notifies the owner and assignees. Zone names map to task labels,
 so a task labelled `Home` fires when HA reports the `home` zone.
 
-> **Heads-up:** HA zone transitions can lag by a minute or more — fine for "remind me at the
-> shops", less so for time-critical reminders. For faster, use GPS below.
+
 
 ### 3c. GPS-based (faster, coordinate-matched)
 
@@ -155,9 +144,9 @@ label.
 ```yaml
 - alias: "Carbon: push GPS"
   triggers:
-    - trigger: state            # on every location update
+    - trigger: state            # Location update
       entity_id: person.you
-    - trigger: time_pattern     # plus a safety-net tick
+    - trigger: time_pattern     # Periodic location update
       minutes: "/2"
   action:
     - if: "{{ state_attr('person.you','latitude') is not none }}"
@@ -170,35 +159,27 @@ label.
             accuracy: "{{ state_attr('person.you','gps_accuracy') | default('', true) }}"
 ```
 
-Reminder cadence is as fast as HA reports the device's location (the HA Companion app, set to
-"always" location, is typically far quicker than a zone crossing).
+
 
 ### 3d. Per-device locations (no HA required)
 
-HA is only one location *source*. Each signed-in device can also report **its own** GPS fix:
-the browser/phone/desktop reports where it is, and every device on the account sees the
-others. In Carbon these appear as **toggleable source pills** in the location/Nearby view —
-the HA tracker, this device, and any other recently-seen device — and the freshest, most
-accurate active source wins. You can force a source on/off by tapping its pill, name this
-device under **Settings → This device**, and retire an old one from the device list (devices
-unseen for >24h age out automatically). This works with no Home Assistant at all; HA simply
-becomes one more (often the most reliable) source when present.
+Signed-in devices can report GPS independently of Home Assistant. Select location
+sources in Nearby; Carbon uses the freshest, most accurate enabled source. Name or
+retire devices in **Settings → This device**. Sources expire after 24 hours without updates.
 
-> Cross-user reports stay safe: a named `person` GPS report can only update that user's
-> single HA fix — it can never inject a named device pill into someone else's source list.
-> Only a device reporting *its own* location (the signed-in client) registers a named source.
+A named `person` report updates that user’s Home Assistant source. Only the signed-in
+device can register itself as a named device source.
 
 ### 3e. "Nearest place" reminders (geocoding)
 
 Beyond zones and fixed coordinates, a reminder can pin itself to the **nearest matching
 place**. Via a [natural-language command](usage-and-shortcuts.md#natural-language-commands)
-or the agent API ("remind me to get milk at Coles"), Carbon geocodes the place against your
+or the agent API ("remind me to get milk at Supermarket"), Carbon geocodes the place against your
 current location (OpenStreetMap Overpass/Nominatim by default) and stamps the closest match's
 coordinates onto the tag's geofence — no coordinates to look up. Geocoding is opt-in on
 multi-tenant hosts and on by default for single-tenant self-host; see the
 `CARBON_GEOCODE_*` knobs in `.env.example`.
 
----
 
 ## 4. Multiple people
 
@@ -239,28 +220,14 @@ report the whole household. Cover everyone in one automation by looping:
                   accuracy: "{{ state_attr(repeat.item,'gps_accuracy') | default('', true) }}"
 ```
 
----
 
-## 5. Two-way: Carbon as a queue for HA or an agent
+## 5. Read and update tasks
 
-To close the loop — HA (or an LLM agent) reads tasks, acts, and comments back — use the full
-REST API with a `tasks:read,tasks:write` token; see [`api.md`](api.md). For an **agentic**
-bot that reasons over a task and replies in its thread, use the personal API key workflow in [`api.md`](api.md).
-
----
+Use a token with `tasks:read` and `tasks:write` to read tasks and post updates or
+comments. See the [API guide](api.md).
 
 ## Reminders without Home Assistant
 
-No HA? Carbon's own server handles due/defer reminders: **Settings → Reminders → Enable push
+Carbon handles due/defer reminders: **Settings → Reminders → Enable push
 reminders** (needs an HTTPS server; it scans every minute and pushes to owner + assignees).
 Foreground-only geofencing (this device, while the app is open) is a toggle there too.
-
-## Notes & caveats
-
-- Push delivery and geofencing need a **real device + HTTPS** to work end-to-end.
-- The `geo`/`gps`/`ha-person` calls need `tasks:write`. Treat that token like a password —
-  it can write as its owning user. Keep it off any internet-exposed automation you don't
-  control.
-- Adding or changing a `rest_command` requires an HA **restart**, not just a reload.
-- Zone reminders match by **name**; GPS reminders match by **coordinates + radius**. A task
-  can have either or both.

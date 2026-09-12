@@ -22,6 +22,7 @@ import {
   consumeRecoveryCode,
   resetMfa,
   sendMfaEmailCode,
+  verifyMfaEmailCode,
   MfaEmailSendLimitError,
   MFA_EMAIL_SENDS_MAX,
   MFA_EMAIL_SEND_COOLDOWN_MS,
@@ -48,6 +49,28 @@ function currentTotp(secretBase32: string): string {
 }
 
 describe('MFA helpers', () => {
+  test('overlapping email requests send only one usable code', async (t) => {
+    const { db, addUser } = makeTestDb();
+    const { id } = addUser('overlap', 'pw');
+    const secret = createMfaChallenge(db, id, 'login');
+    const ch = validateMfaChallenge(db, secret)!;
+    const log = t.mock.method(console, 'log', () => {});
+    const results = await Promise.allSettled([
+      sendMfaEmailCode(db, ch.id, 'overlap@example.com'),
+      sendMfaEmailCode(db, ch.id, 'overlap@example.com'),
+    ]);
+    assert.equal(results[0].status, 'fulfilled');
+    assert.equal(results[1].status, 'rejected');
+    if (results[1].status === 'rejected') {
+      assert.ok(results[1].reason instanceof MfaEmailSendLimitError);
+    }
+    assert.equal(log.mock.callCount(), 1);
+    const code = String(log.mock.calls[0].arguments[0]).match(/\b\d{6}\b/)![0];
+    assert.deepEqual(verifyMfaEmailCode(db, ch.id, code), {
+      ok: true, email: 'overlap@example.com',
+    });
+  });
+
   test('email factor makes mfaReady', () => {
     const { db, addUser } = makeTestDb();
     const { id } = addUser('alice', 'pw');

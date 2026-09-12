@@ -4068,6 +4068,16 @@ host.get("/tenants/:id/usage", (c) => {
         "SELECT MAX(updated_at) AS m FROM items",
       )?.m ?? null)
     : null;
+  const lastSignIn = ctx
+    ? (ctx.db.get<{ m: string | null }>(
+        "SELECT MAX(created_at) AS m FROM sessions",
+      )?.m ?? null)
+    : null;
+  const taskCount = ctx
+    ? (ctx.db.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM items WHERE type = 'task'",
+      )?.n ?? 0)
+    : 0;
   let dbBytes = 0;
   try {
     dbBytes = statSync(rec.db_path).size;
@@ -4083,6 +4093,8 @@ host.get("/tenants/:id/usage", (c) => {
     maxUsers: effectiveMaxUsers(rec),
     dbBytes,
     lastActivity,
+    lastSignIn,
+    taskCount,
     blobBytes,
     blobQuota: effectiveBlobQuota(rec),
     dbQuota: effectiveDbQuota(rec),

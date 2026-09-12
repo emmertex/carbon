@@ -245,9 +245,6 @@ const SidebarRow = memo(function SidebarRow({
                 </span>
                 <span className="flex-1 truncate">{row.item.title || 'Folder'}</span>
               </button>
-              {row.open > 0 && (
-                <span className="text-xs tabular-nums text-text-faint">{row.open}</span>
-              )}
               <button
                 type="button"
                 onClick={() => onEditFolder(row.id)}
@@ -257,6 +254,9 @@ const SidebarRow = memo(function SidebarRow({
               >
                 <Pencil size={13} />
               </button>
+              {row.open > 0 && (
+                <span className="text-xs tabular-nums text-text-faint">{row.open}</span>
+              )}
             </div>
             {editing && <FolderEditor folder={row.item} onClose={onCloseEditor} />}
           </>

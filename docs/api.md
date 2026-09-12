@@ -1,4 +1,6 @@
-# Personal API keys
+# REST API
+
+## Personal API keys
 
 Create a key in Settings → Integrations → Personal API keys. Copy its secret once;
 only its hash is stored. Keys act as their owner with their current permissions.
@@ -34,23 +36,17 @@ After an uncertain create/comment response, inspect state before retrying: POSTs
 not promise idempotency. Rotate by creating a replacement, testing a read, updating
 your client, then revoking the old key. Never embed secrets in URLs or source code.
 
----
 
-# Carbon REST API guide
+## Integration tokens
 
-Carbon exposes a small REST API for integrations (Home Assistant, scripts, agents). It is
-the **same surface** that the AI-agent webhook flow calls back into — for the agent-specific
-trigger contract see [`carbon-agent-api.md`](carbon-agent-api.md); for Home Assistant
-recipes see [`home-assistant.md`](home-assistant.md).
-
-> Everything you write through the API becomes ordinary ops and **syncs to every client**
-> like any other edit.
+The routes below describe existing integration tokens and session access. Personal
+keys support only the task routes listed above. API writes sync to other clients.
 
 ## Base URL & multi-tenancy
 
 - **Single-tenant / self-host:** the base is your server origin, e.g.
-  `https://carbon.etx.sx`. All routes below are under `/api`.
-- **Multi-tenant hosting:** each workspace is a subdomain — `https://<tenant>.carbon.etx.sx`.
+  `https://carbon.example.com`. All routes below are under `/api`.
+- **Multi-tenant hosting:** each workspace is a subdomain — `https://<tenant>.carbon.example.com`.
   Use the tenant subdomain as the base; the API is identical per tenant.
 
 ## Authentication
@@ -197,7 +193,7 @@ instead of creating a literal task. The server runs the chosen direct-LLM agent 
 token usage, and the new/changed items sync back. Configure it in **Settings → Natural-language
 commands**.
 
-Geocoding for "nearest Coles" is pluggable (OpenStreetMap by default) and configured with
+Geocoding for "nearest Supermarket" is pluggable (OpenStreetMap by default) and configured with
 `CARBON_GEOCODE_ENABLED` (on for single-tenant self-host, off under a base domain),
 `CARBON_NOMINATIM_URL`, `CARBON_OVERPASS_URL`, `CARBON_GEOCODE_UA`, `CARBON_GEOCODE_RADIUS_M`.
 
@@ -234,7 +230,7 @@ if omitted, the token's owning user is used. See [`home-assistant.md`](home-assi
 `expiresAt` is included **only when `locked` is true** (SPA RenewGate); unlocked workspaces
 do not disclose subscription end dates.
 
-## Admin & host-control (basic auth, admin only)
+## Administration
 
 - `/api/admin/users` (CRUD), `/api/admin/tokens` (CRUD), `/api/admin/agents` (CRUD + `/test`).
 - `/api/billing` (GET status + plans) and `/api/billing/subscribe` (POST `{planId, cardToken,

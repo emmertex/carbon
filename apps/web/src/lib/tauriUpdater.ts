@@ -2,7 +2,7 @@
 // build, via tauri-plugin-updater. The plugin checks the endpoint configured
 // in tauri.conf.json (a `latest.json` published alongside each GitHub release)
 // and verifies the downloaded bundle against the signing key baked into that
-// config before installing — see docs/RELEASING.md for the signing setup.
+// config before installing.
 //
 // Dynamically imported so the plain web/Capacitor builds never pull in Tauri's
 // JS bindings (mirrors the pattern in notify.ts for plugin-notification).

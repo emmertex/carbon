@@ -1,12 +1,17 @@
-# External webhook clients and built-in AI
+# AI agents and webhooks
 
-Generic external webhooks remain supported. In Settings → AI agents, choose External
-webhook, set its endpoint and optional shared secret, then create a scoped personal key under Settings → Personal API keys.
-Carbon posts task triggers to that endpoint. Your client uses that key to read tasks and post replies/completions through the
-REST API. Select the projects it needs and an expiry. Keep the secret out of logs.
-Direct-model providers remain OpenAI-compatible and Anthropic.
+## Direct models
 
-For external clients acting as a human user, [personal API keys](api.md) offer expiry
-and project subtree restrictions. Generic webhook bot integration keys retain their
-existing task/agent route contract and assignment rules. Revoke unused keys in admin.
-The Hermes-specific scripts and setup have been removed; the webhook protocol remains.
+In **Settings → AI agents**, configure an OpenAI-compatible or Anthropic provider
+with its endpoint, model and API key. Assign a task to the agent or mention it in a
+comment to trigger a response.
+
+## External webhooks
+
+Choose **External webhook** and set an endpoint and optional shared secret.
+Carbon posts task triggers to that endpoint. The client uses a scoped key to read
+tasks and post comments or completions through the [REST API](api.md).
+
+Personal keys support expiry and project subtree restrictions. Existing bot
+integration keys retain their task and agent routes and assignment restrictions.
+Revoke unused keys in Settings.

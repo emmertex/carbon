@@ -1,11 +1,7 @@
-# Open Source Projects Used
+# Open-source dependencies
 
-Carbon is built on the work of the open-source community. This page lists every direct
-library, tool, and project Carbon depends on to build and run, grouped by where it's used.
-Thank you to all the maintainers and contributors behind these projects. 🙏
-
-> This lists Carbon's **direct** dependencies. Each of these in turn stands on many more
-> transitive dependencies — the full tree lives in `package-lock.json` and `Cargo.lock`.
+Direct dependencies are listed below. Full dependency trees are in `package-lock.json`
+and `Cargo.lock`.
 
 ## Runtime & language
 
@@ -103,6 +99,5 @@ These are open-source projects Carbon calls at runtime as external services (not
   The public endpoint (`https://overpass-api.de/api/interpreter`) is used by default; self-hosted
   instances are supported via `CARBON_OVERPASS_URL`.
 
----
 
 *Carbon is developed by [Emmertex P/L](https://emmertex.com).*

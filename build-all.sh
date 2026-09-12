@@ -16,7 +16,7 @@
 # Android ships in two flavors (see apps/mobile/android/app/build.gradle):
 #   sideload  — full feature set, distributed via GitHub Releases (default).
 #   playstore — Google Play variant (no background location). Build it with
-#               `playstore`, which collects Carbon_<version>_playstore_android.aab/.apk.
+#               `playstore`, which collects Carbon_<version>_android_playstore.aab/.apk.
 #
 # Usage:
 #   ./build-all.sh                 # build everything for this OS (Android = debug)
@@ -103,40 +103,8 @@ if [[ "$DO_ANDROID" == 1 && "$OS" != "windows" ]]; then
     echo "==> Building Android ($ANDROID_MODE)"
     "$REPO_ROOT/apps/mobile/build-android.sh" "$ANDROID_MODE"
 
-    # Map mode -> (flavor, build type) for AGP's flavor-qualified output dirs.
-    case "$ANDROID_MODE" in
-      debug|install) AFLAVOR="sideload";  ABT="Debug" ;;
-      release)       AFLAVOR="sideload";  ABT="Release" ;;
-      playstore)     AFLAVOR="playstore"; ABT="Release" ;;
-    esac
-    AVARIANT="${AFLAVOR}${ABT}"
-    ABTL="$(echo "$ABT" | tr '[:upper:]' '[:lower:]')"
-    APK_SRC="$REPO_ROOT/apps/mobile/android/app/build/outputs/apk/$AVARIANT"
+    # build-android.sh verifies and collects both APK and AAB into release/.
 
-    # Suffix Play artifacts so they don't collide with the sideload ones.
-    SUFFIX="$([[ "$AFLAVOR" == "playstore" ]] && echo "_playstore" || echo "")"
-
-    APK_FILE="$(ls -t "$APK_SRC"/*.apk 2>/dev/null | head -n1 || true)"
-    if [[ -n "$APK_FILE" ]]; then
-      DEST="$RELEASE_DIR/Carbon_${VERSION}${SUFFIX}_android.apk"
-      cp -f "$APK_FILE" "$DEST"
-      echo "    + apk: $(basename "$DEST")"
-    else
-      echo "    ! apk: no APK found in $APK_SRC"
-    fi
-
-    # Release builds also produce the signed AAB. Sideload AAB = GitHub-release
-    # upload; Play AAB = Google Play upload (distinct name so both can coexist).
-    if [[ "$ANDROID_MODE" == "release" || "$ANDROID_MODE" == "playstore" ]]; then
-      AAB_FILE="$REPO_ROOT/apps/mobile/android/app/build/outputs/bundle/$AVARIANT/app-${AFLAVOR}-${ABTL}.aab"
-      if [[ -f "$AAB_FILE" ]]; then
-        DEST="$RELEASE_DIR/Carbon_${VERSION}${SUFFIX}_android.aab"
-        cp -f "$AAB_FILE" "$DEST"
-        echo "    + aab: $(basename "$DEST")"
-      else
-        echo "    ! aab: no AAB found at $AAB_FILE"
-      fi
-    fi
   else
     echo "==> Skipping Android (apps/mobile/build-android.sh not executable/found)"
   fi

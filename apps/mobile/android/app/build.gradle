@@ -18,7 +18,7 @@ if (keystorePropertiesFile.exists()) {
 // keystore, kept deliberately separate from the Play Store upload key in
 // keystore.properties — Android refuses to install an update whose signature
 // doesn't match the previously-installed one, so each distribution channel
-// needs a stable key of its own. See docs/RELEASING.md.
+// needs a stable key of its own.
 def ciKeystorePath = System.getenv("CARBON_ANDROID_KEYSTORE_PATH")
 
 

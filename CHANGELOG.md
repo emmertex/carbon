@@ -1,9 +1,39 @@
 # Changelog
 
-Release notes for Carbon. The release pipeline extracts the section whose heading
-starts with the pushed tag (e.g. `## v1.0.0`) and uses it verbatim as both the
+## v1.0.0`) and uses it verbatim as both the
 GitHub Release body and the public mirror commit message — so keep each heading's
 first token equal to the tag. See [docs/RELEASING.md](docs/RELEASING.md).
+
+## v1.2.0
+**Guided project reviews**
+
+- **Review one project at a time** — projects due for review now open in a guided
+  session with project progress and an open-task count. Return to the review list
+  to choose a different project.
+- **Five-point checklist** — check task relevance, new tasks to add, tasks to
+  complete or drop, project status, and the next concrete action before marking
+  a project reviewed.
+- **Deep Dive into Tasks** — step through a project's open tasks, read their notes,
+  and complete, drop, or skip each task. Return to the checklist when ready.
+- **Session completion** — marking a project reviewed advances to the next due
+  project. After the last project, a completion screen shows how many you reviewed.
+
+**Sidebar polish**
+
+- Folder task counts now align with the counts on project rows.
+- Tag counts exclude completed items and update when tasks are completed or reopened.
+- Single Action projects now use a checklist icon, distinct from Sequential projects.
+
+## v1.1.4
+**Note Editor**
+- On all platforms other than Android, images could not be added inline (fixed)
+- Note editor overlap and whitespace fixed
+**Server Side Fix**
+- Server translates older database formats for client version.
+- CORS fixes
+
+// Web and Server Update Only //
+
 
 ## v1.1.3
 **Clean up for public launch, bump library versions**

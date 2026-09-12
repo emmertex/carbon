@@ -35,9 +35,15 @@ export interface TenantUsage {
   maxUsers: number;
   dbBytes: number;
   lastActivity: string | null;
+  /** Most recent user sign-in (from the sessions table). Null if never signed in. */
+  lastSignIn: string | null;
+  /** Number of tasks in the workspace. */
+  taskCount: number;
   blobBytes: number;
   /** Effective blob quota in bytes (0 = unlimited). */
   blobQuota: number;
+  /** Effective database quota in bytes (0 = unlimited). */
+  dbQuota: number;
 }
 
 export interface SignupResult {
