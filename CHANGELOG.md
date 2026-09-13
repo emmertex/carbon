@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.3
+**Android display and release optimization**
+
+- Added backward-compatible edge-to-edge support and updated system-bar,
+  display-cutout, and keyboard inset handling.
+- Removed the unused Cordova system-bar plugin from optimized releases to
+  eliminate its deprecated navigation-bar color API usage.
+- Enabled release code optimization, obfuscation, and resource shrinking.
+- Preserved the background geolocation service package name to prevent a
+  startup crash in optimized Play Store builds.
+- Added a build check to prevent the unused Cordova system-bar plugin from
+  returning, plus a release verification checklist.
+
 ## v1.2.1
 **Login Issues**
 - Improved login error messages for Tauri Apps

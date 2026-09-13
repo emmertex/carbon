@@ -18,6 +18,10 @@ const config: CapacitorConfig = {
     useLegacyBridge: true,
   },
   plugins: {
+    // MainActivity owns system-bar, cutout and keyboard padding.
+    SystemBars: {
+      insetsHandling: 'disable',
+    },
     PushNotifications: {
       presentationOptions: ['badge', 'sound', 'alert'],
     },

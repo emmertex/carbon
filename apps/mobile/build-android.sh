@@ -92,6 +92,17 @@ build_variant() {
       return 1
     fi
   done
+  # Capgo reads this class's package while loading the plugin in both flavors.
+  # Check the actual R8 output: moving it to the unnamed package crashes startup.
+  if [[ "$bt" == "Release" ]]; then
+    local service_class="com.capgo.capacitor_background_geolocation.BackgroundGeolocationService"
+    local mapping_file="$OUT_BASE/mapping/$variant/mapping.txt"
+    if ! grep -Fqx "$service_class -> $service_class:" "$mapping_file"; then
+      echo "Unsafe R8 output: background geolocation service package was not preserved" >&2
+      return 1
+    fi
+  fi
+
   mkdir -p "$RELEASE_DIR"
   cp "$apk_file" "$RELEASE_DIR/$name.apk"
   cp "$aab_file" "$RELEASE_DIR/$name.aab"
