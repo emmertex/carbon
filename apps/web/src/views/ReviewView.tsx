@@ -1,411 +1,683 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Check, ChevronLeft, ListTodo, SkipForward } from 'lucide-react';
+import { useState, useEffect, useRef } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Check, CircleCheck, ExternalLink, X } from "lucide-react";
 import {
   getProjects,
-  getChildren,
   needsReview,
   markReviewed,
   updateItem,
-  setCompleted,
-} from '@carbon/core';
-import { useQuery } from '@/hooks/useQuery';
-import { mutate } from '@/lib/mutate';
-import { cn } from '@/lib/cn';
+  readReviewEntries,
+  writeReviewEntry,
+  startReview,
+  hasReviewProgress,
+  reviewChanges,
+  reviewItems,
+  type Item,
+} from "@carbon/core";
+import { useQuery } from "@/hooks/useQuery";
+import { flushPersist } from "@/lib/db";
+import { completeTask } from "@/lib/taskActions";
+import { mutate } from "@/lib/mutate";
+import { useStore } from "@/lib/store";
+import { identityKey } from "@/lib/identity";
+import { fromDateInput } from "@/lib/date";
+import { readReviewProgress, reviewProgressKey } from "@/lib/review-progress";
+import { enrichItems } from "@/lib/enrich";
+import { createFromQuickAdd } from "@/lib/quickadd";
+import { TaskRow } from "@/components/TaskRow";
+import { QuickAdd } from "@/components/QuickAdd";
+import { Markdown } from "@/components/Markdown";
+import { ProjectGlyph } from "@/components/ProjectGlyph";
+import { cn } from "@/lib/cn";
 
-interface ReviewSession {
-  projects: string[];
-  currentIndex: number;
-  completedProjectIds: Set<string>;
-}
-
-interface ProjectChecklist {
-  tasksRelevant: boolean;
-  newTasksNeeded: boolean;
-  completeOrDrop: boolean;
-  statusCorrect: boolean;
-  nextActionIdentified: boolean;
-}
-
-const INITIAL_CHECKLIST: ProjectChecklist = {
-  tasksRelevant: false,
-  newTasksNeeded: false,
-  completeOrDrop: false,
-  statusCorrect: false,
-  nextActionIdentified: false,
-};
+const button =
+  "inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50";
+const questions = [
+  ["tasksRelevant", "Are these tasks still relevant?"],
+  ["newTasksNeeded", "Is anything missing?"],
+  ["completeOrDrop", "Is anything ready to complete or drop?"],
+  ["statusCorrect", "Does the project status still fit?"],
+  ["nextActionIdentified", "Is the next action clear?"],
+];
 
 export function ReviewView() {
-  const [session, setSession] = useState<ReviewSession | null>(null);
-  const [checklist, setChecklist] = useState<ProjectChecklist>(INITIAL_CHECKLIST);
-  const [showList, setShowList] = useState(false);
-  const [deepDive, setDeepDive] = useState(false);
-  const [taskIndex, setTaskIndex] = useState(0);
-
-  // All projects due for review
-  const reviewProjects = useQuery((db) =>
-    getProjects(db).filter((p) => needsReview(p)),
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selected = searchParams.get("project");
+  const user = useStore((s) => s.currentUser?.id ?? "local");
+  const projects = useQuery(
+    (db) =>
+      getProjects(db)
+        .filter((p) => needsReview(p) || p.id === selected)
+        .map((project) => {
+          const entries = readReviewEntries(db, user, project);
+          const tasks = reviewItems(db, project).filter(
+            (item) => item.type === "task" && item.status === "active",
+          );
+          return {
+            project,
+            started: hasReviewProgress(entries),
+            total: tasks.length,
+            reviewed: tasks.filter(
+              (task) => entries[`task:${task.id}`]?.checked === true,
+            ).length,
+          };
+        }),
+    [user, selected],
   );
-
-  // Load tasks for both the checklist count and deep-dive mode.
-  const currentProjectId = session?.projects[session.currentIndex] ?? null;
-  const currentTasks = useQuery(
-    (db) => {
-      if (!currentProjectId) return [];
-      return getChildren(db, currentProjectId).filter((t) => t.status === 'active');
-    },
-    [currentProjectId],
-  );
-
-  // Initialize review session when projects are loaded
-  useEffect(() => {
-    if (reviewProjects && reviewProjects.length > 0 && !session && !showList) {
-      setSession({
-        projects: reviewProjects.map((p) => p.id),
-        currentIndex: 0,
-        completedProjectIds: new Set(),
-      });
-    }
-  }, [reviewProjects, session, showList]);
-
-  const currentProject = currentProjectId
-    ? reviewProjects?.find((p) => p.id === currentProjectId) ?? null
-    : null;
-
-  const resetChecklist = useCallback(() => {
-    setChecklist(INITIAL_CHECKLIST);
-  }, []);
-
-  const reviewProject = useCallback(() => {
-    if (!currentProject) return;
-    mutate((db, dev) => markReviewed(db, dev, currentProject.id));
-
-    setSession((s) => {
-      if (!s) return s;
-      const nextIndex = s.currentIndex + 1;
-      return {
-        ...s,
-        currentIndex: nextIndex,
-        completedProjectIds: new Set([...s.completedProjectIds, currentProject.id]),
-      };
-    });
-    resetChecklist();
-    setDeepDive(false);
-    setTaskIndex(0);
-  }, [currentProject, resetChecklist]);
-
-  const enterDeepDive = useCallback(() => {
-    setDeepDive(true);
-    setTaskIndex(0);
-  }, []);
-
-  const exitDeepDive = useCallback(() => {
-    setDeepDive(false);
-    setTaskIndex(0);
-  }, []);
-
-  const handleTaskAction = useCallback((taskId: string, action: 'complete' | 'drop') => {
-    const remainingCount = mutate((db, dev) => {
-      if (action === 'complete') {
-        setCompleted(db, dev, taskId, true);
-      } else if (action === 'drop') {
-        updateItem(db, dev, taskId, { status: 'dropped' });
-      }
-      return currentProjectId
-        ? getChildren(db, currentProjectId).filter((t) => t.status === 'active')
-            .length
-        : 0;
-    });
-    setTaskIndex((i) => Math.max(0, Math.min(i, remainingCount - 1)));
-    if (remainingCount === 0) setDeepDive(false);
-  }, [currentProjectId]);
-
-  const skipTask = useCallback(() => {
-    setTaskIndex((i) => Math.min(i + 1, (currentTasks?.length ?? 0) - 1));
-  }, [currentTasks?.length]);
-
-  const allChecked = Object.values(checklist).every(Boolean);
-
-  // Done state
-  if (!session || session.currentIndex >= session.projects.length) {
-    if (session && session.currentIndex >= session.projects.length) {
-      return (
-        <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
-          <div className="rounded-xl border border-accent bg-accent/10 px-6 py-8 text-center">
-            <Check size={48} className="mx-auto text-accent" />
-            <h1 className="mt-4 text-2xl font-bold">Review Complete</h1>
-            <p className="mt-2 text-text-muted">
-              You've reviewed all {session.completedProjectIds.size} projects due
-              for review.
-            </p>
-          </div>
-        </div>
-      );
-    }
-    return (
-      <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
-        <div className="mb-4">
-          <h1 className="text-2xl font-bold tracking-tight">Review</h1>
-          <p className="mt-0.5 text-sm text-text-muted">
-            Keep projects honest. Set a review interval in a project's details.
+  const [completed, setCompleted] = useState(0);
+  const current =
+    projects?.find(({ project }) => project.id === selected) ?? projects?.[0];
+  function choose(id: string) {
+    setSearchParams({ project: id }, { replace: true });
+    useStore.getState().select(null);
+  }
+  return (
+    <div className="@container mx-auto max-w-6xl px-4 py-6 sm:px-6">
+      <header className="mb-5">
+        <h1 className="text-2xl font-bold tracking-tight">Review</h1>
+        <p className="mt-1 text-sm text-text-muted">
+          A little space to check your projects and decide what comes next.
+        </p>
+      </header>
+      {!projects ? (
+        <p className="text-sm text-text-muted">Loading projects…</p>
+      ) : !current ? (
+        <div className="border-t border-border py-12 text-center">
+          <CircleCheck className="mx-auto mb-3 text-accent" size={28} />
+          <h2 className="font-semibold">
+            {completed ? "Review complete" : "You’re up to date"}
+          </h2>
+          <p className="mt-1 text-sm text-text-muted">
+            Nothing to review right now.
           </p>
         </div>
-        {reviewProjects && reviewProjects.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {reviewProjects.map((project) => (
+      ) : (
+        <div className="grid items-start gap-6 @min-[800px]:grid-cols-[180px_minmax(0,1fr)]">
+          <nav
+            aria-label="Projects to review"
+            className="hidden space-y-1 @min-[800px]:block"
+          >
+            <p className="mb-2 px-2 text-xs font-medium text-text-muted">
+              Projects to review · {projects.length}
+            </p>
+            {projects.map(({ project, started, total, reviewed }) => (
               <button
                 key={project.id}
-                onClick={() => {
-                  setSession({
-                    projects: [
-                      project.id,
-                      ...reviewProjects
-                        .filter((p) => p.id !== project.id)
-                        .map((p) => p.id),
-                    ],
-                    currentIndex: 0,
-                    completedProjectIds: new Set(),
-                  });
-                  resetChecklist();
-                  setDeepDive(false);
-                  setTaskIndex(0);
-                  setShowList(false);
-                }}
-                className="rounded-xl border border-border bg-surface px-4 py-3 text-left font-medium hover:text-accent"
+                aria-current={
+                  project.id === current.project.id ? "page" : undefined
+                }
+                onClick={() => choose(project.id)}
+                className={cn(
+                  "w-full rounded-md px-2 py-2 text-left hover:bg-surface-2",
+                  project.id === current.project.id && "bg-accent-soft",
+                )}
               >
-                {project.title || 'Untitled project'}
+                <span className="flex items-center gap-2">
+                  <ProjectGlyph
+                    mode={project.order_mode}
+                    color={project.color}
+                    size={15}
+                  />
+                  <span className="truncate text-sm font-medium">
+                    {project.title || "Untitled project"}
+                  </span>
+                </span>
+                <span className="mt-1 block text-xs text-text-muted">
+                  {started ? "In progress" : "Not started"} · {reviewed}/{total}{" "}
+                  reviewed
+                </span>
+                <span className="mt-2 block h-1 overflow-hidden rounded bg-surface-3">
+                  <span
+                    className="block h-full bg-accent"
+                    style={{
+                      width: `${total ? (reviewed / total) * 100 : 0}%`,
+                    }}
+                  />
+                </span>
               </button>
             ))}
+          </nav>
+          <div className="min-w-0">
+            <label className="mb-4 block text-xs text-text-muted @min-[800px]:hidden">
+              Project to review
+              <select
+                aria-label="Project to review"
+                value={current.project.id}
+                onChange={(e) => choose(e.target.value)}
+                className="mt-1 block w-full rounded-md border border-border bg-surface px-2 py-2 text-sm text-text"
+              >
+                {projects.map(({ project, started }) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title || "Untitled project"}
+                    {started ? " · In progress" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <ProjectReview
+              key={`${user}:${current.project.id}:${current.project.reviewed_at}`}
+              project={current.project}
+              onFinishing={() => setSearchParams({}, { replace: true })}
+              onReviewed={() => {
+                setCompleted((n) => n + 1);
+              }}
+            />
           </div>
-        ) : (
-          <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-muted">
-            {reviewProjects ? 'Nothing to review right now.' : 'Loading projects…'}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // Task deep-dive mode
-  if (deepDive && currentProject && currentTasks && currentTasks.length > 0) {
-    const task = currentTasks[taskIndex];
-    if (task) {
-      return (
-        <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
-          <div className="mb-4">
-            <button
-              onClick={exitDeepDive}
-              className="flex items-center gap-1 text-sm text-text-muted hover:text-text"
-            >
-              <ChevronLeft size={14} /> Exit Deep Dive
-            </button>
-          </div>
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold">
-              Reviewing: {currentProject.title}
-            </h2>
-            <p className="mt-1 text-sm text-text-muted">
-              Task {taskIndex + 1} of {currentTasks.length}
-            </p>
-          </div>
-          <div className="rounded-xl border border-border bg-surface px-4 py-6">
-            <h3 className="font-medium">{task.title}</h3>
-            {task.note && (
-              <p className="mt-2 text-sm text-text-muted">{task.note}</p>
-            )}
-            <div className="mt-4">
-              <p className="text-sm font-medium text-text-muted">
-                What's the next step for this task?
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  onClick={() => handleTaskAction(task.id, 'complete')}
-                  className="flex items-center gap-1 rounded-lg border border-border bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
-                >
-                  <Check size={14} /> Complete
-                </button>
-                <button
-                  onClick={() => handleTaskAction(task.id, 'drop')}
-                  className="flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-sm font-medium text-text hover:bg-surface-3"
-                >
-                  Drop
-                </button>
-                <button
-                  onClick={skipTask}
-                  className="flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-3 py-1.5 text-sm font-medium text-text-muted hover:bg-surface-3"
-                >
-                  <SkipForward size={14} /> Skip
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-  }
-
-  // Project review checklist mode
-  return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
-      <div className="mb-4">
-        <button
-          onClick={() => {
-            setShowList(true);
-            setSession(null);
-            setDeepDive(false);
-            setTaskIndex(0);
-            resetChecklist();
-          }}
-          className="flex items-center gap-1 text-sm text-text-muted hover:text-text"
-        >
-          <ChevronLeft size={14} /> Back to Review List
-        </button>
-      </div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">
-          {currentProject?.title || 'Untitled Project'}
-        </h1>
-        <p className="mt-0.5 text-sm text-text-muted">
-          Project {session.currentIndex + 1} of {session.projects.length} ·{' '}
-          {currentTasks?.length ?? 0} open tasks
-        </p>
-      </div>
-
-      <div className="space-y-3">
-        <label className="flex items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          <input
-            type="checkbox"
-            checked={checklist.tasksRelevant}
-            onChange={(e) =>
-              setChecklist((c) => ({ ...c, tasksRelevant: e.target.checked }))
-            }
-            className="mt-1 h-4 w-4 rounded border-border accent-accent"
-          />
-          <span className="flex-1">
-            <span className="block text-sm font-medium">
-              All tasks still relevant?
-            </span>
-            <span className="block text-xs text-text-muted">
-              Are all the tasks in this project still needed, or have some become
-              obsolete?
-            </span>
-          </span>
-        </label>
-
-        <label className="flex items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          <input
-            type="checkbox"
-            checked={checklist.newTasksNeeded}
-            onChange={(e) =>
-              setChecklist((c) => ({ ...c, newTasksNeeded: e.target.checked }))
-            }
-            className="mt-1 h-4 w-4 rounded border-border accent-accent"
-          />
-          <span className="flex-1">
-            <span className="block text-sm font-medium">
-              Any new tasks to add?
-            </span>
-            <span className="block text-xs text-text-muted">
-              Has this project evolved to require new tasks?
-            </span>
-          </span>
-        </label>
-
-        <label className="flex items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          <input
-            type="checkbox"
-            checked={checklist.completeOrDrop}
-            onChange={(e) =>
-              setChecklist((c) => ({ ...c, completeOrDrop: e.target.checked }))
-            }
-            className="mt-1 h-4 w-4 rounded border-border accent-accent"
-          />
-          <span className="flex-1">
-            <span className="block text-sm font-medium">
-              Any tasks to complete or drop?
-            </span>
-            <span className="block text-xs text-text-muted">
-              Are any tasks ready to be marked complete or should be dropped?
-            </span>
-          </span>
-        </label>
-
-        <label className="flex items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          <input
-            type="checkbox"
-            checked={checklist.statusCorrect}
-            onChange={(e) =>
-              setChecklist((c) => ({ ...c, statusCorrect: e.target.checked }))
-            }
-            className="mt-1 h-4 w-4 rounded border-border accent-accent"
-          />
-          <span className="flex-1">
-            <span className="block text-sm font-medium">
-              Project status correct?
-            </span>
-            <span className="block text-xs text-text-muted">
-              Is this project still Active, or should it be On Hold or Dropped?
-            </span>
-          </span>
-        </label>
-
-        <label className="flex items-start gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          <input
-            type="checkbox"
-            checked={checklist.nextActionIdentified}
-            onChange={(e) =>
-              setChecklist((c) => ({ ...c, nextActionIdentified: e.target.checked }))
-            }
-            className="mt-1 h-4 w-4 rounded border-border accent-accent"
-          />
-          <span className="flex-1">
-            <span className="block text-sm font-medium">
-              Next action identified?
-            </span>
-            <span className="block text-xs text-text-muted">
-              Do you know the next concrete action to move this project forward?
-            </span>
-          </span>
-        </label>
-      </div>
-
-      <div className="mt-6 flex flex-wrap gap-3">
-        <button
-          onClick={enterDeepDive}
-          disabled={!(currentTasks && currentTasks.length > 0)}
-          className={cn(
-            'flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium',
-            !(currentTasks && currentTasks.length > 0)
-              ? 'cursor-not-allowed text-text-muted'
-              : 'bg-surface-2 text-text hover:bg-surface-3',
-          )}
-        >
-          <ListTodo size={14} />
-          Deep Dive into Tasks
-        </button>
-
-        <button
-          onClick={reviewProject}
-          disabled={!allChecked}
-          className={cn(
-            'flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium',
-            allChecked
-              ? 'bg-accent text-accent-fg hover:bg-accent-hover'
-              : 'cursor-not-allowed bg-surface-2 text-text-muted',
-          )}
-        >
-          <Check size={14} />
-          Mark as Reviewed
-          {!allChecked && (
-            <span className="ml-1 text-xs opacity-60">(complete checklist)</span>
-          )}
-        </button>
-      </div>
-
-      {allChecked && !deepDive && (
-        <div className="mt-4 rounded-lg border border-accent bg-accent/10 px-3 py-2 text-xs text-accent">
-          Checklist complete! You can now mark this project as reviewed.
         </div>
       )}
     </div>
+  );
+}
+
+function ProjectReview({
+  project,
+  onReviewed,
+  onFinishing,
+}: {
+  project: Item;
+  onReviewed: () => void;
+  onFinishing: () => void;
+}) {
+  const key = reviewProgressKey(
+    identityKey(),
+    project.id,
+    project.reviewed_at ?? project.created_at,
+  );
+  const user = useStore((s) => s.currentUser?.id ?? "local");
+  const savedEntries = useQuery(
+    (db) => readReviewEntries(db, user, project),
+    [user, project.id],
+  );
+  const reviewEntries = savedEntries ?? {};
+  const progress = {
+    checklist: Object.fromEntries(
+      Object.entries(reviewEntries)
+        .filter(([key]) => key.startsWith("check:"))
+        .map(([key, value]) => [key.slice(6), value.checked === true]),
+    ),
+    reviewedTaskIds: Object.entries(reviewEntries)
+      .filter(
+        ([key, value]) => key.startsWith("task:") && value.checked === true,
+      )
+      .map(([key]) => key.slice(5)),
+  };
+  const [saveError, setSaveError] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const saveSequence = useRef(0);
+  const migrating = useRef(false);
+  function persistProgress() {
+    const sequence = ++saveSequence.current;
+    setSaving(true);
+    return flushPersist().then(
+      () => {
+        if (sequence === saveSequence.current) {
+          setSaving(false);
+          setSaveError(false);
+        }
+      },
+      (error) => {
+        setSaving(false);
+        setSaveError(true);
+        throw error;
+      },
+    );
+  }
+  const [showSummary, setShowSummary] = useState(false);
+  useEffect(() => {
+    if (savedEntries === null || migrating.current) return;
+    try {
+      // Move the old device-local checkmarks into independent synced entries once.
+      const legacy = readReviewProgress(localStorage, key);
+      const hasLegacy =
+        Object.keys(legacy.checklist).length > 0 ||
+        legacy.reviewedTaskIds.length > 0;
+      if (!savedEntries.started || hasLegacy) {
+        migrating.current = true;
+        mutate((db, dev) => {
+          startReview(db, dev, user, project);
+          for (const [id, checked] of Object.entries(legacy.checklist))
+            if (!savedEntries[`check:${id}`])
+              writeReviewEntry(db, dev, user, project, `check:${id}`, {
+                checked,
+              });
+          for (const id of legacy.reviewedTaskIds)
+            if (!savedEntries[`task:${id}`])
+              writeReviewEntry(db, dev, user, project, `task:${id}`, {
+                checked: true,
+              });
+        });
+        void persistProgress()
+          .then(() => {
+            if (hasLegacy) localStorage.removeItem(key);
+          })
+          .catch(() => setSaveError(true))
+          .finally(() => {
+            migrating.current = false;
+          });
+      }
+    } catch {
+      migrating.current = false;
+      setSaveError(true);
+    }
+  }, [key, user, project, savedEntries]);
+  const changes = useQuery(
+    (db) => reviewChanges(db, project, readReviewEntries(db, user, project)),
+    [user, project.id],
+  );
+  function saveEntry(entryKey: string, value: Record<string, unknown>) {
+    try {
+      mutate((db, dev) =>
+        writeReviewEntry(db, dev, user, project, entryKey, value),
+      );
+      void persistProgress().catch(() => {});
+    } catch {
+      setSaveError(true);
+    }
+  }
+  const [onlyUnreviewed, setOnlyUnreviewed] = useState(false);
+  const [editor, setEditor] = useState<{
+    task: Item;
+    kind: "subtask" | "defer";
+  } | null>(null);
+  const [deferDate, setDeferDate] = useState("");
+  const tasks = useQuery(
+    (db) => {
+      const items = reviewItems(db, project);
+      const children = new Map<string, Item[]>();
+      for (const item of items) {
+        if (!item.parent_id) continue;
+        const siblings = children.get(item.parent_id) ?? [];
+        siblings.push(item);
+        children.set(item.parent_id, siblings);
+      }
+      const ordered: { item: Item; depth: number }[] = [];
+      const seen = new Set<string>();
+      function visit(parent: string, depth: number) {
+        if (seen.has(parent)) return;
+        seen.add(parent);
+        for (const item of children.get(parent) ?? []) {
+          if (item.type === "task" && item.status === "active")
+            ordered.push({ item, depth });
+          visit(item.id, depth + 1);
+        }
+      }
+      visit(project.id, 0);
+      return enrichItems(
+        db,
+        ordered.map(({ item }) => item),
+      ).map((data, index) => ({ data, depth: ordered[index]!.depth }));
+    },
+    [project.id],
+  );
+  const total = tasks?.length ?? 0;
+  const reviewedCount =
+    tasks?.filter(({ data }) => progress.reviewedTaskIds.includes(data.item.id))
+      .length ?? 0;
+  const remaining = total - reviewedCount;
+  const noTasks = tasks !== null && total === 0;
+  const summaryReady =
+    !!reviewEntries.started &&
+    Object.keys(reviewEntries).filter((key) => key.startsWith("baseline:"))
+      .length >= Number(reviewEntries.started.baselineCount ?? 0);
+  const canFinish =
+    tasks !== null &&
+    (!noTasks || progress.checklist.noTasks) &&
+    summaryReady &&
+    !saving &&
+    !saveError;
+  function openTask(task: Item) {
+    useStore.getState().select(task.id);
+    useStore.getState().openDetail();
+    saveEntry("cursor", { taskId: task.id });
+  }
+  function create(raw: string, parentId: string) {
+    mutate((db, dev) =>
+      createFromQuickAdd(db, dev, raw, {
+        parentId,
+        ownerId: user === "local" ? null : user,
+        type: "task",
+      }),
+    );
+    void persistProgress().catch(() => {});
+    setEditor(null);
+  }
+  const visible =
+    tasks?.filter(
+      ({ data }) =>
+        !onlyUnreviewed || !progress.reviewedTaskIds.includes(data.item.id),
+    ) ?? [];
+  return (
+    <section aria-label="Project review">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+        <div className="min-w-0 flex-1">
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
+            <ProjectGlyph
+              mode={project.order_mode}
+              color={project.color}
+              size={19}
+            />
+            <button
+              className="truncate text-left hover:text-accent"
+              onClick={() => openTask(project)}
+            >
+              {project.title || "Untitled project"}
+            </button>
+          </h2>
+          <p className="mt-1 text-xs text-text-muted">
+            {reviewedCount} of {total} open tasks reviewed{" "}
+            <span aria-hidden="true">·</span>{" "}
+            <span role="status">
+              {saving ? "Saving…" : saveError ? "Not saved" : "Saved"}
+            </span>
+          </p>
+        </div>
+        <button
+          className={cn(
+            button,
+            "bg-accent text-accent-fg hover:bg-accent-hover",
+          )}
+          onClick={() => setShowSummary(!showSummary)}
+          aria-expanded={showSummary}
+        >
+          Finish review
+        </button>
+      </div>
+      {saveError && (
+        <p role="alert" className="mt-3 text-sm text-red-500">
+          Progress could not be saved.{" "}
+          <button
+            className="underline"
+            onClick={() => void persistProgress().catch(() => {})}
+          >
+            Retry save
+          </button>
+        </p>
+      )}
+      {project.note && (
+        <Markdown className="my-3 text-sm text-text-muted">
+          {project.note}
+        </Markdown>
+      )}
+      {showSummary && (
+        <section
+          aria-label="Review summary"
+          className="my-4 rounded-lg border border-border bg-surface p-4"
+        >
+          <div className="flex justify-between gap-2">
+            <h3 className="text-sm font-semibold">Ready to finish?</h3>
+            <button
+              aria-label="Close summary"
+              onClick={() => setShowSummary(false)}
+              className="text-text-muted hover:text-text"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <p className="mt-2 text-sm text-text-muted">
+            {remaining
+              ? `${remaining} open ${remaining === 1 ? "task is" : "tasks are"} not marked reviewed. You can keep reviewing or finish now.`
+              : "All open tasks have been reviewed."}
+          </p>
+          {!summaryReady ? (
+            <p className="mt-2 text-sm text-text-muted">
+              Loading review summary…
+            </p>
+          ) : changes?.length ? (
+            <ul className="my-3 max-h-48 space-y-2 overflow-y-auto">
+              {changes.map((change) => (
+                <li key={change.id} className="text-sm">
+                  <span className="font-medium">
+                    {change.title || "Untitled task"}
+                  </span>
+                  <span className="block text-xs text-text-muted">
+                    {change.changes.join(" · ")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="my-3 text-xs text-text-muted">
+              No task or project changes during this review.
+            </p>
+          )}
+          <p className="mb-3 text-xs text-text-muted">
+            Changes are already saved. Finishing starts the next review
+            interval.
+          </p>
+          {noTasks && !progress.checklist.noTasks && (
+            <p className="mb-3 text-xs text-text-muted">
+              Confirm below that there are no tasks before finishing.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button className={button} onClick={() => setShowSummary(false)}>
+              Keep reviewing
+            </button>
+            <button
+              className={cn(button, "text-accent")}
+              disabled={!canFinish}
+              onClick={() => {
+                // Release an explicitly opened project before its next review cycle begins.
+                onFinishing();
+                mutate((db, dev) => markReviewed(db, dev, project.id));
+                void persistProgress()
+                  .then(onReviewed)
+                  .catch(() => {});
+              }}
+            >
+              <Check size={14} />
+              Confirm review
+            </button>
+          </div>
+        </section>
+      )}
+      {!noTasks && (
+        <details className="border-b border-border py-3">
+          <summary className="cursor-pointer text-sm text-text-muted hover:text-text">
+            Review prompts{" "}
+            <span className="text-xs text-text-faint">· optional</span>
+          </summary>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {questions.map(([id, label]) => (
+              <label
+                key={id}
+                className="flex items-center gap-2 text-xs text-text-muted"
+              >
+                <input
+                  type="checkbox"
+                  checked={!!progress.checklist[id]}
+                  onChange={(e) =>
+                    saveEntry(`check:${id}`, { checked: e.target.checked })
+                  }
+                  className="accent-accent"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </details>
+      )}
+      {noTasks ? (
+        <div className="py-10 text-center">
+          <p className="mb-4 text-sm text-text-muted">
+            No open tasks in this project.
+          </p>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={!!progress.checklist.noTasks}
+              onChange={(e) =>
+                saveEntry("check:noTasks", { checked: e.target.checked })
+              }
+              className="accent-accent"
+            />
+            Confirm there are no tasks
+          </label>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2 py-3 text-xs text-text-muted">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={onlyUnreviewed}
+                onChange={(e) => setOnlyUnreviewed(e.target.checked)}
+                className="accent-accent"
+              />
+              Not reviewed only
+            </label>
+            <span>Reviewed</span>
+          </div>
+          <div className="divide-y divide-border">
+            {visible.map(({ data, depth }) => {
+              const task = data.item;
+              const checked = progress.reviewedTaskIds.includes(task.id);
+              return (
+                <div
+                  key={task.id}
+                  data-testid="review-row"
+                  className="grid grid-cols-[minmax(0,1fr)_80px] items-start gap-1 py-1"
+                >
+                  <div className="min-w-0">
+                    <TaskRow
+                      {...data}
+                      indent={depth}
+                      showProject={false}
+                      onActivate={() => openTask(task)}
+                      titleSlot={
+                        <button
+                          className="text-left"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openTask(task);
+                          }}
+                        >
+                          {task.title || "Untitled task"}
+                        </button>
+                      }
+                      onComplete={() => {
+                        completeTask(task, true);
+                        saveEntry(`task:${task.id}`, { checked: true });
+                      }}
+                      extraActions={[
+                        {
+                          label: "Add subtask",
+                          onSelect: () => setEditor({ task, kind: "subtask" }),
+                        },
+                        {
+                          label: "Defer…",
+                          onSelect: () => {
+                            setDeferDate(task.defer_date?.slice(0, 10) ?? "");
+                            setEditor({ task, kind: "defer" });
+                          },
+                        },
+                        {
+                          label: "Drop task",
+                          onSelect: () => {
+                            mutate((db, dev) =>
+                              updateItem(db, dev, task.id, {
+                                status: "dropped",
+                              }),
+                            );
+                            saveEntry(`task:${task.id}`, { checked: true });
+                          },
+                        },
+                      ]}
+                    />
+                    {depth === 0 && task.note && (
+                      <Markdown className="mx-3 mb-2 max-h-24 overflow-hidden text-sm text-text-muted">
+                        {task.note}
+                      </Markdown>
+                    )}
+                    {editor?.task.id === task.id && (
+                      <div className="mx-3 my-2 rounded-md bg-surface-2 p-3">
+                        <div className="mb-2 flex justify-between text-xs text-text-muted">
+                          <span>
+                            {editor.kind === "subtask"
+                              ? "Add subtask"
+                              : "Defer task"}
+                          </span>
+                          <button
+                            aria-label="Cancel task action"
+                            onClick={() => setEditor(null)}
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                        {editor.kind === "subtask" ? (
+                          <QuickAdd
+                            key={task.id}
+                            placeholder="Subtask title"
+                            onCreate={(raw) => create(raw, task.id)}
+                          />
+                        ) : (
+                          <form
+                            className="flex flex-wrap gap-2"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              if (!deferDate) return;
+                              mutate((db, dev) =>
+                                updateItem(db, dev, task.id, {
+                                  defer_date: fromDateInput(deferDate),
+                                }),
+                              );
+                              saveEntry(`task:${task.id}`, { checked: true });
+                              setEditor(null);
+                            }}
+                          >
+                            <input
+                              aria-label="Defer date"
+                              type="date"
+                              required
+                              value={deferDate}
+                              onChange={(e) => setDeferDate(e.target.value)}
+                              className="min-w-0 rounded border border-border bg-surface px-2 py-1 text-sm"
+                            />
+                            <button className={button}>Save date</button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    aria-label={`Reviewed: ${task.title}`}
+                    aria-pressed={checked}
+                    onClick={() =>
+                      saveEntry(`task:${task.id}`, { checked: !checked })
+                    }
+                    className={cn(
+                      "mt-2 flex min-h-9 sm:min-h-7 items-center justify-center gap-1 rounded-md px-1 text-xs hover:bg-surface-2",
+                      checked ? "text-accent" : "text-text-muted",
+                    )}
+                  >
+                    <CircleCheck size={14} />
+                    {checked ? "Reviewed" : "Review"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {visible.length === 0 && (
+            <p className="py-8 text-center text-sm text-text-muted">
+              All open tasks are reviewed. Clear the filter to see them again.
+            </p>
+          )}
+        </>
+      )}
+      <div className="mt-4">
+        <QuickAdd
+          key={project.id}
+          placeholder="Add a task…  (#tag @user !priority)"
+          currentProjectId={project.id}
+          onCreate={(raw) => create(raw, project.id)}
+        />
+      </div>
+      <Link
+        className="mt-4 inline-flex items-center gap-1 text-xs text-text-muted hover:text-accent"
+        to={`/project/${project.id}`}
+      >
+        Go to project <ExternalLink size={12} />
+      </Link>
+    </section>
   );
 }

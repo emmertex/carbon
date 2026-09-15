@@ -620,7 +620,9 @@ export async function syncNow(): Promise<boolean> {
           }
         : pendingSyncPage(db, SYNC_PUSH_CHUNK, undefined, pendingAfter);
     const unsynced = page.ops;
-    const unsyncedRecords = page.recordOps;
+    // Older servers cannot ingest the new entity. Keep it pending until the
+    // server advertises support; ordinary task sync continues unchanged.
+    const unsyncedRecords = page.recordOps.filter((op) => op.entity !== 'review_progress' || getMeta('review_progress_supported') === '1');
     const backlog = page.hasMore;
     const since = Number(getMeta("last_sync_seq") ?? 0);
     const rsince = Number(getMeta("last_sync_rseq") ?? 0);
@@ -645,6 +647,7 @@ export async function syncNow(): Promise<boolean> {
       body: JSON.stringify({
         since,
         rsince,
+        reviewSince: Number(getMeta("sync_review_cursor") ?? 0),
         syncEpoch: epoch ?? undefined,
         ops: unsynced,
         recordOps: unsyncedRecords,
@@ -698,6 +701,8 @@ export async function syncNow(): Promise<boolean> {
       cursor: number;
       recordOps: RecordOp[];
       rcursor: number;
+      reviewCursor?: number;
+      reviewProgressSupported?: boolean;
       users: User[];
       syncEpoch?: number;
       /** A2: the server capped this response; the cursor advanced only past what was
@@ -739,6 +744,10 @@ export async function syncNow(): Promise<boolean> {
       );
       return false;
     }
+
+    const reviewSince = Number(getMeta('sync_review_cursor') ?? 0);
+    if (data.reviewCursor !== undefined && (!Number.isSafeInteger(data.reviewCursor) || data.reviewCursor < reviewSince)) throw new Error('Invalid review sync cursor');
+    setMeta('review_progress_supported', data.reviewProgressSupported === true ? '1' : '0');
 
     // Peer catch-up may replace/close a same-identity DB while fetch awaits.
     db = getDb();
@@ -808,6 +817,7 @@ export async function syncNow(): Promise<boolean> {
     setMeta("sync_roster_cursor", String(data.rosterCursor ?? 0));
     setMeta("last_sync_seq", String(data.cursor));
     setMeta("last_sync_rseq", String(data.rcursor));
+    if (data.reviewCursor !== undefined) setMeta("sync_review_cursor", String(data.reviewCursor));
 
     // The `need` we sent has now been served, so reset it — then queue any roots whose
     // access was (re)granted in this response for a subtree backfill next round.

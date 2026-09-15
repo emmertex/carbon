@@ -272,7 +272,7 @@ export function rebuildSyncLogFromMaterialization(
       deleted: bool(r.deleted),
     }));
 
-  type RecSpec = { entity: string; row_id: string; data: unknown };
+  type RecSpec = { entity: string; row_id: string; data: unknown; clock?: Pick<RecordOp, "id" | "ts" | "device_id"> };
   const records: RecSpec[] = [];
 
   for (const u of users) {
@@ -443,6 +443,9 @@ export function rebuildSyncLogFromMaterialization(
     });
   }
 
+  for (const row of db.all<{id: string; user_id: string; item_id: string; cycle: string; entry_key: string; value: string; ts: number; device_id: string; op_id: string}>("SELECT * FROM review_progress")) {
+    records.push({ entity: 'review_progress', row_id: row.id, clock: { id: row.op_id, ts: row.ts, device_id: row.device_id }, data: { id: row.id, user_id: row.user_id, item_id: row.item_id, cycle: row.cycle, entry_key: row.entry_key, value: JSON.parse(row.value) } });
+  }
   for (const s of settings) {
     records.push({ entity: "setting", row_id: s.row_id, data: s.data });
   }
@@ -475,6 +478,7 @@ export function rebuildSyncLogFromMaterialization(
         ts: nextTs(db),
         device_id: EPOCH_DEVICE,
         data: r.data,
+        ...r.clock,
       };
       insertRecordOp(db, op, true);
       recordOps.push(op);

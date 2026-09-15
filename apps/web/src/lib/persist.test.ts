@@ -754,6 +754,20 @@ describe("A3: sign-in merge/replace across namespaces", () => {
     assert.equal(kvStore.has("db|local|local"), false);
   });
 
+  test("merging local review progress binds it to the signed-in account", async () => {
+    const { createItem, startReview, writeReviewEntry, readReviewEntries } = await import("@carbon/core");
+    await tab1.initDb();
+    const project = createItem(tab1.getDb(), tab1.getDeviceId(), { title: "Review", type: "project" });
+    startReview(tab1.getDb(), tab1.getDeviceId(), "local", project);
+    writeReviewEntry(tab1.getDb(), tab1.getDeviceId(), "local", project, "check:tasksRelevant", { checked: true });
+    await tab1.flushPersist();
+    fakeLocalStorage.setItem("carbon.user", JSON.stringify(alice));
+    await tab1.rebindIdentity();
+    await tab1.mergeLocalCapture(alice.id);
+    assert.equal(readReviewEntries(tab1.getDb(), alice.id, project)["check:tasksRelevant"].checked, true);
+    assert.deepEqual(readReviewEntries(tab1.getDb(), "local", project), {});
+  });
+
   test("replace discards the capture (the account store is re-pulled, not wiped)", async () => {
     // Pre-sign-in capture.
     await tab1.initDb();

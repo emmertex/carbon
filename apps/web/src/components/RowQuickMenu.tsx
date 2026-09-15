@@ -51,8 +51,10 @@ export function RowQuickMenu({
   item,
   pos,
   onClose,
+  extraActions = [],
 }: {
   item: Item;
+  extraActions?: { label: string; onSelect: () => void }[];
   pos: MenuPos;
   onClose: () => void;
 }) {
@@ -185,6 +187,15 @@ export function RowQuickMenu({
         }}
         className="fixed z-50 max-h-[80vh] w-52 overflow-auto rounded-lg border border-border bg-surface p-1 text-sm shadow-lg"
       >
+        {extraActions.map((action) => (
+          <button key={action.label} className={itemCls} onClick={() => {
+            onClose();
+            action.onSelect();
+          }}>
+            {action.label}
+          </button>
+        ))}
+        {extraActions.length > 0 && <div className="my-1 border-t border-border" />}
         <button
           onClick={() => {
             focus(item);

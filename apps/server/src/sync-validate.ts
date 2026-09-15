@@ -52,7 +52,7 @@ function checkId(v: unknown, where: string, max = MAX_ID_LEN): string | null {
 export function validateSyncBody(body: unknown): string | null {
   if (!isPlainObject(body)) return "body must be a JSON object";
 
-  for (const k of ["since", "rsince", "rosterCursor"] as const) {
+  for (const k of ["since", "rsince", "rosterCursor", "reviewSince"] as const) {
     const v = body[k];
     if (
       v !== undefined &&

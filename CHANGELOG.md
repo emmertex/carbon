@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.0
+**More complete project reviews**
+
+- Review nested tasks, open full details, defer work, and add subtasks as you go.
+- Review projects in one familiar workspace, with optional prompts, saved progress across devices, and an inline finish summary.
+- Simplified reviews for empty projects, with a shortcut to the project.
+
 ## v1.2.3
 **Android display and release optimization**
 

@@ -25,6 +25,7 @@ export function pullSyncPage(
   need: string[],
   backfill: BackfillCursor | undefined,
   limits: { count: number; bytes: number; scan: number },
+  reviewSince?: number,
 ) {
   const ops: Op[] = [];
   const recordOps: RecordOp[] = [];
@@ -43,7 +44,12 @@ export function pullSyncPage(
     }
     return false;
   };
-  const scan = (table: "ops" | "record_ops", start: number, root?: string) => {
+  const scan = (
+    table: "ops" | "record_ops",
+    start: number,
+    root?: string,
+    reviewOnly = false,
+  ) => {
     let cursor = start;
     let done = false;
     const column = table === "ops" ? "fields" : "data";
@@ -56,7 +62,7 @@ export function pullSyncPage(
         entity?: string;
         user_id?: string;
       }>(
-        `SELECT rowid AS seq, length(CAST(${column} AS BLOB)) AS size, ${table === "ops" ? "item_id" : "entity, json_extract(data, '$.item_id') AS item_id, json_extract(data, '$.user_id') AS user_id"} FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 1`,
+        `SELECT rowid AS seq, length(CAST(${column} AS BLOB)) AS size, ${table === "ops" ? "item_id" : "entity, json_extract(data, '$.item_id') AS item_id, json_extract(data, '$.user_id') AS user_id"} FROM ${table} WHERE rowid > ? ${reviewOnly ? "AND entity = 'review_progress'" : ""} ORDER BY rowid LIMIT 1`,
         [cursor],
       );
       if (!meta) {
@@ -65,19 +71,32 @@ export function pullSyncPage(
       }
       scans++;
       const itemId = meta.item_id;
-      const personal = ["setting", "plan", "timelog"].includes(
-        meta.entity ?? "",
-      );
+      const personal = [
+        "setting",
+        "plan",
+        "timelog",
+        "review_progress",
+      ].includes(meta.entity ?? "");
       const allowed =
         table === "ops"
           ? !!itemId && visible(itemId)
           : open ||
             (personal
-              ? meta.user_id === userId
+              ? meta.user_id === userId &&
+                (meta.entity !== "review_progress" ||
+                  (!!itemId && visible(itemId)))
               : meta.entity === "tag" ||
                 meta.user_id === userId ||
                 (itemId && visible(itemId)));
-      if (!allowed || (root && (!itemId || !rooted(itemId, root)))) {
+      const supported =
+        meta.entity !== "review_progress" ||
+        reviewOnly ||
+        (root && reviewSince !== undefined);
+      if (
+        !supported ||
+        !allowed ||
+        (root && (!itemId || !rooted(itemId, root)))
+      ) {
         cursor = meta.seq;
         continue;
       }
@@ -123,6 +142,10 @@ export function pullSyncPage(
   };
   const normal = scan("ops", since);
   const records = scan("record_ops", rsince);
+  const review =
+    reviewSince === undefined
+      ? undefined
+      : scan("record_ops", reviewSince, undefined, true);
   const root = need[0];
   let nextBackfill: BackfillCursor | undefined;
   if (root) {
@@ -145,6 +168,7 @@ export function pullSyncPage(
     recordOps,
     cursor: normal.cursor,
     rcursor: records.cursor,
+    ...(review ? { reviewCursor: review.cursor } : {}),
     truncated,
     backfill: nextBackfill,
   };

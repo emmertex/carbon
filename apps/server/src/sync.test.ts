@@ -364,3 +364,28 @@ describe("sync push batch ceiling", () => {
     );
   });
 });
+
+test('legacy sync edits coexist with review progress and upgrading recovers progress', async () => {
+  const { writeReviewEntry, readReviewEntries, getItem } = await import('@carbon/core');
+  const { db, deviceId, vapidPublicKey } = makeTestDb();
+  const project = createItem(db, deviceId, { type: 'project', title: 'Legacy project' });
+  writeReviewEntry(db, deviceId, 'local', project, 'check:tasksRelevant', { checked: true });
+  const app = await realSyncApp(db, deviceId, vapidPublicKey);
+  async function request(body: object) {
+    const response = await appFetch(app, '/api/sync', { method: 'POST', headers: SYNC_HEADERS, body: JSON.stringify(body) });
+    assert.equal(response.status, 200);
+    return await response.json() as any;
+  }
+  const old = await request({ since: 0, rsince: 0 });
+  assert.equal(old.recordOps.some((op: RecordOp) => op.entity === 'review_progress'), false);
+  assert.equal(old.reviewCursor, undefined);
+  const edited = await request({ since: old.cursor, rsince: old.rcursor, syncEpoch: old.syncEpoch,
+    ops: [{ id: 'legacy-title-edit', item_id: project.id, device_id: 'older-client', ts: Date.now() + 1000, fields: { title: 'Updated by older client' } }], recordOps: [] });
+  assert.deepEqual(edited.acknowledged.ops, ['legacy-title-edit']);
+  assert.equal(getItem(db, project.id)?.title, 'Updated by older client');
+  assert.equal(readReviewEntries(db, 'local', project)['check:tasksRelevant'].checked, true);
+  const upgraded = await request({ since: edited.cursor, rsince: edited.rcursor, reviewSince: 0 });
+  assert.equal(upgraded.reviewProgressSupported, true);
+  assert.equal(upgraded.recordOps.filter((op: RecordOp) => op.entity === 'review_progress').length, 1);
+  assert.ok(upgraded.reviewCursor > 0);
+});

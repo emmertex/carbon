@@ -528,4 +528,20 @@ MIGRATIONS.push({
   up: `CREATE INDEX IF NOT EXISTS idx_items_deleted_updated ON items(deleted, updated_at);`,
 });
 
+MIGRATIONS.push({
+  version: 24,
+  up: `CREATE TABLE IF NOT EXISTS review_progress (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    cycle TEXT NOT NULL,
+    entry_key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    op_id TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_progress_cycle ON review_progress(user_id, item_id, cycle);`,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

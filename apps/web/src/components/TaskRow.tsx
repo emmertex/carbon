@@ -117,7 +117,13 @@ export function TaskRow({
   onToggleCollapse,
   focused,
   titleSlot,
+  onActivate,
+  onComplete,
+  extraActions,
 }: TaskRowData & {
+  onActivate?: () => void;
+  onComplete?: () => void;
+  extraActions?: { label: string; onSelect: () => void }[];
   showProject?: boolean;
   indent?: number;
   collapsed?: boolean;
@@ -175,14 +181,15 @@ export function TaskRow({
   // selected (accordion via the single selectedId). Desktop stays roomy always.
   const expanded = compact && selected;
   const lean = compact && !selected;
-  const showActions = !compact || expanded; // flag + menu
+  const showActions = !compact || expanded || !!extraActions?.length; // flag + menu
   const showMeta = !compact || expanded; // due/project/assignees, full tag labels
 
   function toggleComplete(e: React.MouseEvent) {
     e.stopPropagation();
     // Shared with the keyboard path: completing a parent with unfinished sub-tasks
     // confirms and cascades to all descendants (§7).
-    toggleTaskCompletion(item);
+    if (onComplete) onComplete();
+    else toggleTaskCompletion(item);
   }
 
   function toggleFlag(e: React.MouseEvent) {
@@ -229,6 +236,7 @@ export function TaskRow({
       data-title={item.title}
       data-status={item.status}
       onClick={() => {
+        if (onActivate) return onActivate();
         // select() applies the shared first-tap preference.
         if (selected && compact) openDetail();
         else select(item.id);
@@ -481,7 +489,7 @@ export function TaskRow({
           )}
           <button
             onClick={toggleMenu}
-            className={actionCls(menuPos !== null, 'text-text', expanded)}
+            className={actionCls(menuPos !== null, 'text-text', expanded || (compact && !!extraActions?.length))}
             aria-label="More actions"
           >
             <MoreHorizontal size={15} />
@@ -489,7 +497,7 @@ export function TaskRow({
         </>
       )}
 
-      {menuPos && <RowQuickMenu item={item} pos={menuPos} onClose={() => setMenuPos(null)} />}
+      {menuPos && <RowQuickMenu item={item} extraActions={extraActions} pos={menuPos} onClose={() => setMenuPos(null)} />}
     </div>
   );
 }

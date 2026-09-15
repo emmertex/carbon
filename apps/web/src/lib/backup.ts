@@ -1,3 +1,4 @@
+import { reviewEntryId } from '@carbon/core';
 import { exportDb, openSnapshot, getDb, persist, commitImport } from './db';
 import { getBlob, addImportedBlobs } from './blobs';
 import { identityKey } from './identity';
@@ -166,6 +167,7 @@ export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): P
       case 'assignee':
       case 'timelog':
       case 'plan':
+      case 'review_progress':
         remapUser('user_id', true);
         break;
       case 'comment':
@@ -184,6 +186,7 @@ export async function applyImport(parsed: ParsedBackup, mapping: UserMapping): P
     if (skip) continue;
     if (r.entity === 'share') data.id = `s:${data.item_id}:${data.user_id}`;
     if (r.entity === 'assignee') data.id = `a:${data.item_id}:${data.user_id}`;
+    if (r.entity === 'review_progress') data.id = reviewEntryId(String(data.user_id), String(data.item_id), String(data.cycle), String(data.entry_key));
     if (r.entity === 'plan') data.id = planId(data.user_id as string | null, data.item_id as string);
     recs.push({
       id: r.id,

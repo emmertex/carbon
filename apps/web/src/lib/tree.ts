@@ -7,7 +7,7 @@ export interface FlatItem {
   depth: number;
 }
 
-export const INDENT_WIDTH = 24;
+export const INDENT_WIDTH = 16;
 
 /** Depth-first flatten of a container's descendant tree, in sort order. */
 export function flattenTree(db: Db, rootId: string): FlatItem[] {
@@ -55,6 +55,7 @@ export function getProjection(
   activeId: string,
   overId: string,
   dragOffsetX: number,
+  indentWidth = INDENT_WIDTH,
 ): Projection {
   const overIndex = items.findIndex((i) => i.id === overId);
   const activeIndex = items.findIndex((i) => i.id === activeId);
@@ -65,7 +66,7 @@ export function getProjection(
   const prev = newItems[overIndex - 1];
   const next = newItems[overIndex + 1];
 
-  const dragDepth = Math.round(dragOffsetX / INDENT_WIDTH);
+  const dragDepth = Math.round(dragOffsetX / indentWidth);
   const projectedDepth = activeItem.depth + dragDepth;
   const maxDepth = prev ? prev.depth + 1 : 0;
   const minDepth = next ? next.depth : 0;
@@ -91,20 +92,19 @@ export function computeSortOrder(
   activeId: string,
   overId: string,
   parentId: string,
+  allItems: FlatItem[] = items,
 ): number {
-  const siblings = items.filter((i) => i.parentId === parentId && i.id !== activeId);
-  const overIdx = items.findIndex((i) => i.id === overId);
-
-  let prevOrder: number | undefined;
-  let nextOrder: number | undefined;
-  for (const s of siblings) {
-    const idx = items.findIndex((i) => i.id === s.id);
-    if (idx <= overIdx) prevOrder = s.item.sort_order;
-    else {
-      nextOrder = s.item.sort_order;
-      break;
-    }
-  }
+  // Use the same final sequence as getProjection: upward drops insert BEFORE
+  // the target, downward drops AFTER it.
+  const activeIndex = items.findIndex((i) => i.id === activeId);
+  const overIndex = items.findIndex((i) => i.id === overId);
+  if (activeIndex < 0 || overIndex < 0) return 1;
+  const reordered = arrayMove(items, activeIndex, overIndex);
+  const prevOrder = reordered.slice(0, overIndex).reverse()
+    .find((i) => i.parentId === parentId)?.item.sort_order;
+  // Hidden children (collapsed or filtered) still occupy sort positions.
+  const siblings = allItems.filter((i) => i.parentId === parentId && i.id !== activeId);
+  const nextOrder = siblings.find((i) => prevOrder === undefined || i.item.sort_order > prevOrder)?.item.sort_order;
 
   if (prevOrder === undefined && nextOrder === undefined) return 1;
   if (prevOrder === undefined) return nextOrder! - 1;

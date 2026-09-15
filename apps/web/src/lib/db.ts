@@ -15,6 +15,7 @@ import {
   ingestOps,
   ingestRecordOps,
   claimUnowned,
+  reviewEntryId,
   type Db,
   type Row,
   type SqlParams,
@@ -1381,6 +1382,13 @@ export async function mergeLocalCapture(userId: string): Promise<number> {
       })),
     );
   sdb.close();
+  for (const op of recordOps) {
+    if (op.entity !== 'review_progress') continue;
+    const data = op.data as { id: string; user_id: string; item_id: string; cycle: string; entry_key: string };
+    data.user_id = userId;
+    data.id = reviewEntryId(userId, data.item_id, data.cycle, data.entry_key);
+    op.row_id = data.id;
+  }
 
   if (getBoundIdentity() !== destination)
     throw new Error("Identity changed during capture merge");

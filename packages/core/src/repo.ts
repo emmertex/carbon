@@ -1,3 +1,4 @@
+import { applyReviewEntry } from './review-progress';
 import { v4 as uuidv4 } from "uuid";
 import type { Db, Row } from "./db";
 import type {
@@ -2969,6 +2970,8 @@ export function taskActualMs(
 
 export function applyRecordOp(db: Db, op: RecordOp): void {
   switch (op.entity) {
+    case "review_progress":
+      return applyReviewEntry(db, op);
     case "share":
       return upsertShare(db, op.data as Share);
     case "assignee":

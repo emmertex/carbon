@@ -14,6 +14,7 @@ import {
   FileText,
   Download,
   Maximize2,
+  ListChecks,
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
@@ -725,6 +726,21 @@ export function TaskDetail({ id }: { id: string }) {
             title={inPlan ? "In Plan" : "Add to Plan"}
           >
             <Target size={17} />
+          </button>
+        )}
+        {isProject && (
+          <button
+            type="button"
+            onClick={() => {
+              select(null);
+              navigate(`/review?project=${encodeURIComponent(item.id)}`);
+            }}
+            className={cn(btnIcon, "flex items-center gap-1.5 p-2 text-xs")}
+            aria-label="Start Review"
+            title="Start Review"
+          >
+            <ListChecks size={17} />
+            <span>Start Review</span>
           </button>
         )}
         <button

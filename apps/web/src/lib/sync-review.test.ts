@@ -158,3 +158,99 @@ test("actual sync negotiates before push and never acknowledges a missing ack re
     db.resetDbForTest();
   }
 });
+
+test("older servers leave review entries pending until support is advertised", async () => {
+  values.set(
+    "carbon.server",
+    JSON.stringify({
+      ...config.getServerConfig(),
+      url: "http://review-compat",
+      token: "token",
+      username: "alice",
+      autoSync: false,
+    }),
+  );
+  const user = {
+    id: "alice",
+    username: "alice",
+    open: false,
+    role: "member" as const,
+  };
+  config.saveCurrentUser(user as never);
+  state.useStore.getState().setCurrentUser(user as never);
+  await db.rebindIdentity();
+  const project = core.createItem(db.getDb(), "device", {
+    type: "project",
+    title: "Review",
+    ownerId: user.id,
+  });
+  core.writeReviewEntry(
+    db.getDb(),
+    "device",
+    user.id,
+    project,
+    "check:tasksRelevant",
+    { checked: true },
+  );
+  let supported = false;
+  const sent: Array<{ recordOps: import("@carbon/core").RecordOp[] }> = [];
+  globalThis.fetch = (async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    if (String(url).endsWith("/api/me")) return Response.json(user);
+    if (String(url).endsWith("/api/sync")) {
+      const body = JSON.parse(String(init?.body));
+      sent.push(body);
+      return Response.json({
+        ops: [],
+        recordOps: [],
+        users: [],
+        cursor: 0,
+        rcursor: 0,
+        syncEpoch: 1,
+        ...(supported
+          ? { reviewProgressSupported: true, reviewCursor: 0 }
+          : {}),
+        acknowledged: {
+          ops: body.ops.map((op: { id: string }) => op.id),
+          recordOps: body.recordOps.map((op: { id: string }) => op.id),
+        },
+      });
+    }
+    return Response.json({});
+  }) as typeof fetch;
+  try {
+    await sync.syncNow();
+    await sync.syncNow();
+    assert.equal(
+      sent.some((body) =>
+        body.recordOps.some((op) => op.entity === "review_progress"),
+      ),
+      false,
+    );
+    assert.ok(
+      core
+        .getUnsyncedRecordOps(db.getDb())
+        .some((op) => op.entity === "review_progress"),
+    );
+    supported = true;
+    await sync.syncNow();
+    await sync.syncNow();
+    assert.ok(
+      sent.some((body) =>
+        body.recordOps.some((op) => op.entity === "review_progress"),
+      ),
+    );
+    assert.equal(
+      core
+        .getUnsyncedRecordOps(db.getDb())
+        .filter((op) => op.entity === "review_progress").length,
+      0,
+    );
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    globalThis.fetch = realFetch;
+    db.resetDbForTest();
+  }
+});

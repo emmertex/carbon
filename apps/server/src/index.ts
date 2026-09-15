@@ -1273,6 +1273,7 @@ export function buildTenantApp(
       rosterCursor?: number;
       since?: number;
       rsince?: number;
+      reviewSince?: number;
       ops?: Op[];
       recordOps?: RecordOp[];
       need?: string[];
@@ -1601,6 +1602,7 @@ export function buildTenantApp(
       users,
       rosterCursor: rosterMore ? rosterCursor : 0,
       rosterMore,
+      reviewProgressSupported: true,
       syncEpoch: getSyncEpoch(db),
       rejected,
       acknowledged,
@@ -1630,6 +1632,7 @@ export function buildTenantApp(
           bytes: available,
           scan: Math.min(SYNC_MAX_SCAN_ROWS, 2000),
         },
+        body.reviewSince,
       );
       return c.json({ ...page, ...envelope });
     } catch (error) {

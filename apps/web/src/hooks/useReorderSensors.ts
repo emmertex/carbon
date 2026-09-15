@@ -2,10 +2,11 @@ import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { MouseSensor, TouchSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
 
 /**
- * The single drag-to-reorder activation shared by every sortable list in the app
+ * Drag-to-reorder sensors shared by every sortable list in the app
  * — the sidebar projects/folders, the sidebar tags, the task outliner, the flat
  * task lists, and the plan view — so they behave identically on desktop and on
- * touch.
+ * touch. The tree opts into distance-based mouse activation so desktop users
+ * can drag immediately; touch still uses the hold below.
  *
  * Press-and-hold (~200ms) lifts a row; moving more than 5px before the hold
  * elapses is treated as a tap/scroll, never a drag. That lets the whole row be
@@ -22,10 +23,10 @@ import { MouseSensor, TouchSensor, KeyboardSensor, useSensor, useSensors } from 
  * effect once the hold activates (required by iOS Safari). The result: a reliable
  * hold-to-drag everywhere, while a quick swipe still scrolls the list.
  */
-export function useReorderSensors() {
+export function useReorderSensors(immediateMouse = false) {
   return useSensors(
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-    useSensor(MouseSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+    useSensor(MouseSensor, { activationConstraint: immediateMouse ? { distance: 5 } : { delay: 200, tolerance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );
 }

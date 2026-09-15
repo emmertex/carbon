@@ -316,6 +316,7 @@ export function recordOpShapeError(op: RecordOp): string | null {
       session_id: "id?",
       deleted: "boolean",
     },
+    review_progress: { id: "id", user_id: "id", item_id: "id", cycle: "date", entry_key: "id", value: "object" },
     plan: {
       id: "id",
       user_id: "id?",

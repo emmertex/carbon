@@ -21,6 +21,22 @@ export function registerE2eHooks(): void {
       await persist();
       return ids;
     },
+    async seedReviewProject(withTasks: boolean): Promise<string> {
+      const { createItem, updateItem } = await import('@carbon/core');
+      const { getDeviceId, persist } = await import('./db');
+      const db = getDb();
+      const dev = getDeviceId();
+      const project = createItem(db, dev, { type: 'project', title: 'Review fixture', ownerId: useStore.getState().currentUser?.id ?? null });
+      updateItem(db, dev, project.id, { reviewed_at: '2020-01-01T00:00:00.000Z', review_interval: 1 });
+      if (withTasks) {
+        const root = createItem(db, dev, { title: 'Root review task', parentId: project.id, note: 'Review context notes', dueDate: '2030-01-01T12:00:00.000Z' });
+        const child = createItem(db, dev, { title: 'Nested review task', parentId: root.id });
+        createItem(db, dev, { title: 'Grandchild review task', parentId: child.id });
+      }
+      useStore.getState().bump();
+      await persist();
+      return project.id;
+    },
     firstTapDetails(value: boolean): void { useStore.getState().setUiPrefs({ firstTapDetails: value }); },
     async reset(): Promise<void> {
       const { registerDevSeed } = await import('./devSeed');

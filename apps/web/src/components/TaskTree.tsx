@@ -30,7 +30,7 @@ import {
 } from '@carbon/core';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { useQuery } from '@/hooks/useQuery';
-import { isCompactViewport } from '@/hooks/useCompact';
+import { useCompact, isCompactViewport } from '@/hooks/useCompact';
 import { itemAssignees } from '@/lib/enrich';
 import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
@@ -116,8 +116,10 @@ function SortableTreeRow({
   edit,
   onAddSibling,
   onAddSubtask,
+  dropIndent,
 }: {
   item: Item;
+  dropIndent?: string;
   depth: number;
   collapsible: boolean;
   kbMode: boolean;
@@ -139,6 +141,7 @@ function SortableTreeRow({
   const selected = useStore((s) => s.selectedId === item.id);
   const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: item.id,
+    disabled: edit.editing,
   });
 
   const titleSlot = edit.editing ? (
@@ -158,6 +161,10 @@ function SortableTreeRow({
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`group/tree relative select-none ${isDragging ? 'z-10 opacity-50' : ''}`}
     >
+      {isDragging && dropIndent && (
+        <div data-testid="tree-drop-indicator" className="pointer-events-none absolute right-0 top-0 z-20 h-0.5 bg-accent"
+          style={{ left: dropIndent }} />
+      )}
       <SwipeableRow item={item}>
         <TaskRow
           item={item}
@@ -196,6 +203,8 @@ export function TaskTree({
   filters?: Filters;
   expr?: FilterExpr | null;
 }) {
+  const compact = useCompact();
+  const indentWidth = compact ? 12 : 16;
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [offsetLeft, setOffsetLeft] = useState(0);
@@ -243,7 +252,7 @@ export function TaskTree({
   const shown = flat.filter((f) => !collapseHidden.has(f.id));
   const visible = activeId ? removeDescendants(shown, activeId) : shown;
   const projected =
-    activeId && overId ? getProjection(visible, rootId, activeId, overId, offsetLeft) : null;
+    activeId && overId ? getProjection(visible, rootId, activeId, overId, offsetLeft, indentWidth) : null;
 
   // ----- keyboard outliner (tree only) --------------------------------------
   const select = useStore((s) => s.select);
@@ -461,9 +470,8 @@ export function TaskTree({
     }
   }
 
-  // Press-and-hold to drag: hold ~200ms to lift a row (reorder or nest); moving
-  // >5px before then is a tap/scroll. The whole row is the handle — no grip.
-  const sensors = useReorderSensors();
+  // Mouse movement lifts the row immediately; touch retains hold-to-drag.
+  const sensors = useReorderSensors(true);
 
   function reset() {
     setActiveId(null);
@@ -481,14 +489,20 @@ export function TaskTree({
   function onDragOver({ over }: DragOverEvent) {
     setOverId(over ? String(over.id) : null);
   }
-  function onDragEnd({ active, over }: DragEndEvent) {
+  function onDragEnd({ active, over, delta }: DragEndEvent) {
     const items = visible;
-    const off = offsetLeft;
+    const off = delta.x;
     reset();
     if (!over) return;
-    const proj = getProjection(items, rootId, String(active.id), String(over.id), off);
-    const sortOrder = computeSortOrder(items, String(active.id), String(over.id), proj.parentId);
-    mutate((db, dev) => moveItem(db, dev, String(active.id), proj.parentId, sortOrder));
+    const proj = getProjection(items, rootId, String(active.id), String(over.id), off, indentWidth);
+    mutate((db, dev) => {
+      const sortOrder = computeSortOrder(
+        items, String(active.id), String(over.id), proj.parentId, flattenTree(db, rootId),
+      );
+      moveItem(db, dev, String(active.id), proj.parentId, sortOrder);
+    });
+    // Reveal a task dropped under a collapsed parent.
+    if (collapsedSet.has(proj.parentId)) toggleCollapsed(proj.parentId);
   }
 
   // Find the item currently being dragged for the overlay
@@ -516,14 +530,8 @@ export function TaskTree({
         >
           {visible.map((f) => (
             <div key={f.id} className="relative">
-              {/* Drop indicator: blue line showing where item will be placed */}
-              {overId === f.id && activeId !== f.id && (
-                <div
-                  className="absolute left-0 right-0 top-0 h-0.5 bg-accent z-20"
-                  style={{ boxShadow: '0 0 4px var(--accent)' }}
-                />
-              )}
               <SortableTreeRow
+                dropIndent={projected ? `${0.75 + Math.min(projected.depth, 6) * (compact ? 0.75 : 1)}rem` : undefined}
                 item={f.item}
                 depth={f.id === activeId && projected ? projected.depth : f.depth}
                 collapsible={hasKids.has(f.id)}
@@ -544,10 +552,10 @@ export function TaskTree({
         </div>
       </SortableContext>
       {/* Drag overlay: shows a static copy of the dragged item */}
-      <DragOverlay>
+      <DragOverlay style={{ pointerEvents: 'none' }}>
         {activeItem && (
           <div className="w-full max-w-2xl rounded-xl border border-border bg-surface shadow-xl">
-            <TaskRow item={activeItem} />
+            <TaskRow item={activeItem} indent={visible.find((f) => f.id === activeId)?.depth ?? 0} />
           </div>
         )}
       </DragOverlay>

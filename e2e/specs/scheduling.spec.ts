@@ -49,59 +49,31 @@ test.describe('Tier 6 — scheduling', () => {
     await expect(next).toContainText('Tomorrow');
   });
 
-  test('project with a review interval surfaces in Review and clears', async ({ page }) => {
-    await page.getByRole('button', { name: 'New folder or project' }).click();
-    await page.getByRole('button', { name: 'New Parallel Project' }).click();
-    await page.waitForURL('**/project/**');
-    const pane = page.getByTestId('task-detail');
+  test("project with a review interval surfaces in Review and clears", async ({
+    page,
+  }) => {
+    await page.getByRole("button", { name: "New folder or project" }).click();
+    await page.getByRole("button", { name: "New Parallel Project" }).click();
+    await page.waitForURL("**/project/**");
+    const pane = page.getByTestId("task-detail");
     await expect(pane).toBeVisible();
-    await pane.getByPlaceholder('30').fill('1');
-    await addTask(page, 'Review task A');
-    await addTask(page, 'Review task B');
-    await addTask(page, 'Review task C');
+    await pane.getByPlaceholder("30").fill("1");
+    await addTask(page, "Review task A");
+    await addTask(page, "Review task B");
+    await addTask(page, "Review task C");
     await flushClientDb(page);
     // Review comes due (created_at + interval) — jump the client clock 2 days ahead.
     await page.clock.install({ time: Date.now() + 2 * 24 * 3600 * 1000 });
-    await page.goto('/review');
-    // The new guided review shows one project at a time with a checklist.
-    // The project title appears in the header.
-    await expect(page.getByRole('heading', { name: 'New Project' })).toBeVisible();
-    await expect(page.getByText('3 open tasks', { exact: false })).toBeVisible();
-    await page.getByRole('checkbox').first().check();
-    await page.getByRole('button', { name: 'Back to Review List' }).click();
-    await expect(page.getByRole('heading', { name: 'Review', exact: true })).toBeVisible();
-    await expect(page.getByText('Review Complete', { exact: true })).toBeHidden();
-    await page.getByRole('main').getByRole('button', { name: 'New Project', exact: true }).click();
-    await expect(page.getByRole('checkbox').first()).not.toBeChecked();
-    await page.getByRole('button', { name: 'Deep Dive into Tasks' }).click();
-    const taskHeading = page.getByRole('heading', { level: 3 });
-    const firstTask = await taskHeading.innerText();
-    await page.getByRole('button', { name: 'Skip', exact: true }).click();
-    const secondTask = await taskHeading.innerText();
-    await page.getByRole('button', { name: 'Exit Deep Dive' }).click();
-    await page.getByRole('button', { name: 'Deep Dive into Tasks' }).click();
-    await expect(taskHeading).toHaveText(firstTask);
-    await page.getByRole('button', { name: 'Complete', exact: true }).click();
-    await expect(taskHeading).toHaveText(secondTask);
-    await page.getByRole('button', { name: 'Skip', exact: true }).click();
-    await expect(taskHeading).not.toHaveText(secondTask);
-    await page.getByRole('button', { name: 'Drop', exact: true }).click();
-    await expect(taskHeading).toHaveText(secondTask);
-    await page.getByRole('button', { name: 'Complete', exact: true }).click();
-    await expect(page.getByText('0 open tasks', { exact: false })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Deep Dive into Tasks' })).toBeDisabled();
-    // Complete the required checklist (5 checkboxes).
-    const checkboxes = page.getByRole('checkbox');
-    const count = await checkboxes.count();
-    expect(count).toBe(5);
-    for (let i = 0; i < count; i++) {
-      await checkboxes.nth(i).check();
+    await page.goto("/review");
+    await expect(page.getByRole('heading', { name: 'New Project', exact: true })).toBeVisible();
+    await expect(page.getByTestId('task-row')).toHaveCount(3);
+    for (const title of ['Review task A', 'Review task B', 'Review task C']) {
+      await page.getByRole('button', { name: `Reviewed: ${title}`, exact: true }).click();
     }
-    // Now the "Mark as Reviewed" button should be enabled.
-    await page.getByRole('button', { name: 'Mark as Reviewed' }).click();
-    // After reviewing all projects, the completion screen appears.
-    await expect(page.getByText('Review Complete')).toBeVisible();
-    await expect(page.getByText("You've reviewed all 1 projects due for review.")).toBeVisible();
+    await page.getByRole('button', { name: 'Finish review', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Review summary' })).toBeVisible();
+    await page.getByRole('button', { name: 'Confirm review', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Review complete', exact: true })).toBeVisible();
     await gotoFlushed(page, '/review');
     await expect(page.getByText('Nothing to review right now.')).toBeVisible();
   });

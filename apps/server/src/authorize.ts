@@ -1,3 +1,4 @@
+import { reviewEntryId } from '@carbon/core';
 /**
  * Shared authorization — the single source of truth for "who may do what to what"
  * across every server surface: REST, sync, built-in AI (agent-ops), Telegram, imports,
@@ -484,6 +485,13 @@ export function validateRecordOp(
         return null;
       if (itemId && !canReadItem(db, cred, itemId)) return null;
       data.user_id = uid;
+      return { ...op, data };
+    }
+    case "review_progress": {
+      if (!itemId || !canReadItem(db, cred, itemId)) return null;
+      if (data.user_id !== uid || typeof data.cycle !== 'string' || typeof data.entry_key !== 'string') return null;
+      const id = reviewEntryId(uid, itemId, data.cycle, data.entry_key);
+      if (op.row_id !== id || data.id !== id) return null;
       return { ...op, data };
     }
     case "setting":

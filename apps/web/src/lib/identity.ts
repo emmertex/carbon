@@ -165,6 +165,7 @@ export function eraseIdentitySettings(namespace: string): void {
       LEGACY_SETTING_KEYS.includes(
         base as (typeof LEGACY_SETTING_KEYS)[number],
       ) ||
+      base.startsWith("carbon.review.") ||
       base.startsWith(LEGACY_VIEWPREFS_PREFIX)
     ) {
       localStorage.removeItem(key);
