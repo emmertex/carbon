@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { listTags, getProjects } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
@@ -9,6 +9,7 @@ import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
 import { ViewRow } from '@/components/ViewRow';
 import { VirtualTaskList } from '@/components/VirtualTaskList';
+import { FiltersToggle } from '@/components/FiltersToggle';
 import { ViewControls } from '@/components/ViewControls';
 import {
   getPrefs,
@@ -44,6 +45,8 @@ export function ListView({
   const effectiveBase: Base = saved?.base ?? base;
   const heading = saved?.name ?? title;
 
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
   const [prefs, setPrefs] = useState<ViewPrefs>(
     () => saved?.prefs ?? getPrefs(base),
   );
@@ -95,30 +98,37 @@ export function ListView({
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
-      <div className="mb-3">
-        <h1 className="text-2xl font-bold tracking-tight" data-testid="active-view">
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <h1
+          className="text-2xl font-bold tracking-tight"
+          data-testid="active-view"
+        >
           {heading}
         </h1>
-        <p className="mt-0.5 text-sm text-text-muted">
-          {count} {count === 1 ? 'task' : 'tasks'}
-        </p>
+        <FiltersToggle
+          open={filtersOpen}
+          onToggle={() => setFiltersOpen((open) => !open)}
+          controlsId={filtersId}
+        />
       </div>
-
-      <ViewControls
-        prefs={prefs}
-        onChange={updatePrefs}
-        onSavePerspective={perspectiveId ? undefined : savePerspective}
-        tags={tags}
-        projects={projects}
-      />
-
-      <ViewRow grouping className="mb-3" />
 
       {quickAdd && (
         <div className="mb-3">
           <QuickAdd onCreate={create} />
         </div>
       )}
+
+      <div id={filtersId} hidden={!filtersOpen}>
+        <ViewControls
+          prefs={prefs}
+          onChange={updatePrefs}
+          onSavePerspective={perspectiveId ? undefined : savePerspective}
+          tags={tags}
+          projects={projects}
+        />
+
+        <ViewRow grouping className="mb-3" />
+      </div>
 
       {count === 0 ? (
         <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-muted">

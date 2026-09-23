@@ -11,7 +11,11 @@ import { useFeature } from '@/hooks/useFeature';
 /** A parked share/assign the user can confirm: the echoed action(s) + already-applied
  *  mutations, plus the original command text to re-send with them. */
 type ConfirmCtx = CommandConfirm & { text: string };
-type Status = { kind: 'pending' | 'reply' | 'error'; text: string; confirm?: ConfirmCtx } | null;
+type Status = {
+  kind: 'pending' | 'reply' | 'error';
+  text: string;
+  confirm?: ConfirmCtx;
+} | null;
 
 export function QuickAdd({
   placeholder = 'Add a task…  (#tag @user !priority)',
@@ -45,7 +49,8 @@ export function QuickAdd({
   const nlEnabled = useStore((s) => s.nlEnabled);
   const nlKeywords = useStore((s) => s.nlKeywords);
   const nlFeature = useFeature('nlCommands');
-  const commandMode = nlEnabled && nlFeature && firstWordIsCommand(value, nlKeywords);
+  const commandMode =
+    nlEnabled && nlFeature && firstWordIsCommand(value, nlKeywords);
   const nlReady = nlEnabled && nlFeature;
   // Hint the first few keywords so the add box advertises the assistant when it's on.
   const nlHint =
@@ -77,7 +82,10 @@ export function QuickAdd({
       setStatus({ kind: 'reply', text: r.reply, confirm });
       scheduleSync(); // pull the new/changed items into the local DB
     } catch (e) {
-      setStatus({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+      setStatus({
+        kind: 'error',
+        text: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 
@@ -104,27 +112,6 @@ export function QuickAdd({
 
   return (
     <div className="relative">
-      {allowNote && (
-        <div className="mb-1.5 inline-flex overflow-hidden rounded-lg border border-border text-xs">
-          {(['task', 'note'] as const).map((k, i) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setKind(k)}
-              aria-pressed={kind === k}
-              className={cn(
-                'px-2.5 py-0.5 font-medium capitalize transition-colors',
-                i > 0 && 'border-l border-border',
-                kind === k
-                  ? 'bg-accent text-accent-fg'
-                  : 'text-text-muted hover:bg-surface-2 hover:text-text',
-              )}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
-      )}
       <form
         onSubmit={submit}
         className={cn(
@@ -162,6 +149,28 @@ export function QuickAdd({
           className="min-w-0 flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-faint"
         />
 
+        {allowNote && (
+          <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-xs">
+            {(['task', 'note'] as const).map((k, i) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setKind(k)}
+                aria-pressed={kind === k}
+                className={cn(
+                  'px-2.5 py-0.5 font-medium capitalize transition-colors',
+                  i > 0 && 'border-l border-border',
+                  kind === k
+                    ? 'bg-accent text-accent-fg'
+                    : 'text-text-muted hover:bg-surface-2 hover:text-text',
+                )}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        )}
+
         <SuggestionMenu
           open={suggest.open}
           suggestions={suggest.suggestions}
@@ -182,7 +191,9 @@ export function QuickAdd({
           {status.kind === 'reply' && status.confirm && (
             <button
               type="button"
-              onClick={() => void runAsCommand(status.confirm!.text, status.confirm)}
+              onClick={() =>
+                void runAsCommand(status.confirm!.text, status.confirm)
+              }
               className="ml-2 font-medium text-accent underline hover:text-accent-fg"
             >
               confirm
@@ -195,12 +206,6 @@ export function QuickAdd({
           >
             dismiss
           </button>
-        </p>
-      )}
-      {!status && nlReady && !value && (
-        <p className="mt-1 px-1 text-[11px] text-text-faint">
-          Assistant on — start with {nlKeywords.slice(0, 3).join(', ')}
-          {nlKeywords.length > 3 ? '…' : ''}
         </p>
       )}
     </div>

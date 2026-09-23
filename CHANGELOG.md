@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.1
+**Minor UI improvements**
+
+- In Time Tracking, selectable Projects and Tags are limited to only those that are valid for the time period. 
+- Cleaned up all tasks lists, Filters and Show are hidden, and more compact overall.
+
 ## v1.3.0
 **More complete project reviews**
 

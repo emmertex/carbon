@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Timer, Square } from 'lucide-react';
 import {
   getItem,
   getChildren,
-  subtaskProgress,
   listTags,
   getProjects,
   getTimeContext,
@@ -15,7 +14,10 @@ import { useQuery } from '@/hooks/useQuery';
 import { mutate } from '@/lib/mutate';
 import { useStore, getCurrentUserId } from '@/lib/store';
 import { createFromQuickAdd } from '@/lib/quickadd';
-import { trackingStartSession, trackingStopActive } from '@/lib/trackingLifecycle';
+import {
+  trackingStartSession,
+  trackingStopActive,
+} from '@/lib/trackingLifecycle';
 import { enrichItems } from '@/lib/enrich';
 import { filterByPrefs } from '@/lib/filter-expr';
 import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
@@ -23,6 +25,7 @@ import { Breadcrumbs } from '@/components/Breadcrumbs';
 import { QuickAdd } from '@/components/QuickAdd';
 import { TaskTree } from '@/components/TaskTree';
 import { TaskList } from '@/components/TaskList';
+import { FiltersToggle } from '@/components/FiltersToggle';
 import { ViewControls } from '@/components/ViewControls';
 import { ViewRow } from '@/components/ViewRow';
 import { ProjectGlyph } from '@/components/ProjectGlyph';
@@ -37,7 +40,11 @@ export function ContainerView() {
   const select = useStore((s) => s.select);
   const openDetail = useStore((s) => s.openDetail);
 
-  const [prefs, setPrefs] = useState<ViewPrefs>(() => getPrefs(`project:${id}`));
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
+  const [prefs, setPrefs] = useState<ViewPrefs>(() =>
+    getPrefs(`project:${id}`),
+  );
   useEffect(() => setPrefs(getPrefs(`project:${id}`)), [id]);
   function updatePrefs(p: ViewPrefs) {
     setPrefs(p);
@@ -46,14 +53,11 @@ export function ContainerView() {
   // Manual sort keeps the drag-to-nest tree (filtered in place, hierarchy intact);
   // any other sort flattens into a sorted list (hierarchy can't be preserved then).
   const flatMode = prefs.sort !== 'manual';
-  const countScope = useStore((s) => s.uiPrefs.countScope);
 
   const data = useQuery(
     (db) => {
       const item = getItem(db, id);
       if (!item || item.deleted) return null;
-      const progress = subtaskProgress(db, id, countScope);
-      const remaining = progress.total - progress.done;
       // Flat list of descendant tasks for the filtered view.
       const desc: Item[] = [];
       const queue = [id];
@@ -67,11 +71,13 @@ export function ContainerView() {
       // Container/list views include notes inline alongside tasks (they render
       // with a distinct icon and no checkbox). Projects/folders stay excluded.
       const tasks = desc.filter((c) => c.type === 'task' || c.type === 'note');
-      const noteCount = desc.filter((c) => c.type === 'note').length;
       // Only the flat view renders `rows`; in tree mode (default) TaskTree renders
       // and enriches its own rows, so skip a full-subtree enrich that's discarded.
       const rows = flatMode
-        ? enrichItems(db, applySort(filterByPrefs(db, tasks, prefs), prefs.sort))
+        ? enrichItems(
+            db,
+            applySort(filterByPrefs(db, tasks, prefs), prefs.sort),
+          )
         : [];
       const ctx = getTimeContext(db, getCurrentUserId());
       const tracking = ctx.session?.item_id === id && !ctx.paused;
@@ -80,11 +86,15 @@ export function ContainerView() {
       // page header, not a collapsible row — collapsing it would hide everything.
       // Drives ViewRow's Collapse/Expand All.
       const containerIds = [
-        ...new Set(desc.map((c) => c.parent_id).filter((p): p is string => !!p && p !== id)),
+        ...new Set(
+          desc
+            .map((c) => c.parent_id)
+            .filter((p): p is string => !!p && p !== id),
+        ),
       ];
-      return { item, remaining, noteCount, rows, tracking, containerIds };
+      return { item, rows, tracking, containerIds };
     },
-    [id, JSON.stringify(prefs), countScope],
+    [id, JSON.stringify(prefs)],
     'container.data',
   );
   const tags = useQuery((db) => listTags(db), []) ?? [];
@@ -93,7 +103,7 @@ export function ContainerView() {
   if (!data) {
     return <div className="p-8 text-sm text-text-muted">Not found.</div>;
   }
-  const { item, remaining, noteCount, rows, tracking, containerIds } = data;
+  const { item, rows, tracking, containerIds } = data;
   const isProject = item.type === 'project';
   // A notes container: adds default to notes rather than tasks. `createItem`
   // enforces the same rule for every other add surface (outliner, sibling/subtask
@@ -105,9 +115,16 @@ export function ContainerView() {
     else void trackingStartSession(id);
   }
 
-  function create(text: string, type: 'task' | 'note' = isNotesProject ? 'note' : 'task') {
+  function create(
+    text: string,
+    type: 'task' | 'note' = isNotesProject ? 'note' : 'task',
+  ) {
     mutate((db, dev) =>
-      createFromQuickAdd(db, dev, text, { parentId: id, ownerId: getCurrentUserId(), type }),
+      createFromQuickAdd(db, dev, text, {
+        parentId: id,
+        ownerId: getCurrentUserId(),
+        type,
+      }),
     );
   }
 
@@ -141,34 +158,36 @@ export function ContainerView() {
           >
             {item.title || (isProject ? 'Untitled project' : 'Untitled')}
           </h1>
-          <p className="mt-0.5 text-sm text-text-muted">
-            {isNotesProject ? (
-              // A notebook has nothing "left" to do — count what's in it instead.
-              <>
-                {noteCount} {noteCount === 1 ? 'note' : 'notes'}
-              </>
-            ) : (
-              <>
-                {remaining} {remaining === 1 ? 'task' : 'tasks'} left
-                {!isProject && ' · focused'}
-              </>
-            )}
-          </p>
-          {item.note && <Markdown className="mt-2 text-text-muted">{item.note}</Markdown>}
-        </div>
-        <button
-          onClick={toggleTrack}
-          className={cn(
-            'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium',
-            tracking
-              ? 'border-danger text-danger hover:bg-surface-2'
-              : 'border-border text-text-muted hover:bg-surface-2 hover:text-text',
+          {item.note && (
+            <Markdown className="mt-2 text-text-muted">{item.note}</Markdown>
           )}
-          title={tracking ? 'Stop tracking time' : 'Record time on this project'}
-        >
-          {tracking ? <Square size={14} fill="currentColor" /> : <Timer size={14} />}
-          {tracking ? 'Stop' : 'Record Time'}
-        </button>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <FiltersToggle
+            open={filtersOpen}
+            onToggle={() => setFiltersOpen((open) => !open)}
+            controlsId={filtersId}
+          />
+          <button
+            onClick={toggleTrack}
+            className={cn(
+              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium',
+              tracking
+                ? 'border-danger text-danger hover:bg-surface-2'
+                : 'border-border text-text-muted hover:bg-surface-2 hover:text-text',
+            )}
+            title={
+              tracking ? 'Stop tracking time' : 'Record time on this project'
+            }
+          >
+            {tracking ? (
+              <Square size={14} fill="currentColor" />
+            ) : (
+              <Timer size={14} />
+            )}
+            {tracking ? 'Stop' : 'Record Time'}
+          </button>
+        </div>
       </div>
 
       <div className="mb-3">
@@ -187,9 +206,19 @@ export function ContainerView() {
         />
       </div>
 
-      <ViewControls prefs={prefs} onChange={updatePrefs} tags={tags} projects={projects} />
+      <div id={filtersId} hidden={!filtersOpen}>
+        <ViewControls
+          prefs={prefs}
+          onChange={updatePrefs}
+          tags={tags}
+          projects={projects}
+        />
 
-      <ViewRow className="mb-3" collapseIds={flatMode ? undefined : containerIds} />
+        <ViewRow
+          className="mb-3"
+          collapseIds={flatMode ? undefined : containerIds}
+        />
+      </div>
 
       {flatMode ? (
         rows.length === 0 ? (

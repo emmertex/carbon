@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import {
   listSessions,
@@ -118,22 +118,39 @@ export function TimeTrackedView() {
 
   const data = useQuery(
     (db) => {
-      const tagSet = tagIds.length ? new Set(tagIds) : null;
       const blockTags = (b: SessionBlock) => {
         const ids = new Set<string>();
         for (const t of getItemTags(db, b.session.item_id)) ids.add(t.id);
         for (const seg of b.segments) for (const t of getItemTags(db, seg.log.item_id)) ids.add(t.id);
         return ids;
       };
-      const blocks = listSessions(db, fromIso, toIso, uid)
+      const rangeBlocks = listSessions(db, fromIso, toIso, uid)
         .map((s) => getSessionBlock(db, s))
-        .filter((b) => b.trackedMs > 0)
-        .filter((b) => !projectFilter || b.session.item_id === projectFilter)
-        .filter((b) => !tagSet || [...blockTags(b)].some((id) => tagSet.has(id)));
-      return { blocks, projects: getProjects(db), allTags: listTags(db) };
+        .filter((b) => b.trackedMs > 0);
+      // Options depend on the date range, before applying either report filter.
+      const projectIds = new Set(rangeBlocks.map((b) => b.session.item_id));
+      const tagsByBlock = new Map(rangeBlocks.map((b) => [b.session.id, blockTags(b)]));
+      const availableTagIds = new Set([...tagsByBlock.values()].flatMap((ids) => [...ids]));
+      const projects = getProjects(db);
+      const filterProjects = projects.filter((p) => projectIds.has(p.id));
+      const allTags = listTags(db).filter((t) => availableTagIds.has(t.id));
+      const activeProject = filterProjects.some((p) => p.id === projectFilter) ? projectFilter : '';
+      const activeTagIds = tagIds.filter((id) => allTags.some((t) => t.id === id));
+      const tagSet = new Set(activeTagIds);
+      const blocks = rangeBlocks
+        .filter((b) => !activeProject || b.session.item_id === activeProject)
+        .filter((b) => !tagSet.size || [...tagsByBlock.get(b.session.id)!].some((id) => tagSet.has(id)));
+      return { blocks, projects, filterProjects, allTags, activeProject, activeTagIds };
     },
     [fromIso, toIso, projectFilter, JSON.stringify(tagIds), uid],
   );
+
+  // Drop unavailable selections so they cannot silently filter a later range.
+  useEffect(() => {
+    if (!data) return;
+    if (projectFilter !== data.activeProject) setProjectFilter(data.activeProject);
+    if (tagIds.length !== data.activeTagIds.length) setTagIds(data.activeTagIds);
+  }, [data, projectFilter, tagIds]);
 
   const total = useMemo(
     () => (data?.blocks ?? []).reduce((s, b) => s + b.trackedMs, 0),
@@ -155,7 +172,7 @@ export function TimeTrackedView() {
   );
 
   if (!data) return null;
-  const { blocks, projects, allTags } = data;
+  const { blocks, projects, filterProjects, allTags, activeProject, activeTagIds } = data;
 
   function setTimes(log: TimeLog, patch: Partial<Pick<TimeLog, 'start_time' | 'end_time'>>) {
     mutate((db, dev) => saveTimeLog(db, dev, { ...log, ...patch }));
@@ -214,12 +231,12 @@ export function TimeTrackedView() {
         <span className="text-text-faint">to</span>
         <input type="date" value={toStr} onChange={(e) => setToStr(e.target.value)} className={inputCls} />
         <Select
-          value={projectFilter}
+          value={activeProject}
           onChange={(e) => setProjectFilter(e.target.value)}
           className="px-2 py-1 text-xs"
         >
           <option value="">All projects</option>
-          {projects.map((p) => (
+          {filterProjects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.title || 'Untitled'}
             </option>
@@ -260,7 +277,7 @@ export function TimeTrackedView() {
           {allTags.map((t) => (
             <Chip
               key={t.id}
-              active={tagIds.includes(t.id)}
+              active={activeTagIds.includes(t.id)}
               onClick={() => toggleTag(t.id)}
               className="px-2 py-0.5 font-normal"
             >

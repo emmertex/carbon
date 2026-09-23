@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Pause } from 'lucide-react';
 import {
@@ -18,6 +18,7 @@ import { applySort, getPrefs, savePrefs, type ViewPrefs } from '@/lib/views';
 import { createFromQuickAdd } from '@/lib/quickadd';
 import { QuickAdd } from '@/components/QuickAdd';
 import { TaskList } from '@/components/TaskList';
+import { FiltersToggle } from '@/components/FiltersToggle';
 import { ViewControls } from '@/components/ViewControls';
 import { ViewRow } from '@/components/ViewRow';
 import { TagMark } from '@/components/TagMark';
@@ -33,6 +34,8 @@ export function TagsView() {
     if (id) select(id, 'tag');
   }, [id, select]);
 
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
   const [prefs, setPrefs] = useState<ViewPrefs>(() => getPrefs(`tag:${id}`));
   useEffect(() => setPrefs(getPrefs(`tag:${id}`)), [id]);
   function updatePrefs(p: ViewPrefs) {
@@ -48,8 +51,12 @@ export function TagsView() {
       // Descendant-inclusive: a parent tag surfaces its children's tasks too.
       const ids = expandTagIds(db, [id!]);
       const seen = new Map<string, Item>();
-      for (const tid of ids) for (const it of getItemsByTag(db, tid)) seen.set(it.id, it);
-      const filtered = applySort(filterByPrefs(db, [...seen.values()], prefs), prefs.sort);
+      for (const tid of ids)
+        for (const it of getItemsByTag(db, tid)) seen.set(it.id, it);
+      const filtered = applySort(
+        filterByPrefs(db, [...seen.values()], prefs),
+        prefs.sort,
+      );
       return {
         selected,
         color: effectiveTagColor(db, selected.name),
@@ -76,8 +83,9 @@ export function TagsView() {
       <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6">
         <h1 className="text-2xl font-bold tracking-tight">Tags</h1>
         <p className="mt-2 text-sm text-text-muted">
-          Pick a tag from the sidebar to see everything filed under it (including nested tags), or
-          to edit its colour, hold status, and location.
+          Pick a tag from the sidebar to see everything filed under it
+          (including nested tags), or to edit its colour, hold status, and
+          location.
         </p>
       </div>
     );
@@ -103,24 +111,33 @@ export function TagsView() {
             <TagMark color={color} className="text-xl" />
             <span>{abbreviateTagPath(selected.name)}</span>
           </h1>
-          <p className="mt-0.5 flex items-center gap-2 text-sm text-text-muted">
-            {rows.length} {rows.length === 1 ? 'task' : 'tasks'} (incl. nested)
-            {onHold && (
-              <span className="inline-flex items-center gap-1 text-text-faint">
-                <Pause size={12} /> on hold
-              </span>
-            )}
-          </p>
+          {onHold && (
+            <p className="mt-0.5 inline-flex items-center gap-1 text-sm text-text-faint">
+              <Pause size={12} /> on hold
+            </p>
+          )}
         </div>
+        <FiltersToggle
+          open={filtersOpen}
+          onToggle={() => setFiltersOpen((open) => !open)}
+          controlsId={filtersId}
+        />
       </div>
 
       <div className="mb-3">
         <QuickAdd onCreate={create} />
       </div>
 
-      <ViewControls prefs={prefs} onChange={updatePrefs} tags={tags} projects={projects} />
+      <div id={filtersId} hidden={!filtersOpen}>
+        <ViewControls
+          prefs={prefs}
+          onChange={updatePrefs}
+          tags={tags}
+          projects={projects}
+        />
 
-      <ViewRow className="mb-3" />
+        <ViewRow className="mb-3" />
+      </div>
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-sm text-text-muted">
