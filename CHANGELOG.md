@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.3
+**Maintenance**
+
+- Updated libraries and dependencies across web, server, desktop, and Android.
+
+## v1.3.2
+**Completing Projects**
+
+- Projects that are completed, are now hidden from the PROJECTS list. 
+- Click the project icon, to show all archived projects.
+
 ## v1.3.1
 **Minor UI improvements**
 

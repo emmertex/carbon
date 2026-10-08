@@ -24,6 +24,7 @@ import {
   X,
   Undo2,
   Redo2,
+  Archive,
 } from 'lucide-react';
 import {
   DndContext,
@@ -303,20 +304,23 @@ function ProjectsSection() {
   const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
   const data = useDeferredQuery(
     (db) => {
-      const projects = getProjects(db);
+      const allProjects = getProjects(db);
+      const projects = allProjects.filter((project) => project.status !== 'done');
+      const archivedProjects = allProjects.filter((project) => project.status === 'done');
       const folders = getFolders(db);
       // One pass for every project's open count, instead of a recursive
       // subtaskProgress walk per project on each (deferred) sidebar render.
       const counts = openCountsByContainer(db, projects.map((p) => p.id), countScope);
       const openById: Record<string, number> = {};
       for (const p of projects) openById[p.id] = counts.get(p.id) ?? 0;
-      return { projects, folders, openById };
+      return { projects, archivedProjects, folders, openById };
     },
     [countScope],
   );
@@ -453,7 +457,23 @@ function ProjectsSection() {
         <span className="text-xs font-semibold uppercase tracking-wide text-text-faint">
           Projects
         </span>
-        <div className="relative">
+        <div className="relative flex items-center gap-1">
+          {!!data?.archivedProjects.length && (
+            <button
+              type="button"
+              className={cn(
+                'rounded p-1 hover:bg-surface-2 hover:text-text',
+                archiveOpen ? 'text-accent' : 'text-text-faint',
+              )}
+              onClick={() => setArchiveOpen((open) => !open)}
+              title="Archived projects"
+              aria-label="Archived projects"
+              aria-expanded={archiveOpen}
+              aria-controls="archived-projects"
+            >
+              <Archive size={15} />
+            </button>
+          )}
           <button
             className="rounded p-1 text-text-faint hover:bg-surface-2 hover:text-text"
             onClick={() => setMenuOpen((o) => !o)}
@@ -547,6 +567,34 @@ function ProjectsSection() {
             )}
           </DragOverlay>
         </DndContext>
+        {!!data?.archivedProjects.length && archiveOpen && (
+          <section id="archived-projects" aria-label="Archived projects" className="mt-2">
+            <button
+              type="button"
+              onClick={() => setArchiveOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-text-muted hover:bg-surface-2"
+              aria-label="Collapse Archive"
+              aria-expanded={true}
+            >
+              <FolderOpen size={17} className="shrink-0" />
+              <span className="flex-1 text-left">Archive</span>
+              <span className="text-xs tabular-nums text-text-faint">
+                {data.archivedProjects.length}
+              </span>
+            </button>
+            <div className="pl-3.5">
+              {data.archivedProjects.map((project) => (
+                <NavItem
+                  key={project.id}
+                  to={`/project/${project.id}`}
+                  icon={<ProjectGlyph mode={project.order_mode} size={17} color={project.color} />}
+                  label={project.title || 'Untitled project'}
+                  onClick={close}
+                />
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </>
   );
