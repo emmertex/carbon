@@ -22,7 +22,7 @@ import { getHostLmConfig, resolveAgent as resolveNlAgent, isHostAgent, checkHost
 import { buildAgentApiDeps } from './agent-ops';
 import { runAgentCommand } from './agent-command';
 import { getUserTimezone } from './user-prefs';
-import type { TenantRegistry } from './tenant';
+import type { TenantCtx, TenantRegistry } from './tenant';
 import { safeFetch } from './safe-fetch';
 
 const CODE_TTL_MS = 10 * 60 * 1000; // pairing codes are short-lived
@@ -606,6 +606,25 @@ async function runLinkedCommand(
     await reply('Your workspace is currently unavailable. Try again later.');
     return;
   }
+  // Hold a DB lease across the (slow, LLM-bound) run so an LRU eviction meanwhile
+  // defers the handle close instead of closing it under the agent.
+  const release = deps.registry.acquireDbLease?.(ctx.db);
+  try {
+    await runLinkedCommandIn(deps, ctx, chatId, link, text, reply, extra);
+  } finally {
+    release?.();
+  }
+}
+
+async function runLinkedCommandIn(
+  deps: TelegramDeps,
+  ctx: TenantCtx,
+  chatId: string,
+  link: TelegramLink,
+  text: string,
+  reply: (t: string) => Promise<boolean>,
+  extra?: { confirmed?: PendingConfirm['confirm']; alreadySucceeded?: PendingConfirm['skip'] },
+): Promise<void> {
   const nl = getNlSettings(ctx.db);
   const agent =
     nl.enabled && nl.agentId

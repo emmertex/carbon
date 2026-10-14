@@ -2,7 +2,9 @@ import {
   hasWriteAccess,
   applyOp,
   getItem,
+  getUser,
   type Db,
+  type Item,
   type Op,
   type RecordOp,
   type ItemPatch,
@@ -103,27 +105,49 @@ export function oversizedSyncArray(
   return null;
 }
 
-/** Owners of items in this push batch that the caller is marking done and is
- *  allowed to write. Used so a write-sharee completing a recurring task can create
- *  the next occurrence still owned by the series owner (instead of sanitizeOps
- *  rewriting the create to the completer and dropping the series for the owner).
+/** Recurring items in this push batch that the caller is marking done and is
+ *  allowed to write. A brand-new item may keep a non-caller owner only when it is the
+ *  genuine recurrence spawn of one of these (see `matchSeriesSpawn`), so a write-sharee
+ *  completing a recurring task creates the next occurrence still owned by the series
+ *  owner — without being able to plant arbitrary items in that owner's account.
  */
-function seriesOwnersBeingCompleted(
+function recurringItemsBeingCompleted(
   db: Db,
   userId: string,
   ops: Op[],
-): Set<string> {
-  const owners = new Set<string>();
+): Map<string, Item> {
+  const out = new Map<string, Item>();
   for (const op of ops) {
     if (!op?.fields || op.fields.status !== "done") continue;
     if (typeof op.item_id !== "string") continue;
     const item = getItem(db, op.item_id);
-    if (!item?.owner_id) continue;
+    if (!item?.owner_id || !item.recurrence) continue;
     if (item.owner_id !== userId && !hasWriteAccess(db, op.item_id, userId))
       continue;
-    owners.add(item.owner_id);
+    out.set(item.id, item);
   }
-  return owners;
+  return out;
+}
+
+/** The completed recurring item `fields` is the spawn of, or null. The create must
+ *  request that item's owner and match its type and parent; each completed item
+ *  yields at most one spawn (the caller of this consumes the match). */
+function matchSeriesSpawn(
+  completing: Map<string, Item>,
+  fields: ItemPatch,
+  requestedOwner: string,
+): Item | null {
+  const type = typeof fields.type === "string" ? fields.type : "task";
+  const parent = typeof fields.parent_id === "string" ? fields.parent_id : null;
+  for (const item of completing.values()) {
+    if (
+      item.owner_id === requestedOwner &&
+      item.type === type &&
+      (item.parent_id ?? null) === parent
+    )
+      return item;
+  }
+  return null;
 }
 
 export function sanitizeOps(
@@ -131,10 +155,15 @@ export function sanitizeOps(
   userId: string,
   ops: Op[],
   now = Date.now(),
+  /** Filled with spawnId -> completed recurring item id for every create accepted as a
+   *  series spawn owned by someone else. Pass it on to `sanitizeRecordOps` so the
+   *  caller's own share on the source item (and only that) can be copied over. */
+  spawnSources?: Map<string, string>,
 ): Op[] {
   const cred = sessionCredentialFor(userId);
   const maxTs = now + SYNC_SKEW_MS;
-  const seriesOwners = seriesOwnersBeingCompleted(db, userId, ops);
+  const completing = recurringItemsBeingCompleted(db, userId, ops);
+  const isAdmin = userId === "local" || getUser(db, userId)?.role === "admin";
 
   const out: Op[] = [];
   // Resolve same-batch parents before children using an iterative dependency walk.
@@ -209,15 +238,19 @@ export function sanitizeOps(
       );
       if (!existing) {
         // Brand-new item: default owner is the pusher. Preserve a different owner_id
-        // only when this create is continuing a recurring series the caller is allowed
-        // to complete (same-batch status:done), or when attaching under a parent they
-        // can write whose owner matches the requested owner.
+        // only when this create is the genuine spawn of a recurring item the caller is
+        // completing in this batch (recurrence set, same type + parent, one spawn per
+        // completed item), or when attaching under a parent they can write whose owner
+        // matches the requested owner.
         {
           const requested = fields.owner_id;
           let keep = typeof requested === "string" && requested === userId;
           if (!keep && typeof requested === "string") {
-            if (seriesOwners.has(requested)) {
+            const source = matchSeriesSpawn(completing, fields, requested);
+            if (source) {
               keep = true;
+              completing.delete(source.id);
+              spawnSources?.set(op.item_id, source.id);
             } else {
               const parent = parentId ? getItem(db, parentId) : undefined;
               if (
@@ -243,9 +276,12 @@ export function sanitizeOps(
         )
           continue;
         if ("owner_id" in fields) {
-          if (!owner)
-            fields.owner_id = userId; // claiming an unowned/shell row
-          else if (fields.owner_id !== owner && userId !== owner)
+          if (!owner) {
+            // Claiming an unowned/shell row is admin-only: otherwise any member
+            // could take over whatever null-owner rows exist.
+            if (isAdmin) fields.owner_id = userId;
+            else delete fields.owner_id;
+          } else if (fields.owner_id !== owner && userId !== owner)
             delete fields.owner_id; // only the owner transfers
         }
       }
@@ -285,10 +321,18 @@ export function sanitizeRecordOps(
    * but the owner.
    */
   justCreatedIds?: ReadonlySet<string>,
+  /** spawnId -> source item id, as filled by `sanitizeOps` (see there). */
+  spawnSources?: ReadonlyMap<string, string>,
 ): RecordOp[] {
   const cred = sessionCredentialFor(userId);
   const maxTs = now + SYNC_SKEW_MS;
-  const authorized = validateRecordOps(db, cred, ops, justCreatedIds);
+  const authorized = validateRecordOps(
+    db,
+    cred,
+    ops,
+    justCreatedIds,
+    spawnSources,
+  );
   // A2: bound the shared-vocabulary tag store (see capNewTags).
   const capped = capNewTags(db, authorized);
   return capped.map((op) => {

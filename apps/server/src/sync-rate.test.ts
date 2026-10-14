@@ -119,3 +119,16 @@ describe("POST /api/sync — per-credential rate limit (429, no loss)", () => {
     );
   });
 });
+
+describe("pruneHitWindows", () => {
+  test("drops keys whose newest hit left the window, keeps the rest", async () => {
+    const { pruneHitWindows } = await import("./index");
+    const m = new Map<string, number[]>([
+      ["stale", [100, 200]],
+      ["fresh", [100, 900]],
+      ["empty", []],
+    ]);
+    pruneHitWindows(m, 500);
+    assert.deepEqual([...m.keys()], ["fresh"]);
+  });
+});

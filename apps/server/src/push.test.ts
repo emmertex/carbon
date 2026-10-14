@@ -596,3 +596,269 @@ describe("POST /push/fcm/unsubscribe", () => {
     );
   });
 });
+
+// ─── D / E / J: parallel sends, bounded scan, dead-target cleanup ─────────────
+
+function stubWebPush(
+  impl: (sub: { endpoint: string }) => Promise<unknown>,
+): () => void {
+  const realSend = webpush.sendNotification;
+  webpush.sendNotification = impl as unknown as typeof webpush.sendNotification;
+  return () => {
+    webpush.sendNotification = realSend;
+  };
+}
+
+describe("notifyTask parallel fan-out (D)", () => {
+  test("recipients and their devices are sent to concurrently", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: ownerId } = addUser("owner", "pw");
+    const { id: otherId } = addUser("other", "pw");
+    for (const [uid, n] of [
+      [ownerId, "o1"],
+      [ownerId, "o2"],
+      [otherId, "x1"],
+    ] as const)
+      saveSubscription(db, uid, {
+        endpoint: `https://8.8.8.8/${n}`,
+        keys: { p256dh: "A", auth: "B" },
+      });
+    const item = createItem(db, deviceId, { title: "t", ownerId });
+    shareItem(db, deviceId, item.id, otherId, "read");
+    let inFlight = 0;
+    let peak = 0;
+    const restore = stubWebPush(async () => {
+      peak = Math.max(peak, ++inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return { statusCode: 201 };
+    });
+    try {
+      const r = await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.deepEqual(r, { targets: 3, delivered: 3 });
+    } finally {
+      restore();
+    }
+    assert.equal(peak, 3, "all three subscriptions in flight at once");
+  });
+});
+
+describe("web push permanent failures (J)", () => {
+  test("400/413 drop a subscription after 3 consecutive failures; success resets", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser("u", "pw");
+    const endpoint = "https://8.8.8.8/bad";
+    saveSubscription(db, userId, { endpoint, keys: { p256dh: "A", auth: "B" } });
+    const item = createItem(db, deviceId, { title: "t", ownerId: userId });
+    const failures = () =>
+      db.get<{ failures: number }>(
+        "SELECT failures FROM push_subscriptions WHERE endpoint = ?",
+        [endpoint],
+      )?.failures;
+    let status = 400;
+    const restore = stubWebPush(async () => {
+      if (status === 201) return { statusCode: 201 };
+      throw Object.assign(new Error("x"), { statusCode: status });
+    });
+    const realError = console.error;
+    const realWarn = console.warn;
+    console.error = () => {};
+    console.warn = () => {};
+    try {
+      await notifyTask(db, item.id, { title: "a", body: "b" });
+      status = 413;
+      await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.equal(failures(), 2);
+      status = 201;
+      await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.equal(failures(), 0, "a success resets the streak");
+      status = 400;
+      await notifyTask(db, item.id, { title: "a", body: "b" });
+      await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.equal(failures(), 2);
+      const r = await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.deepEqual(r, { targets: 0, delivered: 0 }, "dropped target no longer counts");
+      assert.equal(failures(), undefined, "subscription removed");
+      // A transient 500 never counts toward removal.
+      saveSubscription(db, userId, { endpoint, keys: { p256dh: "A", auth: "B" } });
+      status = 500;
+      for (let i = 0; i < 4; i++)
+        await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.equal(failures(), 0);
+      // Nor does 403: a tenant-wide VAPID key fault must not wipe subscriptions.
+      status = 403;
+      for (let i = 0; i < 4; i++)
+        await notifyTask(db, item.id, { title: "a", body: "b" });
+      assert.equal(failures(), 0, "403 never counts toward removal");
+    } finally {
+      restore();
+      console.error = realError;
+      console.warn = realWarn;
+    }
+  });
+
+  test("a dead subscription stops holding checkReminders in retry once dropped", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser("u", "pw");
+    saveSubscription(db, userId, {
+      endpoint: "https://8.8.8.8/dead400",
+      keys: { p256dh: "A", auth: "B" },
+    });
+    const item = createItem(db, deviceId, { title: "t", ownerId: userId });
+    updateItem(db, deviceId, item.id, {
+      due_date: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const marked = () =>
+      !!db.get("SELECT 1 AS x FROM reminders_sent WHERE item_id = ?", [item.id]);
+    const restore = stubWebPush(async () => {
+      throw Object.assign(new Error("x"), { statusCode: 400 });
+    });
+    const realError = console.error;
+    const realWarn = console.warn;
+    console.error = () => {};
+    console.warn = () => {};
+    try {
+      await checkReminders(db);
+      await checkReminders(db);
+      assert.ok(!marked(), "still retrying while the target may be alive");
+      await checkReminders(db);
+      assert.ok(marked(), "third strike drops the target; nothing left → latched");
+    } finally {
+      restore();
+      console.error = realError;
+      console.warn = realWarn;
+    }
+  });
+});
+
+describe("checkReminders bounded scan (E)", () => {
+  const sentKinds = (db: TestDb, id: string) =>
+    db
+      .all<{ kind: string }>(
+        "SELECT kind FROM reminders_sent WHERE item_id = ? ORDER BY kind",
+        [id],
+      )
+      .map((r) => r.kind);
+
+  test("LIMIT + round-robin cursor reaches every item across ticks", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser("u", "pw");
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const it = createItem(db, deviceId, { title: `t${i}`, ownerId: userId });
+      updateItem(db, deviceId, it.id, { due_date: past });
+      ids.push(it.id);
+    }
+    const count = () =>
+      ids.filter((id) => sentKinds(db, id).length > 0).length;
+    await checkReminders(db, { limit: 2 });
+    assert.equal(count(), 2);
+    await checkReminders(db, { limit: 2 });
+    assert.equal(count(), 4);
+    await checkReminders(db, { limit: 2 });
+    assert.equal(count(), 5);
+  });
+
+  test("the cursor keeps failing items from starving the rest", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: failing } = addUser("f", "pw");
+    const { id: quiet } = addUser("q", "pw");
+    saveSubscription(db, failing, {
+      endpoint: "https://8.8.8.8/down",
+      keys: { p256dh: "A", auth: "B" },
+    });
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const items = [failing, failing, quiet, quiet].map((owner, i) => {
+      const it = createItem(db, deviceId, { title: `t${i}`, ownerId: owner });
+      updateItem(db, deviceId, it.id, { due_date: past });
+      return { id: it.id, owner };
+    });
+    const restore = stubWebPush(async () => {
+      throw Object.assign(new Error("x"), { statusCode: 503 });
+    });
+    const realError = console.error;
+    console.error = () => {};
+    try {
+      for (let i = 0; i < 4; i++) await checkReminders(db, { limit: 1 });
+    } finally {
+      restore();
+      console.error = realError;
+    }
+    for (const it of items)
+      assert.equal(
+        sentKinds(db, it.id).length > 0,
+        it.owner === quiet,
+        "quiet users' alerts latched; failing ones still pending",
+      );
+  });
+
+  test("already-reminded items are excluded in SQL; a moved date fires again", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser("u", "pw");
+    const t1 = new Date(Date.now() - 120_000).toISOString();
+    const t2 = new Date(Date.now() - 60_000).toISOString();
+    const a = createItem(db, deviceId, { title: "a", ownerId: userId });
+    updateItem(db, deviceId, a.id, { due_date: t1, reminder_at: t1, defer_date: t1 });
+    await checkReminders(db);
+    assert.deepEqual(sentKinds(db, a.id), ["defer", "due", "reminder"]);
+
+    let calls = 0;
+    saveSubscription(db, userId, {
+      endpoint: "https://8.8.8.8/x",
+      keys: { p256dh: "A", auth: "B" },
+    });
+    const restore = stubWebPush(async () => {
+      calls++;
+      return { statusCode: 201 };
+    });
+    try {
+      await checkReminders(db, { limit: 1 });
+      assert.equal(calls, 0, "fully-reminded item not re-sent");
+      updateItem(db, deviceId, a.id, { due_date: t2 });
+      await checkReminders(db, { limit: 1 });
+      assert.equal(calls, 1, "only the moved due date fires");
+    } finally {
+      restore();
+    }
+    const markers = db.all<{ marker: string }>(
+      "SELECT marker FROM reminders_sent WHERE item_id = ? AND kind = 'due' ORDER BY marker",
+      [a.id],
+    );
+    assert.deepEqual(markers.map((m) => m.marker), [t1, t2]);
+  });
+
+  test("a zero time budget defers all work to the next tick", async () => {
+    const { db, deviceId, addUser } = makeTestDb();
+    const { id: userId } = addUser("u", "pw");
+    const it = createItem(db, deviceId, { title: "t", ownerId: userId });
+    updateItem(db, deviceId, it.id, {
+      due_date: new Date(Date.now() - 60_000).toISOString(),
+    });
+    await checkReminders(db, { budgetMs: 0 });
+    assert.deepEqual(sentKinds(db, it.id), []);
+    await checkReminders(db);
+    assert.deepEqual(sentKinds(db, it.id), ["due"]);
+  });
+
+  test("scan uses the partial alert-date indexes", () => {
+    const { db } = makeTestDb();
+    const plan = db
+      .all<{ detail: string }>(
+        `EXPLAIN QUERY PLAN SELECT id FROM items
+         WHERE deleted = 0 AND status = 'active' AND due_date IS NOT NULL AND due_date <= ?`,
+        ["2026-01-01"],
+      )
+      .map((p) => p.detail)
+      .join("\n");
+    assert.match(plan, /idx_items_due_active/);
+    const subPlan = db
+      .all<{ detail: string }>(
+        "EXPLAIN QUERY PLAN SELECT endpoint FROM push_subscriptions WHERE user_id = ? ORDER BY endpoint",
+        ["u"],
+      )
+      .map((p) => p.detail)
+      .join("\n");
+    assert.match(subPlan, /idx_push_subs_user/);
+  });
+});

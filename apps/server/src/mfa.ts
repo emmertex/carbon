@@ -64,6 +64,9 @@ export function ensureMfaTables(db: Db): void {
   add('email_verified_at', 'TEXT');
   add('totp_secret', 'TEXT');
   add('totp_confirmed_at', 'TEXT');
+  // Highest TOTP time step ever accepted for this user: a code (or any earlier
+  // code still inside the ±1 step window) is never accepted twice.
+  add('totp_last_step', 'INTEGER');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS trusted_devices (
@@ -279,6 +282,43 @@ function deviceTrustAllowed(db: Db, userId: string): boolean {
   return (deviceFails(db).get(userId) ?? []).length < DEVICE_TRUST_FAIL_MAX;
 }
 
+/** Failed second-factor submissions per account (across ALL challenges) before
+ *  the account stops issuing login challenges and accepting codes for the window.
+ *  MFA_MAX_ATTEMPTS is per challenge, and every password login mints a fresh
+ *  challenge, so without this an attacker holding the password gets unlimited
+ *  guesses at a 6-digit code. */
+export const MFA_FAIL_MAX = Math.max(1, Number(process.env.MFA_FAIL_MAX) || 10);
+export const MFA_FAIL_WINDOW_MS = 15 * 60_000;
+
+const mfaFailsByDb = new WeakMap<Db, Map<string, number[]>>();
+
+function mfaFails(db: Db): Map<string, number[]> {
+  let buckets = mfaFailsByDb.get(db);
+  if (!buckets) {
+    buckets = new Map();
+    mfaFailsByDb.set(db, buckets);
+  }
+  const cutoff = Date.now() - MFA_FAIL_WINDOW_MS;
+  for (const [k, v] of buckets) {
+    const fresh = v.filter((t) => t > cutoff);
+    if (fresh.length) buckets.set(k, fresh);
+    else buckets.delete(k);
+  }
+  return buckets;
+}
+
+/** Record one failed second-factor submission for `userId`. */
+export function recordMfaFailure(db: Db, userId: string): void {
+  const buckets = mfaFails(db);
+  buckets.set(userId, [...(buckets.get(userId) ?? []), Date.now()]);
+}
+
+/** False while the account's failed-2FA window is exhausted: issue no new login
+ *  challenge and accept no code. No clear-on-success, like deviceTrustAllowed. */
+export function mfaAttemptsAllowed(db: Db, userId: string): boolean {
+  return (mfaFails(db).get(userId) ?? []).length < MFA_FAIL_MAX;
+}
+
 /** Presence check only — a trust row is NOT authorization to skip 2FA. The bypass
  *  goes through useTrustedDevice, which also demands the device's secret. */
 export function isTrustedDevice(db: Db, userId: string, deviceId: string): boolean {
@@ -461,6 +501,11 @@ export function validateMfaChallenge(db: Db, secret: string): ValidChallenge | n
 }
 
 export function bumpChallengeAttempts(db: Db, challengeId: string): void {
+  const owner = db.get<{ user_id: string }>(
+    `SELECT user_id FROM mfa_challenges WHERE id = ?`,
+    [challengeId],
+  );
+  if (owner) recordMfaFailure(db, owner.user_id);
   db.run(`UPDATE mfa_challenges SET attempts = attempts + 1 WHERE id = ?`, [challengeId]);
   const row = db.get<{ attempts: number }>(
     `SELECT attempts FROM mfa_challenges WHERE id = ?`,
@@ -597,13 +642,18 @@ export function startTotpEnroll(
     secret,
   });
   db.run(
-    `UPDATE user_auth SET totp_secret = ?, totp_confirmed_at = NULL WHERE user_id = ?`,
+    `UPDATE user_auth SET totp_secret = ?, totp_confirmed_at = NULL, totp_last_step = NULL WHERE user_id = ?`,
     [secret.base32, userId],
   );
   return { secret: secret.base32, uri: totp.toString() };
 }
 
-export function verifyTotpCode(db: Db, userId: string, code: string): boolean {
+export function verifyTotpCode(
+  db: Db,
+  userId: string,
+  code: string,
+  now = Date.now(),
+): boolean {
   const row = getAuthMfa(db, userId);
   if (!row?.totp_secret) return false;
   const totp = new TOTP({
@@ -613,8 +663,21 @@ export function verifyTotpCode(db: Db, userId: string, code: string): boolean {
     period: 30,
     secret: Secret.fromBase32(row.totp_secret),
   });
-  const delta = totp.validate({ token: String(code).trim(), window: 1 });
-  return delta !== null;
+  const delta = totp.validate({ token: String(code).trim(), window: 1, timestamp: now });
+  if (delta === null) return false;
+  // Replay guard: the matched step must be strictly newer than the last one
+  // accepted. Check-and-set in one transaction so two concurrent submissions of
+  // the same code can't both pass.
+  const step = Math.floor(now / 1000 / 30) + delta;
+  return db.transaction(() => {
+    const last = db.get<{ totp_last_step: number | null }>(
+      `SELECT totp_last_step FROM user_auth WHERE user_id = ?`,
+      [userId],
+    )?.totp_last_step;
+    if (last != null && step <= last) return false;
+    db.run(`UPDATE user_auth SET totp_last_step = ? WHERE user_id = ?`, [step, userId]);
+    return true;
+  });
 }
 
 export function confirmTotpEnroll(db: Db, userId: string, code: string): boolean {
@@ -627,7 +690,7 @@ export function confirmTotpEnroll(db: Db, userId: string, code: string): boolean
 }
 
 export function clearTotp(db: Db, userId: string): void {
-  db.run(`UPDATE user_auth SET totp_secret = NULL, totp_confirmed_at = NULL WHERE user_id = ?`, [
+  db.run(`UPDATE user_auth SET totp_secret = NULL, totp_confirmed_at = NULL, totp_last_step = NULL WHERE user_id = ?`, [
     userId,
   ]);
 }
@@ -697,7 +760,7 @@ export function countUnusedRecoveryCodes(db: Db, userId: string): number {
 export function resetMfa(db: Db, userId: string): void {
   db.run(
     `UPDATE user_auth SET email = NULL, email_verified_at = NULL,
-       totp_secret = NULL, totp_confirmed_at = NULL WHERE user_id = ?`,
+       totp_secret = NULL, totp_confirmed_at = NULL, totp_last_step = NULL WHERE user_id = ?`,
     [userId],
   );
   db.run(`DELETE FROM recovery_codes WHERE user_id = ?`, [userId]);

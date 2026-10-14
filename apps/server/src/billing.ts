@@ -188,3 +188,50 @@ export function markBillingEvent(controlDb: Db, eventId: string, type: string): 
     return false; // PRIMARY KEY conflict → already processed
   }
 }
+
+/** Atomically claim a provider event for processing. The INSERT is the claim: SQLite runs
+ *  it synchronously, so of N concurrent deliveries of the same event_id exactly one gets
+ *  true (the rest hit the PRIMARY KEY). Db.run returns no change count, so the conflict
+ *  is detected via the thrown constraint error rather than ON CONFLICT DO NOTHING. Call
+ *  BEFORE any await / side effect; release on failure so the provider's retry can win. */
+export function claimBillingEvent(controlDb: Db, eventId: string, type: string): boolean {
+  return markBillingEvent(controlDb, eventId, type);
+}
+
+/** Drop a claim taken by claimBillingEvent after processing failed (or must be retried),
+ *  so the provider's redelivery of the same event_id is processed rather than ignored. */
+export function releaseBillingEvent(controlDb: Db, eventId: string): void {
+  controlDb.run('DELETE FROM billing_events WHERE event_id = ?', [eventId]);
+}
+
+/** Subscription statuses that mean a live provider subscription may still bill. */
+export const LIVE_SUBSCRIPTION_STATUSES: ReadonlySet<string> = new Set(['active', 'pending', 'past_due']);
+
+/** Would starting a new subscription stack on a live one? Square: any row with a Square
+ *  subscription id in a live status (it keeps billing). Simulate: only an active one (a
+ *  stale pending has no external billing and may be re-staged). */
+export function subscriptionBlocksNew(
+  sub: { status: string | null; square_subscription_id?: string | null } | null | undefined,
+  provider: string,
+): boolean {
+  if (!sub?.status) return false;
+  if (provider === 'square') return !!sub.square_subscription_id && LIVE_SUBSCRIPTION_STATUSES.has(sub.status);
+  return sub.status === 'active';
+}
+
+const subscribeLocks = new Map<string, Promise<unknown>>();
+
+/** Serialise async work per key (in-process). A second caller for the same key waits for
+ *  the first to finish, so e.g. a double-clicked /billing/subscribe runs one at a time and
+ *  the second sees the first's persisted subscription. */
+export async function withTenantLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = subscribeLocks.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  subscribeLocks.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (subscribeLocks.get(key) === tail) subscribeLocks.delete(key);
+  }
+}

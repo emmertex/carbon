@@ -46,6 +46,8 @@ export interface GeocodeConfig {
   radiusM: number;
   /** Min ms between outbound requests. Defaults to 1100 to honour OSM ≤1 req/s policy. */
   requestIntervalMs?: number;
+  /** Max memoized lookups kept (LRU). Defaults to CACHE_MAX_ENTRIES. */
+  cacheMaxEntries?: number;
 }
 
 const DEFAULT_NOMINATIM = 'https://nominatim.openstreetmap.org';
@@ -58,6 +60,7 @@ const DEFAULT_UA =
 // lookups so a burst of NL commands can't get the deployment rate-limited/banned.
 const MIN_REQUEST_INTERVAL_MS = 1100;
 const CACHE_TTL_MS = 5 * 60_000;
+const CACHE_MAX_ENTRIES = 2000;
 
 // Concise tracing so a failing place search can be diagnosed from the server log:
 // which tier ran, the upstream HTTP status, and the hit count. Off by default
@@ -174,7 +177,10 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
 
   // Memoize the full sorted hit list per (query, rounded location, radius). Callers
   // slice it to their own limit, so nearestBrand and search share one upstream call.
+  // Size-capped LRU (Map insertion order; re-inserted on hit), expired entries dropped
+  // on access, so a long-running server doesn't accumulate every query it ever saw.
   const cache = new Map<string, { at: number; hits: Hit[] }>();
+  const cacheMax = Math.max(1, cfg.cacheMaxEntries ?? CACHE_MAX_ENTRIES);
   const cacheKey = (query: string, near: GeoPoint, radiusM: number) =>
     `${query.trim().toLowerCase()}|${near.lat.toFixed(3)},${near.lng.toFixed(3)}|${radiusM}`;
 
@@ -289,7 +295,10 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
     const limit = opts?.limit && opts.limit > 0 ? opts.limit : 5;
     const key = cacheKey(query, near, radiusM);
     const cached = cache.get(key);
-    if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.at >= CACHE_TTL_MS) cache.delete(key);
+    else if (cached) {
+      cache.delete(key); // move to most-recently-used
+      cache.set(key, cached);
       geoDbg(`"${query}" → ${cached.hits.length} hit(s) (cache)`);
       return cached.hits.slice(0, limit).map((h) => ({ point: h.point, label: h.label }));
     }
@@ -329,7 +338,15 @@ export function makeOsmProvider(cfg: GeocodeConfig, allowPrivate: boolean): Geoc
     );
     // Cache only successful lookups: a transient upstream failure must not pin an empty
     // result for the whole TTL and keep failing on retry.
-    if (hits.length > 0) cache.set(key, { at: Date.now(), hits });
+    if (hits.length > 0) {
+      cache.delete(key);
+      cache.set(key, { at: Date.now(), hits });
+      while (cache.size > cacheMax) {
+        const oldest = cache.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
+    }
     return hits.slice(0, limit).map((h) => ({ point: h.point, label: h.label }));
   }
 

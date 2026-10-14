@@ -39,10 +39,15 @@ import {
   updateItem,
   setCompleted,
   addComment,
+  getComment,
+  updateComment,
+  deleteComment,
+  listAttachmentsFor,
   addAttachment,
   listComments,
   listAssigneesForItem,
   getItem,
+  getChildren,
   allItems,
   blobReferenceInventory,
   inbox,
@@ -53,6 +58,7 @@ import {
   type Op,
   type RecordOp,
   type ItemPatch,
+  type Comment,
   type UserRole,
 } from "@carbon/core";
 import { openDb } from "./sqlite";
@@ -135,11 +141,13 @@ import {
   consumeMfaChallenge,
   bumpChallengeAttempts,
   validateMfaChallenge,
+  mfaAttemptsAllowed,
 } from "./mfa";
 import {
   saveSubscription,
   removeSubscription,
   notifyTask,
+  sendToUser,
   startReminderScheduler,
 } from "./push";
 import { saveFcmToken, removeFcmToken } from "./fcm";
@@ -190,6 +198,7 @@ import { checkPurgeSuggestions } from "./purge-notices";
 import {
   resolveHostCeiling,
   federationRoutes,
+  FEDERATION_JSON_BODY_LIMIT,
   registerFederationConfigRoutes,
   bindOfferDelivery,
   runAllFederationExchanges,
@@ -218,6 +227,7 @@ import {
   hostLabel,
   RESERVED_SUBDOMAINS,
   type TenantCtx,
+  type TenantRegistry,
   type FetchApp,
 } from "./tenant";
 import {
@@ -257,7 +267,7 @@ import {
   type HostVars,
   type TenantRecord,
 } from "./control";
-import { personalKeyGuard } from "./personal-keys";
+import { personalKeyGuard, withinKeyProjects } from "./personal-keys";
 import { billingProvider as resolveBillingProvider } from "./billing-provider";
 import { sendOtcCode, sendBillingReceipt, sendDeleteOtcCode } from "./email";
 // Version is single-sourced from the repo-root package.json. esbuild inlines this JSON
@@ -270,8 +280,10 @@ import {
   recordPaidPeriod,
   upsertSubscription,
   setSubscriptionStatus,
-  markBillingEvent,
-  billingEventSeen,
+  claimBillingEvent,
+  releaseBillingEvent,
+  withTenantLock,
+  subscriptionBlocksNew,
 } from "./billing";
 import {
   isSquareConfigured,
@@ -359,6 +371,10 @@ const JSON_BODY_LIMIT =
   Math.max(64, Number(process.env.JSON_BODY_LIMIT_KB) || 1024) * 1024;
 const jsonBodyLimit = bodyLimit({
   maxSize: JSON_BODY_LIMIT,
+  onError: (c) => c.json({ error: "body too large" }, 413),
+});
+const federationSyncBodyLimit = bodyLimit({
+  maxSize: FEDERATION_JSON_BODY_LIMIT,
   onError: (c) => c.json({ error: "body too large" }, 413),
 });
 const blobBodyLimit = bodyLimit({
@@ -585,6 +601,16 @@ function blobsDirBytes(dir: string): number {
   return total;
 }
 
+// A9: lease a tenant DB for async work that outlives the request (agent runs, manual
+// CalDAV sync) so an LRU eviction meanwhile defers the handle close. Bound once the
+// registry exists (below); a no-op before then.
+let tenantDbLease: TenantRegistry["acquireDbLease"] | null = null;
+function leaseTenantDb(
+  db: Parameters<TenantRegistry["acquireDbLease"]>[0],
+): () => void {
+  return tenantDbLease ? tenantDbLease(db) : () => {};
+}
+
 // Exported (not just module-local) so tests can reach the REAL per-tenant route table —
 // the same handlers and middleware a production tenant app runs — without starting the
 // server (see IS_ENTRY at the bottom; importing index.ts for its factory is a no-op
@@ -762,6 +788,10 @@ export function buildTenantApp(
       if (rotated)
         return c.json(completeLogin(id, deviceId, deviceName, rotated));
     }
+    // Per-account failed-2FA window (across challenges): while exhausted, don't
+    // mint a fresh challenge, or each /login would hand out another 5 guesses.
+    if (!mfaAttemptsAllowed(db, id))
+      return c.json({ error: "too_many_attempts" }, 429);
     const challenge = createMfaChallenge(db, id, "login");
     const factors = getMfaStatus(db, id).factors;
     return c.json({ status: "needs_2fa", challenge, factors });
@@ -888,6 +918,8 @@ export function buildTenantApp(
     };
     const deviceId = body.device_id?.trim();
     if (!deviceId) return c.json({ error: "device_id required" }, 400);
+    if (!mfaAttemptsAllowed(db, userId))
+      return c.json({ error: "too_many_attempts" }, 429);
 
     let ok = false;
     if (body.totp) {
@@ -1242,12 +1274,19 @@ export function buildTenantApp(
   }
 
   // A2: per-credential sync rate limit — a sliding 1-minute window of sync hits per user
-  // (in-memory, pruned each call so it can't grow without bound). Returns the ms to wait
+  // (in-memory). The caller's own array is trimmed each call; keys whose NEWEST hit has
+  // left the window are pruned by an amortised sweep (at most once per window), so the
+  // map can't grow without bound and no call pays an O(n) scan. Returns the ms to wait
   // before the next allowed sync, or 0 when allowed. 0 cap = unlimited (no-op).
   const syncHits = new Map<string, number[]>();
+  let syncHitsPrunedAt = Date.now();
   const syncRate = (key: string): number => {
     if (SYNC_MAX_PER_MIN <= 0) return 0;
     const now = Date.now();
+    if (now - syncHitsPrunedAt >= 60_000) {
+      syncHitsPrunedAt = now;
+      pruneHitWindows(syncHits, now - 60_000);
+    }
     const win = now - 60_000;
     let hits = syncHits.get(key) ?? [];
     hits = hits.filter((t) => t > win);
@@ -1258,9 +1297,6 @@ export function buildTenantApp(
     }
     hits.push(now);
     syncHits.set(key, hits);
-    if (syncHits.size > 10_000)
-      for (const k of [...syncHits.keys()])
-        if ((syncHits.get(k) ?? []).length === 0) syncHits.delete(k);
     return 0;
   };
 
@@ -1414,7 +1450,11 @@ export function buildTenantApp(
     // share/assignee pushed alongside a brand-new item sees that item already ingested.
     // Deliberately skipped in open mode: no-auth single-user has exactly one trusted
     // caller, so author_id/user_id/ownership spoofing isn't a threat to guard against.
-    if (!open) body.ops = sanitizeOps(db, userId, opShape.ops);
+    // spawnId -> completed recurring item, for copying the caller's own share onto a
+    // series spawn that stays owned by the series owner (see sanitizeOps).
+    const spawnSources = new Map<string, string>();
+    if (!open)
+      body.ops = sanitizeOps(db, userId, opShape.ops, Date.now(), spawnSources);
     else body.ops = opShape.ops;
     const pushedOps = Array.isArray(body.ops) ? body.ops : [];
     // Creates in this push (type is only set on create) — share/tag copies onto a
@@ -1437,6 +1477,7 @@ export function buildTenantApp(
         recShape.ops,
         Date.now(),
         justCreatedIds,
+        spawnSources,
       );
     else body.recordOps = recShape.ops;
     const recIngest =
@@ -1450,6 +1491,7 @@ export function buildTenantApp(
         serverDeviceId,
         recIngest.fresh,
         allowPrivate(),
+        leaseTenantDb,
       ); // @mention / assignment -> agent run
 
     // A2 + A4: what the server refused to ingest — shape-rejected entries (with actionable
@@ -1988,7 +2030,23 @@ export function buildTenantApp(
     if (!item || item.deleted || !canSee(c.get("userId"), item.id)) {
       return c.json({ error: "not found" }, 404);
     }
-    return c.json(item);
+    // ?include=comments,subtasks,assignees,attachments (or `all`) embeds context so
+    // one read gives an agent the whole picture. Without it the shape is unchanged.
+    const inc = new Set((c.req.query("include") ?? "").split(",").map((s) => s.trim()));
+    const all = inc.has("all");
+    const userId = c.get("userId");
+    const extra: Record<string, unknown> = {};
+    if (all || inc.has("comments"))
+      extra.comments = listComments(db, item.id).map(commentView);
+    if (all || inc.has("subtasks"))
+      extra.subtasks = getChildren(db, item.id)
+        .filter((ch) => !ch.deleted && canSee(userId, ch.id))
+        .map((ch) => ({ id: ch.id, title: ch.title, status: ch.status, due_date: ch.due_date }));
+    if (all || inc.has("assignees"))
+      extra.assignees = listAssigneesForItem(db, item.id).map((a) => commentAuthor(a.user_id)).filter(Boolean);
+    if (all || inc.has("attachments"))
+      extra.attachments = listAttachmentsFor(db, "item", item.id);
+    return c.json({ ...item, ...extra });
   });
 
   api.patch("/tasks/:id", requireScope("tasks:write"), async (c) => {
@@ -2074,32 +2132,183 @@ export function buildTenantApp(
     return c.json(getItem(db, id));
   });
 
+  // ----- comments: the human ⇄ agent conversation channel ---------------------
+
+  type CommentAuthor = { id: string; username: string; display_name: string | null; is_bot: boolean };
+  function commentAuthor(id: string | null): CommentAuthor | null {
+    const u = id ? getUser(db, id) : undefined;
+    return u ? { id: u.id, username: u.username, display_name: u.display_name, is_bot: !!u.is_bot } : null;
+  }
+  /** API shape of a comment: author and mentions resolved to people, plus files. */
+  function commentView(cm: Comment) {
+    const attachments = listAttachmentsFor(db, "comment", cm.id);
+    return {
+      id: cm.id,
+      item_id: cm.item_id,
+      author: commentAuthor(cm.author_id),
+      body: cm.body,
+      mentions: (cm.mentions ?? []).map(commentAuthor).filter(Boolean),
+      created_at: cm.created_at,
+      updated_at: cm.updated_at,
+      ...(attachments.length ? { attachments } : {}),
+    };
+  }
+  /** `@username` in the body (same rule as the web composer) plus explicit
+   *  `mentions` given as usernames or user ids → user ids. */
+  const MENTION_RE = /@([a-zA-Z0-9_.-]+)/g;
+  function resolveMentionIds(body: string, explicit: unknown): string[] {
+    const names = new Set([...body.matchAll(MENTION_RE)].map((m) => m[1]!.toLowerCase()));
+    const extra = Array.isArray(explicit) ? explicit.filter((x): x is string => typeof x === "string") : [];
+    for (const x of extra) names.add(x.toLowerCase());
+    return listUsers(db)
+      .filter((u) => names.has(u.username.toLowerCase()) || extra.includes(u.id))
+      .map((u) => u.id);
+  }
+  /** A bot may only talk where it's assigned or @mentioned. */
+  function botMayTalk(userId: string, itemId: string): boolean {
+    return !isBot(userId) || botAssigned(userId, itemId) || botMentioned(userId, itemId);
+  }
+  function parseSince(raw: string | undefined): string | null | false {
+    if (!raw) return null;
+    const t = Date.parse(raw);
+    return Number.isFinite(t) ? new Date(t).toISOString() : false;
+  }
+  /** What the API-side comment write must do that a synced one gets from /sync:
+   *  run @mentioned / assigned bot agents, and push the humans it @mentions. */
+  function afterRestComment(cm: Comment): void {
+    triggerAgents(ctx.id, db, serverDeviceId, [{ entity: "comment", data: cm }], allowPrivate(), leaseTenantDb);
+    const item = getItem(db, cm.item_id);
+    const who = commentAuthor(cm.author_id);
+    for (const uid of cm.mentions ?? []) {
+      if (uid === cm.author_id || getUser(db, uid)?.is_bot || !canSee(uid, cm.item_id)) continue;
+      void sendToUser(db, uid, {
+        title: `${who?.display_name || who?.username || "Someone"} on “${item?.title ?? "a task"}”`,
+        body: cm.body.length > 180 ? cm.body.slice(0, 179) + "…" : cm.body,
+        url: "/all",
+        tag: `comment-${cm.item_id}`,
+      }).catch((e) => console.error("[carbon] mention push failed:", e));
+    }
+  }
+
+  // Read a task's comment thread (oldest first). `?since=<ISO>` returns only newer ones.
+  api.get("/tasks/:id/comments", requireScope("tasks:read"), (c) => {
+    const id = c.req.param("id");
+    const item = getItem(db, id);
+    if (!item || item.deleted || !canSee(c.get("userId"), id))
+      return c.json({ error: "not found" }, 404);
+    const since = parseSince(c.req.query("since"));
+    if (since === false) return c.json({ error: "since must be an ISO date" }, 400);
+    const comments = listComments(db, id).filter((cm) => !since || cm.created_at > since);
+    return c.json({ task_id: id, comments: comments.map(commentView) });
+  });
+
   // Post a comment as the authenticated user (lets agentic frameworks reply).
+  // `@username` in the body (or `mentions: [username|id]`) notifies those people
+  // and runs any agent bots among them.
   api.post("/tasks/:id/comments", requireScope("tasks:write"), async (c) => {
     const id = c.req.param("id");
     const userId = c.get("userId");
     const item = getItem(db, id);
     if (!item || item.deleted || !canSee(userId, id))
       return c.json({ error: "not found" }, 404);
-    // A bot may only comment where it's assigned or @mentioned.
-    if (
-      isBot(userId) &&
-      !botAssigned(userId, id) &&
-      !botMentioned(userId, id)
-    ) {
-      return c.json(
-        { error: "agent not assigned or mentioned on this task" },
-        403,
-      );
-    }
-    const b = (await c.req.json().catch(() => ({}))) as { body?: string };
-    if (!b.body) return c.json({ error: "body required" }, 400);
+    if (!botMayTalk(userId, id))
+      return c.json({ error: "agent not assigned or mentioned on this task" }, 403);
+    const b = (await c.req.json().catch(() => ({}))) as { body?: unknown; mentions?: unknown };
+    if (typeof b.body !== "string" || !b.body.trim())
+      return c.json({ error: "body required" }, 400);
+    if (b.body.length > 20_000) return c.json({ error: "body too long" }, 413);
     const comment = addComment(db, serverDeviceId, {
       itemId: id,
       authorId: userId === "local" ? null : userId,
       body: b.body,
+      mentions: resolveMentionIds(b.body, b.mentions),
     });
-    return c.json(comment, 201);
+    afterRestComment(comment);
+    return c.json(commentView(comment), 201);
+  });
+
+  // Edit / delete your own comment.
+  function ownComment(c: { get(k: "userId"): string; req: { param(k: string): string } }) {
+    const cm = getComment(db, c.req.param("cid"));
+    if (!cm || cm.deleted || cm.item_id !== c.req.param("id") || !canSee(c.get("userId"), cm.item_id))
+      return { error: "not found", status: 404 as const };
+    const uid = c.get("userId");
+    if (cm.author_id !== (uid === "local" ? null : uid))
+      return { error: "only the author can change a comment", status: 403 as const };
+    return { cm };
+  }
+  api.patch("/tasks/:id/comments/:cid", requireScope("tasks:write"), async (c) => {
+    const own = ownComment(c);
+    if (!own.cm) return c.json({ error: own.error }, own.status);
+    const b = (await c.req.json().catch(() => ({}))) as { body?: unknown; mentions?: unknown };
+    if (typeof b.body !== "string" || !b.body.trim())
+      return c.json({ error: "body required" }, 400);
+    if (b.body.length > 20_000) return c.json({ error: "body too long" }, 413);
+    const before = new Set(own.cm.mentions ?? []);
+    const updated = updateComment(db, serverDeviceId, own.cm.id, {
+      body: b.body,
+      mentions: resolveMentionIds(b.body, b.mentions),
+    })!;
+    // Only people newly @mentioned by the edit are notified.
+    const added = (updated.mentions ?? []).filter((m) => !before.has(m));
+    if (added.length) afterRestComment({ ...updated, mentions: added });
+    return c.json(commentView(updated));
+  });
+  api.delete("/tasks/:id/comments/:cid", requireScope("tasks:write"), (c) => {
+    const own = ownComment(c);
+    if (!own.cm) return c.json({ error: own.error }, own.status);
+    deleteComment(db, serverDeviceId, own.cm.id);
+    return c.json({ ok: true });
+  });
+
+  // Comment activity across every task the caller can see, newest last — the
+  // polling primitive for agents ("what did people say to me since <cursor>?").
+  //   ?since=<ISO>   only comments created after this (pass back `cursor`)
+  //   ?for=me        only comments that @mention me, or are on tasks assigned to /
+  //                  owned by me; my own comments are always left out with for=me
+  //   ?limit=        default 100, max 500
+  api.get("/comments", requireScope("tasks:read"), (c) => {
+    const userId = c.get("userId");
+    const since = parseSince(c.req.query("since"));
+    if (since === false) return c.json({ error: "since must be an ISO date" }, 400);
+    const forMe = c.req.query("for") === "me";
+    const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
+    const roots = c.get("tokenProjectIds");
+    const me = userId === "local" ? null : userId;
+    const rows = db.all<{ id: string }>(
+      `SELECT c.id FROM comments c JOIN items i ON i.id = c.item_id
+       WHERE c.deleted = 0 AND i.deleted = 0 AND c.created_at > ?
+       ORDER BY c.created_at LIMIT 5000`,
+      [since ?? ""],
+    );
+    const out: ReturnType<typeof commentView>[] = [];
+    let hasMore = false;
+    for (const { id } of rows) {
+      const cm = getComment(db, id)!;
+      if (!canSee(userId, cm.item_id) || !withinKeyProjects(db, roots, cm.item_id)) continue;
+      if (forMe) {
+        if (cm.author_id === me) continue;
+        const item = getItem(db, cm.item_id);
+        const relevant =
+          (me != null && (cm.mentions ?? []).includes(me)) ||
+          (me != null && botAssigned(me, cm.item_id)) ||
+          (item?.owner_id ?? null) === me;
+        if (!relevant) continue;
+      }
+      if (out.length === limit) { hasMore = true; break; }
+      out.push(commentView(cm));
+    }
+    const tasks: Record<string, { id: string; title: string; status: string }> = {};
+    for (const cm of out) {
+      const it = getItem(db, cm.item_id);
+      if (it) tasks[it.id] = { id: it.id, title: it.title, status: it.status };
+    }
+    return c.json({
+      me: commentAuthor(me) ?? { id: userId, username: c.get("username"), display_name: null, is_bot: false },
+      comments: out.map((cm) => ({ ...cm, task: tasks[cm.item_id] ?? null })),
+      cursor: out.length ? out[out.length - 1]!.created_at : (since ?? null),
+      has_more: hasMore || rows.length === 5000,
+    });
   });
 
   // Attach a file to a task (upload the blob to /api/blobs/:hash first).
@@ -2559,6 +2768,20 @@ export function buildTenantApp(
     return c.json(agent, 201);
   });
 
+  // An explicit, task-API-only key for an agent's bot user, so an external agent
+  // (MCP connector, framework) can read/answer the threads it is mentioned in.
+  api.post("/admin/agents/:id/keys", requireAdmin, (c) => {
+    const agent = getAgent(db, c.req.param("id"));
+    if (!agent) return c.json({ error: "not found" }, 404);
+    const result = createToken(db, {
+      userId: agent.user_id,
+      name: `${agent.name} agent key`,
+      scopes: ["tasks:read", "tasks:write", "inbox:write"],
+      restOnly: true,
+    });
+    return c.json({ token: result.token, ...result.row }, 201);
+  });
+
   api.patch("/admin/agents/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     if (!getAgent(db, id)) return c.json({ error: "not found" }, 404);
@@ -2659,12 +2882,10 @@ export function buildTenantApp(
     // and can outlast the reverse proxy's read timeout (→ 504). runSync serialises per
     // project and records last_status itself, so we kick it off and return at once; the
     // client polls the config's last_sync_at/last_status for the outcome.
-    void runSync(
-      db,
-      ensureCaldavDeviceId(db),
-      c.req.param("id"),
-      allowPrivate(),
-    );
+    const release = leaseTenantDb(db);
+    void runSync(db, ensureCaldavDeviceId(db), c.req.param("id"), allowPrivate())
+      .catch((e) => console.error("[carbon] caldav sync failed:", e))
+      .finally(release);
     return c.json({ ok: true, started: true }, 202);
   });
 
@@ -2908,118 +3129,138 @@ export function buildTenantApp(
     const plan = b.planId ? getPlan(b.planId) : undefined;
     if (!plan) return c.json({ error: "unknown plan" }, 400);
 
-    if (billingProvider() === "square") {
-      if (!b.cardToken) return c.json({ error: "card token required" }, 400);
-      // Square requires the customer to have an email (it emails invoices/receipts).
-      // Use the workspace email if set, else the one supplied at subscribe time.
-      const email = (rec.admin_email || b.email?.trim() || "").toLowerCase();
-      if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-        return c.json({ error: "a billing email address is required" }, 400);
-      }
-      // Track which Square objects we created so the catch can compensate: Square
-      // create* can succeed while a later step throws, orphaning live objects. (BILL-2)
-      let newCustomerId: string | null = null;
-      let cardCreated = false;
-      let createdSubId: string | null = null;
-      try {
-        const existing = getSubscription(controlDb, ctx.id);
-        let customerId = existing?.square_customer_id ?? null;
-        if (customerId) {
-          // Reused customer may predate having an email — make sure it has one now.
-          await updateCustomer(customerId, { email, name: rec.display_name });
-        } else {
-          customerId = await createCustomer({
-            tenantId: ctx.id,
-            email,
-            name: rec.display_name,
-          });
-          newCustomerId = customerId;
-        }
-        // Remember the email on the workspace for future receipts/renewals.
-        if (!rec.admin_email) setTenantAdminEmail(controlDb, ctx.id, email);
-        const cardId = await createCard(customerId, b.cardToken);
-        cardCreated = true;
-        const sub = await createSubscription({
-          customerId,
-          cardId,
-          planId: plan.id,
-        });
-        createdSubId = sub.id;
-        upsertSubscription(controlDb, ctx.id, {
-          provider: "square",
-          status: sub.status === "ACTIVE" ? "active" : "pending",
-          plan_id: plan.id,
-          external_id: sub.id,
-          square_customer_id: customerId,
-          square_subscription_id: sub.id,
-          canceled_at: null,
-        });
-        // If Square already billed (charged_through_date present), reflect it now; else
-        // the invoice.payment_made webhook will extend expiry shortly.
-        if (sub.chargedThrough) {
-          recordPaidPeriod(controlDb, ctx.id, plan, {
-            provider: "square",
-            externalId: sub.id,
-            chargedThrough: sub.chargedThrough,
-            squareCustomerId: customerId,
-            squareSubscriptionId: sub.id,
-          });
-        }
+    // One subscribe at a time per tenant (in-process), so a double-click can't create two
+    // Square subscriptions: the second waits, then sees the first's row and is rejected.
+    return withTenantLock(`billing-subscribe:${ctx.id}`, async () => {
+      // Refuse to stack a second subscription on a live one: Square would keep billing the
+      // old one while square_subscription_id gets overwritten. No plan-change flow exists,
+      // so the admin must cancel first. Simulate has no external billing, so only an
+      // already-active one blocks there (a stale pending can be re-staged).
+      const current = getSubscription(controlDb, ctx.id);
+      if (subscriptionBlocksNew(current, billingProvider())) {
         return c.json(
           {
-            ok: true,
-            provider: "square",
-            status: sub.status,
-            subscriptionId: sub.id,
+            error:
+              "This workspace already has a subscription. Cancel it before starting a new one.",
+            code: "subscription_exists",
           },
-          201,
+          409,
         );
-      } catch (e) {
-        console.error("[carbon] billing subscribe failed:", e);
-        // Compensate for orphaned Square objects (BILL-2). If the subscription was
-        // created but local persistence failed, cancel it — otherwise Square keeps
-        // auto-renewing a subscription we have no record of. Customer/card can't be
-        // rolled back as cleanly; log loudly so they can be reconciled by hand.
-        if (createdSubId) {
-          try {
-            await cancelSubscription(createdSubId);
+      }
+
+      if (billingProvider() === "square") {
+        if (!b.cardToken) return c.json({ error: "card token required" }, 400);
+        // Square requires the customer to have an email (it emails invoices/receipts).
+        // Use the workspace email if set, else the one supplied at subscribe time.
+        const email = (rec.admin_email || b.email?.trim() || "").toLowerCase();
+        if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          return c.json({ error: "a billing email address is required" }, 400);
+        }
+        // Track which Square objects we created so the catch can compensate: Square
+        // create* can succeed while a later step throws, orphaning live objects. (BILL-2)
+        let newCustomerId: string | null = null;
+        let cardCreated = false;
+        let createdSubId: string | null = null;
+        try {
+          const existing = getSubscription(controlDb, ctx.id);
+          let customerId = existing?.square_customer_id ?? null;
+          if (customerId) {
+            // Reused customer may predate having an email — make sure it has one now.
+            await updateCustomer(customerId, { email, name: rec.display_name });
+          } else {
+            customerId = await createCustomer({
+              tenantId: ctx.id,
+              email,
+              name: rec.display_name,
+            });
+            newCustomerId = customerId;
+          }
+          // Remember the email on the workspace for future receipts/renewals.
+          if (!rec.admin_email) setTenantAdminEmail(controlDb, ctx.id, email);
+          const cardId = await createCard(customerId, b.cardToken);
+          cardCreated = true;
+          const sub = await createSubscription({
+            customerId,
+            cardId,
+            planId: plan.id,
+          });
+          createdSubId = sub.id;
+          upsertSubscription(controlDb, ctx.id, {
+            provider: "square",
+            status: sub.status === "ACTIVE" ? "active" : "pending",
+            plan_id: plan.id,
+            external_id: sub.id,
+            square_customer_id: customerId,
+            square_subscription_id: sub.id,
+            canceled_at: null,
+          });
+          // If Square already billed (charged_through_date present), reflect it now; else
+          // the invoice.payment_made webhook will extend expiry shortly.
+          if (sub.chargedThrough) {
+            recordPaidPeriod(controlDb, ctx.id, plan, {
+              provider: "square",
+              externalId: sub.id,
+              chargedThrough: sub.chargedThrough,
+              squareCustomerId: customerId,
+              squareSubscriptionId: sub.id,
+            });
+          }
+          return c.json(
+            {
+              ok: true,
+              provider: "square",
+              status: sub.status,
+              subscriptionId: sub.id,
+            },
+            201,
+          );
+        } catch (e) {
+          console.error("[carbon] billing subscribe failed:", e);
+          // Compensate for orphaned Square objects (BILL-2). If the subscription was
+          // created but local persistence failed, cancel it — otherwise Square keeps
+          // auto-renewing a subscription we have no record of. Customer/card can't be
+          // rolled back as cleanly; log loudly so they can be reconciled by hand.
+          if (createdSubId) {
+            try {
+              await cancelSubscription(createdSubId);
+              console.error(
+                `[carbon] billing subscribe: canceled orphaned Square subscription ${createdSubId} after local failure`,
+              );
+            } catch (ce) {
+              console.error(
+                `[carbon] billing subscribe: FAILED to cancel orphaned Square subscription ${createdSubId} — reconcile manually:`,
+                ce,
+              );
+            }
+          } else if (cardCreated || newCustomerId) {
             console.error(
-              `[carbon] billing subscribe: canceled orphaned Square subscription ${createdSubId} after local failure`,
-            );
-          } catch (ce) {
-            console.error(
-              `[carbon] billing subscribe: FAILED to cancel orphaned Square subscription ${createdSubId} — reconcile manually:`,
-              ce,
+              `[carbon] billing subscribe: left orphaned Square objects (customer=${newCustomerId ?? "(reused)"}, cardCreated=${cardCreated}) with no subscription — reconcile/clean up manually`,
             );
           }
-        } else if (cardCreated || newCustomerId) {
-          console.error(
-            `[carbon] billing subscribe: left orphaned Square objects (customer=${newCustomerId ?? "(reused)"}, cardCreated=${cardCreated}) with no subscription — reconcile/clean up manually`,
-          );
+          // Don't return the raw thrown message — it can carry Square error bodies. (API-3)
+          return c.json({ error: "subscribe_failed" }, 400);
         }
-        // Don't return the raw thrown message — it can carry Square error bodies. (API-3)
-        return c.json({ error: "subscribe_failed" }, 400);
       }
-    }
 
-    // Simulate provider: stage a pending subscription; the client confirms via /simulate.
-    const externalId = `sim_${randomUUID()}`;
-    upsertSubscription(controlDb, ctx.id, {
-      provider: "simulate",
-      status: "pending",
-      plan_id: plan.id,
-      external_id: externalId,
-      canceled_at: null,
-    });
-    return c.json(
-      {
-        ok: true,
+      // Simulate provider: stage a pending subscription; the client confirms via /simulate.
+      const externalId = `sim_${randomUUID()}`;
+      upsertSubscription(controlDb, ctx.id, {
         provider: "simulate",
         status: "pending",
-        subscriptionId: externalId,
-      },
-      201,
-    );
+        plan_id: plan.id,
+        external_id: externalId,
+        canceled_at: null,
+      });
+      return c.json(
+        {
+          ok: true,
+          provider: "simulate",
+          status: "pending",
+          subscriptionId: externalId,
+        },
+        201,
+      );
+    });
   });
 
   // Dev/local only: stand in for the Square "invoice.payment_made" webhook so the
@@ -3109,9 +3350,13 @@ export function buildTenantApp(
   });
 
   const tenantApp = new Hono<Env>();
-  // Public federation surfaces: JSON capped small; blob transfer keeps MAX_BLOB_BYTES.
+  // Public federation surfaces: blob transfer keeps MAX_BLOB_BYTES; /sync carries a
+  // peer's capped push page (FEDERATION_SYNC_LIMITS), so it gets a cap matching what a
+  // peer may send — a smaller one would wedge the link on its first large page. The
+  // offer handshake routes stay on the small JSON cap.
   tenantApp.use("/api/federation/*", async (c, next) => {
     if (c.req.path.includes("/blob")) return blobBodyLimit(c, next);
+    if (c.req.path.endsWith("/sync")) return federationSyncBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
   tenantApp.route("/api", api);
@@ -3266,6 +3511,15 @@ const registry = createTenantRegistry({
   buildApp: (ctx) => buildTenantApp(ctx, deliverToPeer),
   cap: Number(process.env.TENANT_CACHE_CAP ?? 200),
 });
+tenantDbLease = registry.acquireDbLease;
+
+// Last resort: a stray rejected promise (fire-and-forget background work) is logged
+// instead of crashing the whole multi-tenant process (Node's default since v15).
+if (IS_ENTRY) {
+  process.on("unhandledRejection", (reason) => {
+    console.error("[carbon] unhandled promise rejection:", reason);
+  });
+}
 
 // Federation exchange sweep and the "completed items piling up" nudge both piggyback
 // the reminder-sweep tick (no competing timer). Federation runs one bidirectional
@@ -3273,37 +3527,41 @@ const registry = createTenantRegistry({
 // both-tenants-in-one-process is fine (deliverToPeer loops back). The purge-suggestion
 // check is synchronous per-tenant and runs first since it's cheap and unrelated.
 if (IS_ENTRY) {
+  // Every sweep goes through registry.sweepActive: bounded concurrency, a DB lease per
+  // job, and tenants that aren't already hot get a transient handle instead of being
+  // force-loaded into (and churning) the LRU.
   startReminderScheduler(
-    () => registry.activeDbs(),
-    () => {
-      for (const ctx of registry.activeCtxs()) {
-        try {
-          checkPurgeSuggestions(ctx.db, ctx.serverDeviceId);
-        } catch (e) {
-          console.error("[carbon] purge-suggestion sweep failed:", e);
-        }
-      }
-      return runAllFederationExchanges(
-        () =>
-          registry
-            .activeCtxs()
-            .map((ctx) => ({
-              db: ctx.db,
-              myLabel: ctx.subdomain || "default",
-            })),
+    (job) => registry.sweepActive((ctx) => job(ctx.db), { label: "reminder sweep" }),
+    async () => {
+      await registry.sweepActive(
+        (ctx) => checkPurgeSuggestions(ctx.db, ctx.serverDeviceId),
+        { label: "purge-suggestion sweep" },
+      );
+      await runAllFederationExchanges(
+        (job) =>
+          registry.sweepActive(
+            (ctx) => job({ db: ctx.db, myLabel: ctx.subdomain || "default" }),
+            { label: "federation sweep" },
+          ),
         deliverToPeer,
       );
     },
   );
-  startGpsScheduler(() => registry.activeDbs());
-  startCaldavScheduler(() =>
-    registry.activeCtxs().map((ctx) => ({
-      db: ctx.db,
-      deviceId: ensureCaldavDeviceId(ctx.db),
-      allowPrivate: agentsAllowPrivate(
-        ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
-      ),
-    })),
+  startGpsScheduler((job) =>
+    registry.sweepActive((ctx) => job(ctx.db), { label: "gps sweep" }),
+  );
+  startCaldavScheduler((job) =>
+    registry.sweepActive(
+      (ctx) =>
+        job({
+          db: ctx.db,
+          deviceId: ensureCaldavDeviceId(ctx.db),
+          allowPrivate: agentsAllowPrivate(
+            ctx.id === "default" ? null : getTenantById(controlDb, ctx.id),
+          ),
+        }),
+      { label: "caldav sweep" },
+    ),
   );
 }
 
@@ -3545,6 +3803,11 @@ const NL_COMMAND_PER_USER_HOUR = Math.max(
 // Recipe optimise sends the note body straight into the prompt — bound it (~16 KB, far more
 // than any real recipe) so a huge note can't be used to run up provider cost.
 const RECIPE_MAX_CHARS = 16_000;
+/** Drop every key whose newest hit is at or before `win` (arrays are append-only, so the
+ *  last element is the newest). Used by amortised sweeps, not on every call. */
+export function pruneHitWindows(map: Map<string, number[]>, win: number): void {
+  for (const [k, v] of map) if (!v.length || v[v.length - 1] <= win) map.delete(k);
+}
 function hitAllowed(
   map: Map<string, number[]>,
   key: string,
@@ -3641,20 +3904,22 @@ host.post("/billing/webhook", async (c) => {
   const eventId = event.event_id;
   const type = event.type ?? "";
   if (!eventId) return c.json({ error: "no event id" }, 400);
-  // Dedup BEFORE running any side effect: if we've already recorded this event_id, it's
-  // a Square retry of something we finished — ack 200 and do nothing. (BILL-3)
-  if (billingEventSeen(controlDb, eventId)) return c.json({ ok: true });
+  // Claim the event_id atomically BEFORE any await or side effect: of concurrent duplicate
+  // deliveries exactly one wins the INSERT; the rest ack 200 and do nothing. On failure the
+  // claim is released so Square's retry is processed. (BILL-3)
+  if (!claimBillingEvent(controlDb, eventId, type)) return c.json({ ok: true });
   const obj = event.data?.object ?? {};
   try {
     if (type === "invoice.payment_made") {
       const subId = obj.invoice?.subscription_id;
       // applySquareInvoicePaid returns false when the subscription maps to no known
-      // tenant — do NOT mark the event; return 5xx so Square retries rather than
+      // tenant — release the claim and return 5xx so Square retries rather than
       // permanently dropping a paid invoice for a not-yet-persisted subscription. (BILL-1)
       if (subId && !(await applySquareInvoicePaid(subId))) {
         console.error(
           `[carbon] webhook: paid invoice for unknown subscription ${subId} — asking Square to retry`,
         );
+        releaseBillingEvent(controlDb, eventId);
         return c.json({ error: "unknown subscription" }, 503); // 5xx → Square retries
       }
     } else if (type === "invoice.payment_failed") {
@@ -3672,12 +3937,12 @@ host.post("/billing/webhook", async (c) => {
           });
       }
     }
-    // Mark only after successful handling so a transient failure (thrown above, or the
-    // unknown-subscription early return) lets Square retry the same event_id. The pre-
-    // check above makes a genuine retry a no-op; recordPaidPeriod stays idempotent
-    // (absolute expiry) as a second line of defence against a rare race.
-    markBillingEvent(controlDb, eventId, type);
   } catch (e) {
+    try {
+      releaseBillingEvent(controlDb, eventId);
+    } catch (re) {
+      console.error("[carbon] webhook: failed to release event claim:", re);
+    }
     console.error("[carbon] webhook handling failed:", e);
     return c.json({ error: "handling failed" }, 500); // 5xx → Square retries
   }

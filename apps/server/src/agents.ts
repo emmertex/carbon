@@ -662,7 +662,8 @@ export async function testAgent(
   if (!agent) return { ok: false, message: 'agent not found' };
   try {
     if (agent.kind === 'webhook') {
-      if (!agent.endpoint) return { ok: false, message: 'no webhook URL configured' };
+      if (!agent.endpoint)
+        return { ok: true, message: 'no webhook URL — API-driven agent; it polls GET /api/comments?for=me' };
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       if (agent.api_key) headers['x-carbon-secret'] = agent.api_key;
       const res = await safeFetch(agent.endpoint, allowPrivate, {
@@ -750,30 +751,68 @@ function buildContext(db: Db, agent: FullAgentRow, taskId: string, reason: Trigg
 
 /** Allow only one provider call at a time per tenant (simple sequential queue), so a
  *  slow/misconfigured LLM or webhook endpoint in one tenant can't head-of-line-block
- *  agent replies for every other tenant sharing the process. */
+ *  agent replies for every other tenant sharing the process. Bounded: at most
+ *  AGENT_QUEUE_MAX_PER_TENANT jobs wait per tenant (extra triggers are dropped and
+ *  logged), and the queue stops waiting on a job after AGENT_JOB_TIMEOUT_MS. */
+export const AGENT_QUEUE_MAX_PER_TENANT = 50;
+export const AGENT_JOB_TIMEOUT_MS = 5 * 60_000;
+interface AgentJob {
+  run: () => Promise<void>;
+  /** Called exactly once when the job is dropped or its run actually settles. */
+  done?: () => void;
+}
 interface TenantQueue {
-  jobs: Array<() => Promise<void>>;
+  jobs: AgentJob[];
   pumping: boolean;
 }
 const queues = new Map<string, TenantQueue>();
-function enqueue(tenantId: string, fn: () => Promise<void>): void {
+/** Returns false (and calls `done`) when the tenant's queue is full and the job dropped. */
+export function enqueue(
+  tenantId: string,
+  run: () => Promise<void>,
+  done?: () => void,
+  limits: { maxJobs?: number; timeoutMs?: number } = {},
+): boolean {
   let q = queues.get(tenantId);
   if (!q) {
     q = { jobs: [], pumping: false };
     queues.set(tenantId, q);
   }
-  q.jobs.push(fn);
-  void pump(tenantId, q);
+  const maxJobs = limits.maxJobs ?? AGENT_QUEUE_MAX_PER_TENANT;
+  if (q.jobs.length >= maxJobs) {
+    console.error(`[carbon] agent queue full for tenant ${tenantId} (${maxJobs} waiting); dropping run`);
+    done?.();
+    if (!q.pumping && q.jobs.length === 0) queues.delete(tenantId);
+    return false;
+  }
+  q.jobs.push({ run, done });
+  void pump(tenantId, q, limits.timeoutMs ?? AGENT_JOB_TIMEOUT_MS);
+  return true;
 }
-async function pump(tenantId: string, q: TenantQueue): Promise<void> {
+async function pump(tenantId: string, q: TenantQueue, timeoutMs: number): Promise<void> {
   if (q.pumping) return;
   q.pumping = true;
   while (q.jobs.length) {
-    const fn = q.jobs.shift()!;
+    const job = q.jobs.shift()!;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await fn();
+      // The run itself can't be cancelled; `done` (e.g. a DB lease release) waits for it
+      // to really settle, but the queue moves on after the timeout.
+      const running = Promise.resolve().then(job.run);
+      void running.catch(() => {}).finally(() => job.done?.());
+      await Promise.race([
+        running,
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`agent run timed out after ${timeoutMs} ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
     } catch (e) {
       console.error('[carbon] agent run error:', e);
+    } finally {
+      clearTimeout(timer);
     }
   }
   q.pumping = false;
@@ -850,6 +889,11 @@ async function runAgent(
   const item = getItem(db, taskId);
   if (!item || item.deleted) return;
   try {
+    if (agent.kind === 'webhook' && !agent.endpoint) {
+      // No URL: an API-driven agent (e.g. an MCP connector) that polls
+      // GET /api/comments?for=me itself — nothing to notify.
+      return;
+    }
     if (agent.kind === 'webhook') {
       // Hand off to the agentic framework; it will comment/complete via the API.
       await callWebhook(db, agent, taskId, reason, allowPrivate);
@@ -901,20 +945,26 @@ export function triggerAgents(
   deviceId: string,
   fresh: Array<{ entity: string; data: unknown }>,
   allowPrivate: boolean,
+  /** Optional DB lease (TenantRegistry.acquireDbLease): held from enqueue until the run
+   *  settles so the tenant's handle isn't closed under a queued/running job. */
+  lease?: (db: Db) => () => void,
 ): void {
+  const queueRun = (run: () => Promise<void>): void => {
+    enqueue(tenantId, run, lease?.(db));
+  };
   for (const op of fresh) {
     if (op.entity === 'comment') {
       const c = op.data as { item_id: string; author_id: string | null; mentions?: string[] };
       if (c.author_id && getUser(db, c.author_id)?.is_bot) continue; // ignore bot comments
       for (const uid of c.mentions ?? []) {
         const agent = getAgentForUser(db, uid);
-        if (agent) enqueue(tenantId, () => runAgent(db, deviceId, agent, c.item_id, 'mention', allowPrivate));
+        if (agent) queueRun(() => runAgent(db, deviceId, agent, c.item_id, 'mention', allowPrivate));
       }
     } else if (op.entity === 'assignee') {
       const a = op.data as { item_id: string; user_id: string; deleted?: boolean };
       if (a.deleted) continue;
       const agent = getAgentForUser(db, a.user_id);
-      if (agent) enqueue(tenantId, () => runAgent(db, deviceId, agent, a.item_id, 'assigned', allowPrivate));
+      if (agent) queueRun(() => runAgent(db, deviceId, agent, a.item_id, 'assigned', allowPrivate));
     }
   }
 }

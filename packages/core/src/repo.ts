@@ -2413,24 +2413,35 @@ export interface EffectiveShare {
 /** Shares in effect for an item: its own shares plus those inherited from
  *  ancestors. A direct share on the item overrides an inherited one. */
 export function effectiveShares(db: Db, itemId: string): EffectiveShare[] {
+  // One recursive query instead of 2 queries per ancestor level. `depth` orders the
+  // chain nearest-first so the first share seen per user wins (direct overrides
+  // inherited). The walk stops at a missing item / null parent like the old loop; the
+  // `NOT INSTR(path …)` guard stops a corrupt parent cycle on its first repeat,
+  // matching the old `seen` set.
+  const rows = db.all<ShareRow & { _depth: number; _src: string }>(
+    `WITH RECURSIVE chain(id, depth, path) AS (
+       SELECT ?, 0, '/' || ? || '/'
+       UNION ALL
+       SELECT i.parent_id, c.depth + 1, c.path || i.parent_id || '/'
+       FROM chain c JOIN items i ON i.id = c.id
+       WHERE i.parent_id IS NOT NULL
+         AND INSTR(c.path, '/' || i.parent_id || '/') = 0
+     )
+     SELECT s.*, c.depth AS _depth, c.id AS _src
+     FROM chain c JOIN shares s ON s.item_id = c.id AND s.deleted = 0
+     ORDER BY c.depth, s.rowid`,
+    [itemId, itemId],
+  );
   const map = new Map<string, EffectiveShare>();
-  const seen = new Set<string>();
-  let currentId: string | null = itemId;
-  let depth = 0;
-  while (currentId && !seen.has(currentId)) {
-    seen.add(currentId);
-    for (const s of listSharesForItem(db, currentId)) {
-      if (!map.has(s.user_id)) {
-        map.set(s.user_id, {
-          user_id: s.user_id,
-          permission: s.permission,
-          inherited: depth > 0,
-          source_id: currentId,
-        });
-      }
-    }
-    currentId = getItem(db, currentId)?.parent_id ?? null;
-    depth++;
+  for (const r of rows) {
+    if (map.has(r.user_id)) continue;
+    const s = rowToShare(r);
+    map.set(s.user_id, {
+      user_id: s.user_id,
+      permission: s.permission,
+      inherited: r._depth > 0,
+      source_id: r._src,
+    });
   }
   return [...map.values()];
 }
@@ -2714,6 +2725,30 @@ export function addComment(
     created_at: new Date().toISOString(), // real time: drives display + ordering
     updated_at: causalNowIso(db), // causal: drives LWW merge (see Y2)
     deleted: false,
+  };
+  recordRecordOp(db, deviceId, "comment", comment.id, comment);
+  return comment;
+}
+
+export function getComment(db: Db, id: string): Comment | undefined {
+  const r = db.get<CommentRow>("SELECT * FROM comments WHERE id = ?", [id]);
+  return r ? rowToComment(r) : undefined;
+}
+
+/** Edit a comment's body (and mentions) in place; created_at is kept for ordering. */
+export function updateComment(
+  db: Db,
+  deviceId: string,
+  id: string,
+  patch: { body: string; mentions?: string[] },
+): Comment | undefined {
+  const r = db.get<CommentRow>("SELECT * FROM comments WHERE id = ?", [id]);
+  if (!r || r.deleted) return undefined;
+  const comment: Comment = {
+    ...rowToComment(r),
+    body: patch.body,
+    mentions: patch.mentions ?? rowToComment(r).mentions,
+    updated_at: causalNowIso(db),
   };
   recordRecordOp(db, deviceId, "comment", comment.id, comment);
   return comment;

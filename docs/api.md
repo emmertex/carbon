@@ -9,7 +9,8 @@ be JSON objects; malformed/null bodies are rejected before any change. A member 
 administrators can disable member key creation and revoke keys through administration.
 
 Personal keys expose GET/POST `/api/tasks`, GET/PATCH `/api/tasks/{id}`,
-POST `/api/tasks/{id}/complete` and POST `/api/tasks/{id}/comments`.
+POST `/api/tasks/{id}/complete`, GET/POST `/api/tasks/{id}/comments`,
+PATCH/DELETE `/api/tasks/{id}/comments/{comment_id}` and GET `/api/comments`.
 `tasks:read` permits reads, `tasks:write` permits edits/completion/comments, and
 `inbox:write` permits creation. Restricted keys must supply `project_id` when creating.
 Moving an item outside a selected subtree is denied. Current user permissions still
@@ -124,10 +125,27 @@ curl -X PATCH "$BASE/api/tasks/<id>" \
 # Complete (tasks:write) — honours recurrence (spawns the next occurrence)
 curl -X POST "$BASE/api/tasks/<id>/complete" -H "Authorization: Bearer carbon_xxx"
 
-# Comment (tasks:write) — body + optional @mentions trigger bot agents
+# Read one task with its thread, subtasks, assignees and attachments
+curl -H "Authorization: Bearer carbon_xxx" "$BASE/api/tasks/<id>?include=all"
+
+# Comment (tasks:write) — @username in the body (or "mentions": [username|id])
+# pushes those people and runs mentioned bot agents
 curl -X POST "$BASE/api/tasks/<id>/comments" \
   -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" \
-  -d '{"body":"done — see photo"}'
+  -d '{"body":"done — see photo. @ann can you check?"}'
+
+# Read the thread (tasks:read); ?since=<ISO> for only newer comments
+curl -H "Authorization: Bearer carbon_xxx" "$BASE/api/tasks/<id>/comments"
+
+# Edit / delete your own comment (tasks:write)
+curl -X PATCH "$BASE/api/tasks/<id>/comments/<comment_id>" \
+  -H "Authorization: Bearer carbon_xxx" -H "Content-Type: application/json" -d '{"body":"edited"}'
+curl -X DELETE "$BASE/api/tasks/<id>/comments/<comment_id>" -H "Authorization: Bearer carbon_xxx"
+
+# Comment activity across everything you can see (tasks:read). for=me keeps only
+# comments that @mention you or are on tasks assigned to / owned by you (never your own).
+# Pass the returned `cursor` back as `since` to get only what's new.
+curl -H "Authorization: Bearer carbon_xxx" "$BASE/api/comments?for=me&since=2026-10-15T00:00:00Z"
 
 # Attach a file (tasks:write) — two-step content-addressed upload
 HASH="$(sha256sum photo.jpg | awk '{print $1}')"
@@ -147,6 +165,25 @@ curl -X POST "$BASE/api/tasks/<id>/attachments" \
 `flagged`, `priority`, and `metadata` (arbitrary JSON object or string). `PATCH /api/tasks/:id`
 accepts `title`, `note`, `status`, `due_date`, `defer_date`, `flagged`, `priority`, `parent_id`,
 `geo`, `color`, `recurrence`, `review_interval`, and `metadata`.
+
+Comments come back as `{id, item_id, author: {id, username, display_name, is_bot}, body,
+mentions: [person], created_at, updated_at, attachments?}`; `GET /api/comments` adds
+`task: {id, title, status}` to each, plus `me`, `cursor` and `has_more`.
+
+## Talking to agents through task comments
+
+A task's comment thread is a conversation channel between people and agents:
+
+1. In **Settings → Agents**, create an **External webhook** agent. Give it a webhook URL if
+   your framework wants to be called on each trigger, or leave it empty for an agent that
+   polls (such as the carbon-connector MCP server).
+2. Press the key button on the agent to issue it an API key (task API only, shown once).
+3. Assign a task to the agent or `@mention` it in a comment. The agent finds the request
+   with `GET /api/comments?for=me`, reads `GET /api/tasks/{id}?include=all`, and answers with
+   `POST /api/tasks/{id}/comments`. When it `@mentions` you, you get a push notification.
+
+An agent may comment only on tasks it is assigned to or mentioned on, may complete only tasks
+assigned to it, and may edit or delete only its own comments.
 
 ## Natural-language agent endpoints (`/api/agent/*`)
 
@@ -232,7 +269,8 @@ do not disclose subscription end dates.
 
 ## Administration
 
-- `/api/admin/users` (CRUD), `/api/admin/tokens` (CRUD), `/api/admin/agents` (CRUD + `/test`).
+- `/api/admin/users` (CRUD), `/api/admin/tokens` (CRUD), `/api/admin/agents` (CRUD + `/test`,
+  and `POST /api/admin/agents/{id}/keys` to issue an agent a task-API key).
 - `/api/billing` (GET status + plans) and `/api/billing/subscribe` (POST `{planId, cardToken,
   email}`) — tenant-admin subscription/renew. Reachable even when the workspace is locked, so an
   admin can self-serve a renewal from the gate.

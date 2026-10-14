@@ -6,6 +6,7 @@ import {
   createItem,
   createUser,
   shareItem,
+  updateItem,
   type Op,
   type RecordOp,
 } from "@carbon/core";
@@ -98,6 +99,7 @@ test("sanitizeOps preserves series owner when a write-sharee completes a recurri
   const alice = createUser(d, { username: "alice" });
   const bob = createUser(d, { username: "bob" });
   const it = createItem(d, DEV, { title: "daily chore", ownerId: alice.id });
+  updateItem(d, DEV, it.id, { recurrence: JSON.stringify({ freq: "daily" }) });
   shareItem(d, DEV, it.id, bob.id, "write");
   const spawnId = "spawn-next";
   const out = sanitizeOps(
@@ -151,7 +153,10 @@ test("sanitizeRecordOps allows share copy onto a just-created recurrence spawn",
   const d = db();
   const alice = createUser(d, { username: "alice" });
   const bob = createUser(d, { username: "bob" });
-  // Spawn already ingested with series owner preserved; bob is not owner and has no share yet.
+  // Spawn already ingested with series owner preserved; bob is not owner and has no share
+  // on it yet, but holds a write grant on the completed source item.
+  const source = createItem(d, DEV, { title: "daily chore", ownerId: alice.id });
+  shareItem(d, DEV, source.id, bob.id, "write");
   const spawn = createItem(d, DEV, { title: "daily chore", ownerId: alice.id });
   const [out] = sanitizeRecordOps(
     d,
@@ -164,8 +169,120 @@ test("sanitizeRecordOps allows share copy onto a just-created recurrence spawn",
     ],
     NOW,
     new Set([spawn.id]),
+    new Map([[spawn.id, source.id]]),
   );
   assert.equal(out!.entity, "share", "share onto just-created spawn kept");
+});
+
+test("sanitizeRecordOps: spawn share copies the caller's role on the source, never pushed data", () => {
+  const d = db();
+  const alice = createUser(d, { username: "alice" });
+  const bob = createUser(d, { username: "bob" });
+  const source = createItem(d, DEV, { title: "src", ownerId: alice.id });
+  shareItem(d, DEV, source.id, bob.id, "read");
+  const spawn = createItem(d, DEV, { title: "next", ownerId: alice.id });
+  const [out] = sanitizeRecordOps(
+    d,
+    bob.id,
+    [
+      rec({
+        entity: "share",
+        data: { item_id: spawn.id, user_id: bob.id, permission: "write" },
+      }),
+    ],
+    NOW,
+    new Set([spawn.id]),
+    new Map([[spawn.id, source.id]]),
+  );
+  assert.equal(
+    (out!.data as { permission: string }).permission,
+    "read",
+    "pushed write downgraded to bob's actual role on the source",
+  );
+  // Just-created but not a recognised spawn: dropped.
+  const none = sanitizeRecordOps(
+    d,
+    bob.id,
+    [
+      rec({
+        entity: "share",
+        data: { item_id: spawn.id, user_id: bob.id, permission: "read" },
+      }),
+    ],
+    NOW,
+    new Set([spawn.id]),
+  );
+  assert.equal(none.length, 0);
+});
+
+test("sanitizeOps: a non-recurring completion cannot keep a foreign owner on a create", () => {
+  const d = db();
+  const alice = createUser(d, { username: "alice" });
+  const bob = createUser(d, { username: "bob" });
+  const it = createItem(d, DEV, { title: "one-off", ownerId: alice.id });
+  shareItem(d, DEV, it.id, bob.id, "write");
+  const spawns = new Map<string, string>();
+  const out = sanitizeOps(
+    d,
+    bob.id,
+    [
+      op({ item_id: it.id, fields: { status: "done" } }),
+      op({ item_id: "X", fields: { type: "task", title: "x", owner_id: alice.id } }),
+    ],
+    NOW,
+    spawns,
+  );
+  assert.equal(out.find((o) => o.item_id === "X")!.fields.owner_id, bob.id);
+  assert.equal(spawns.size, 0);
+});
+
+test("sanitizeOps: spawn must match type and parent, one per completed item", () => {
+  const d = db();
+  const alice = createUser(d, { username: "alice" });
+  const bob = createUser(d, { username: "bob" });
+  const it = createItem(d, DEV, { title: "daily", ownerId: alice.id });
+  updateItem(d, DEV, it.id, { recurrence: JSON.stringify({ freq: "daily" }) });
+  shareItem(d, DEV, it.id, bob.id, "write");
+  const spawns = new Map<string, string>();
+  const out = sanitizeOps(
+    d,
+    bob.id,
+    [
+      op({ item_id: it.id, fields: { status: "done" } }),
+      op({ item_id: "wrongType", fields: { type: "project", title: "p", owner_id: alice.id } }),
+      op({ item_id: "s1", fields: { type: "task", title: "a", owner_id: alice.id } }),
+      op({ item_id: "s2", fields: { type: "task", title: "b", owner_id: alice.id } }),
+    ],
+    NOW,
+    spawns,
+  );
+  const owner = (id: string) => out.find((o) => o.item_id === id)!.fields.owner_id;
+  assert.equal(owner("wrongType"), bob.id);
+  assert.equal(owner("s1"), alice.id);
+  assert.equal(owner("s2"), bob.id, "second spawn forced to the pusher");
+  assert.deepEqual([...spawns], [["s1", it.id]]);
+});
+
+test("sanitizeOps: claiming a null-owner item is admin-only", () => {
+  const d = db();
+  const admin = createUser(d, { username: "root", role: "admin" });
+  const bob = createUser(d, { username: "bob" });
+  const shell = createItem(d, DEV, { title: "orphan" });
+  d.run("UPDATE items SET owner_id = NULL WHERE id = ?", [shell.id]);
+  const [mem] = sanitizeOps(
+    d,
+    bob.id,
+    [op({ item_id: shell.id, fields: { title: "t", owner_id: bob.id } })],
+    NOW,
+  );
+  assert.equal("owner_id" in mem!.fields, false, "member claim stripped");
+  const [adm] = sanitizeOps(
+    d,
+    admin.id,
+    [op({ item_id: shell.id, fields: { owner_id: "someone" } })],
+    NOW,
+  );
+  assert.equal(adm!.fields.owner_id, admin.id, "admin claims for itself");
 });
 
 test("sanitizeRecordOps still drops a share on an unrelated item the caller cannot write", () => {

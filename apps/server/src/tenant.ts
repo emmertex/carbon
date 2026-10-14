@@ -100,15 +100,24 @@ export interface TenantRegistry {
   getApp(subdomain: string | null): FetchApp | null;
   /** Open (cache) the tenant ctx for a subdomain without building its app. */
   getCtx(subdomain: string | null): TenantCtx | null;
-  /** DBs that the reminder scheduler must sweep: default + every active tenant. */
-  activeDbs(): Db[];
-  /** Full ctxs (db + serverDeviceId + id) for jobs that need more than the DB
-   *  handle — e.g. the CalDAV connector needs each tenant's allow-private flag. */
-  activeCtxs(): TenantCtx[];
+  /**
+   * Run `job` once for the default tenant and every active tenant, holding a DB lease
+   * for the job's whole duration (sync or async). A tenant already in the LRU uses its
+   * cached handle; any other tenant gets a transient handle that is NOT inserted into
+   * the LRU (so a background sweep never evicts the hot set or pushes the cache past
+   * its cap) and is closed when its job finishes. At most `concurrency` jobs run at
+   * once (default 8), bounding the extra handles open at any moment. A job's error is
+   * logged and does not stop the sweep.
+   */
+  sweepActive(
+    job: (ctx: TenantCtx) => void | Promise<void>,
+    opts?: { concurrency?: number; label?: string },
+  ): Promise<void>;
   /** Drop a tenant from the cache and close its DB handle (suspend/delete). */
   evict(id: string): void;
-  /** A9: acquire a lease on a tenant DB for async background work. Prevents eviction
-   *  and DB close while the lease is held. Returns a release function. */
+  /** A9: acquire a lease on a tenant DB for async background work. Prevents the DB
+   *  handle being closed while the lease is held (an eviction meanwhile defers the
+   *  close to the last release). Returns an idempotent release function. */
   acquireDbLease(db: Db): () => void;
 }
 
@@ -135,19 +144,47 @@ export function createTenantRegistry(opts: {
   const idBySubdomain = new Map<string, string>();
   // A9: lease counts per DB — prevents eviction/close while background work is running.
   const dbLeases = new WeakMap<Db, number>();
+  // Evicted entries whose close was deferred, by DB, so the last lease release can run it.
+  const deferredByDb = new WeakMap<Db, Loaded>();
 
   /** A9: close now if nothing is in-flight AND no active leases, otherwise defer. */
   function closeOrDefer(entry: Loaded): void {
     if (entry.inFlight > 0 || (dbLeases.get(entry.ctx.db) ?? 0) > 0) {
       entry.pendingClose = true;
+      deferredByDb.set(entry.ctx.db, entry);
       return;
     }
+    entry.pendingClose = false;
+    deferredByDb.delete(entry.ctx.db);
     try {
       entry.ctx.db.raw.close();
-      dbLeases.delete(entry.ctx.db);
     } catch {
       /* already closed */
     }
+  }
+
+  /** Run a deferred close once the last request AND the last lease are done. */
+  function maybeRunDeferredClose(entry: Loaded): void {
+    if (entry.pendingClose) closeOrDefer(entry);
+  }
+
+  function acquireDbLease(db: Db): () => void {
+    dbLeases.set(db, (dbLeases.get(db) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Decrement the LIVE count (not a value captured at acquire time) so
+      // overlapping leases are counted correctly.
+      const remaining = (dbLeases.get(db) ?? 1) - 1;
+      if (remaining > 0) {
+        dbLeases.set(db, remaining);
+        return;
+      }
+      dbLeases.delete(db);
+      const deferred = deferredByDb.get(db);
+      if (deferred) maybeRunDeferredClose(deferred);
+    };
   }
 
   /** Wrap a built app so concurrent requests are tracked; eviction of a tenant with
@@ -159,14 +196,7 @@ export function createTenantRegistry(opts: {
         entry.inFlight++;
         const finish = (): void => {
           entry.inFlight--;
-          if (entry.inFlight === 0 && entry.pendingClose) {
-            entry.pendingClose = false;
-            try {
-              entry.ctx.db.raw.close();
-            } catch {
-              /* already closed */
-            }
-          }
+          if (entry.inFlight === 0) maybeRunDeferredClose(entry);
         };
         let result: Response | Promise<Response>;
         try {
@@ -242,18 +272,52 @@ export function createTenantRegistry(opts: {
   return {
     getApp: (subdomain) => resolveLoaded(subdomain)?.app ?? null,
     getCtx: (subdomain) => resolveLoaded(subdomain)?.ctx ?? null,
-    activeDbs() {
-      const dbs: Db[] = [opts.defaultCtx.db];
-      for (const loc of opts.listActive()) {
-        const entry = load(loc);
-        dbs.push(entry.ctx.db);
-      }
-      return dbs;
-    },
-    activeCtxs() {
-      const ctxs: TenantCtx[] = [opts.defaultCtx];
-      for (const loc of opts.listActive()) ctxs.push(load(loc).ctx);
-      return ctxs;
+    async sweepActive(job, sweepOpts) {
+      const concurrency = Math.max(1, sweepOpts?.concurrency ?? 8);
+      const label = sweepOpts?.label ?? "background sweep";
+      const runOne = async (
+        loc: TenantLocation | null,
+      ): Promise<void> => {
+        let ctx: TenantCtx;
+        let transient = false;
+        try {
+          if (loc === null) ctx = opts.defaultCtx;
+          else {
+            const cached = cache.get(loc.id);
+            if (cached) ctx = cached.ctx;
+            else {
+              ctx = initTenantDb(loc);
+              transient = true;
+            }
+          }
+        } catch (e) {
+          console.error(`[carbon] ${label}: tenant open failed:`, e);
+          return;
+        }
+        const release = acquireDbLease(ctx.db);
+        try {
+          await job(ctx);
+        } catch (e) {
+          console.error(`[carbon] ${label} failed:`, e);
+        } finally {
+          release();
+          if (transient) {
+            try {
+              ctx.db.raw.close();
+            } catch {
+              /* already closed */
+            }
+          }
+        }
+      };
+      const queue: (TenantLocation | null)[] = [null, ...opts.listActive()];
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        while (next < queue.length) await runOne(queue[next++]);
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, queue.length) }, worker),
+      );
     },
     evict(id) {
       const entry = cache.get(id);
@@ -262,15 +326,7 @@ export function createTenantRegistry(opts: {
       idBySubdomain.delete(entry.ctx.subdomain);
       closeOrDefer(entry);
     },
-    acquireDbLease(db) {
-      const count = (dbLeases.get(db) ?? 0) + 1;
-      dbLeases.set(db, count);
-      return () => {
-        const remaining = Math.max(0, count - 1);
-        if (remaining > 0) dbLeases.set(db, remaining);
-        else dbLeases.delete(db);
-      };
-    },
+    acquireDbLease,
   };
 }
 

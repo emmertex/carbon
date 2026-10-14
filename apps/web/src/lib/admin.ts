@@ -199,6 +199,16 @@ export async function adminUpdateAgent(
   if (!res.ok) throw new Error(`update failed: ${res.status}`);
 }
 
+/** Issue a task-API key for an agent's bot user (shown once). */
+export async function adminIssueAgentKey(id: string): Promise<string> {
+  const res = await fetch(url(`/api/admin/agents/${id}/keys`), {
+    method: 'POST',
+    headers: authHeaders(getServerConfig()),
+  });
+  if (!res.ok) throw new Error(`issue key failed: ${res.status}`);
+  return ((await res.json()) as { token: string }).token;
+}
+
 export async function adminTestAgent(id: string): Promise<{ ok: boolean; message: string }> {
   const res = await fetch(url(`/api/admin/agents/${id}/test`), {
     method: 'POST',

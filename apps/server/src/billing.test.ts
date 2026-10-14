@@ -17,6 +17,11 @@ import {
   recordPaidPeriod,
   setSubscriptionStatus,
   markBillingEvent,
+  claimBillingEvent,
+  releaseBillingEvent,
+  billingEventSeen,
+  subscriptionBlocksNew,
+  withTenantLock,
   BILLING_PLANS,
 } from './billing';
 
@@ -276,5 +281,66 @@ describe('simulate provider flow: pending → paid → cancel', () => {
       new Date(row!.expires_at!).getTime() > Date.now(),
       'access remains until period end',
     );
+  });
+});
+
+// ─── event claim / release ───────────────────────────────────────────────────
+
+describe('claimBillingEvent / releaseBillingEvent', () => {
+  test('only the first claim wins; release lets a retry claim again', () => {
+    const db = openTestControlDb();
+    assert.equal(claimBillingEvent(db, 'evt-c', 'invoice.payment_made'), true);
+    assert.equal(claimBillingEvent(db, 'evt-c', 'invoice.payment_made'), false);
+    releaseBillingEvent(db, 'evt-c');
+    assert.equal(billingEventSeen(db, 'evt-c'), false);
+    assert.equal(claimBillingEvent(db, 'evt-c', 'invoice.payment_made'), true);
+  });
+});
+
+// ─── re-subscribe guard ──────────────────────────────────────────────────────
+
+describe('subscriptionBlocksNew', () => {
+  test('square: a live subscription with a Square id blocks a new one', () => {
+    for (const status of ['active', 'pending', 'past_due'])
+      assert.equal(subscriptionBlocksNew({ status, square_subscription_id: 'sq-1' }, 'square'), true, status);
+  });
+  test('square: canceled, missing row, or no Square id does not block', () => {
+    assert.equal(subscriptionBlocksNew({ status: 'canceled', square_subscription_id: 'sq-1' }, 'square'), false);
+    assert.equal(subscriptionBlocksNew(null, 'square'), false);
+    assert.equal(subscriptionBlocksNew({ status: 'pending', square_subscription_id: null }, 'square'), false);
+  });
+  test('simulate: only active blocks (a stale pending can be re-staged)', () => {
+    assert.equal(subscriptionBlocksNew({ status: 'active' }, 'simulate'), true);
+    assert.equal(subscriptionBlocksNew({ status: 'pending' }, 'simulate'), false);
+    assert.equal(subscriptionBlocksNew({ status: 'canceled' }, 'simulate'), false);
+  });
+});
+
+describe('withTenantLock', () => {
+  test('serialises same-key work so a double submit sees the first result', async () => {
+    const db = openTestControlDb();
+    db.run(
+      `INSERT INTO tenants (id, subdomain, status, created_at, db_path, blobs_dir)
+       VALUES ('lock-t', 'lockt', 'active', ?, '/tmp/l.db', '/tmp/l-blobs')`,
+      [new Date().toISOString()],
+    );
+    let created = 0;
+    const subscribe = () =>
+      withTenantLock('billing-subscribe:lock-t', async () => {
+        if (subscriptionBlocksNew(getSubscription(db, 'lock-t'), 'square')) return 'rejected';
+        await new Promise((r) => setTimeout(r, 10)); // Square round-trip
+        created++;
+        upsertSubscription(db, 'lock-t', { provider: 'square', status: 'pending', square_subscription_id: `sq-${created}` });
+        return 'created';
+      });
+    const results = await Promise.all([subscribe(), subscribe()]);
+    assert.deepEqual(results.sort(), ['created', 'rejected']);
+    assert.equal(created, 1);
+  });
+
+  test('a throwing holder does not wedge the lock; other keys run independently', async () => {
+    await assert.rejects(withTenantLock('k1', async () => { throw new Error('x'); }));
+    assert.equal(await withTenantLock('k1', async () => 1), 1);
+    assert.equal(await withTenantLock('k2', async () => 2), 2);
   });
 });

@@ -467,6 +467,8 @@ describe("owner-only onward sharing", () => {
     const d = db();
     const alice = createUser(d, { username: "alice" });
     const bob = createUser(d, { username: "bob" });
+    const source = createItem(d, DEV, { title: "series", ownerId: alice.id });
+    shareItem(d, DEV, source.id, bob.id, "write");
     const spawn = createItem(d, DEV, { title: "spawn", ownerId: alice.id }); // owned by series owner
     const op = {
       id: "s2",
@@ -486,8 +488,15 @@ describe("owner-only onward sharing", () => {
       sessionCredentialFor(bob.id),
       op,
       new Set([spawn.id]),
+      new Map([[spawn.id, source.id]]),
     );
     assert.ok(kept, "self-grant onto just-created spawn kept");
+    // Without a recognised spawn source (sanitizeOps did not accept it as a spawn) the
+    // same self-grant is an onward share and is dropped.
+    assert.equal(
+      validateRecordOp(d, sessionCredentialFor(bob.id), op, new Set([spawn.id])),
+      null,
+    );
   });
 
   test("a non-owner may remove their own grant (but not upgrade it)", () => {

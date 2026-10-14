@@ -34,6 +34,8 @@ import { openControlDb } from './control';
 import {
   billingEventSeen,
   markBillingEvent,
+  claimBillingEvent,
+  releaseBillingEvent,
   recordPaidPeriod,
   setSubscriptionStatus,
   getSubscription,
@@ -150,12 +152,13 @@ function buildWebhookApp(controlDb: Db) {
     const eventId = event.event_id;
     const type = event.type ?? '';
     if (!eventId) return c.json({ error: 'no event id' }, 400);
-    if (billingEventSeen(controlDb, eventId)) return c.json({ ok: true });
+    if (!claimBillingEvent(controlDb, eventId, type)) return c.json({ ok: true });
     const obj = event.data?.object ?? {};
     try {
       if (type === 'invoice.payment_made') {
         const subId = obj.invoice?.subscription_id;
         if (subId && !(await applySquareInvoicePaid(controlDb, subId))) {
+          releaseBillingEvent(controlDb, eventId);
           return c.json({ error: 'unknown subscription' }, 503);
         }
       } else if (type === 'invoice.payment_failed') {
@@ -170,8 +173,8 @@ function buildWebhookApp(controlDb: Db) {
           if (tId) setSubscriptionStatus(controlDb, tId, 'canceled', { canceledAt: new Date().toISOString() });
         }
       }
-      markBillingEvent(controlDb, eventId, type);
     } catch (e) {
+      releaseBillingEvent(controlDb, eventId);
       return c.json({ error: 'handling failed' }, 500);
     }
     return c.json({ ok: true });
@@ -428,5 +431,67 @@ describe('webhook: status transition events', () => {
     const res = await postWebhook(app, body);
     assert.equal(res.status, 200);
     assert.equal(getSubscription(db, 'tenant-noop')!.status, 'active', 'status untouched');
+  });
+});
+
+// ─── concurrent duplicate delivery / claim release ───────────────────────────
+
+describe('webhook: atomic event claim', () => {
+  test('concurrent duplicate deliveries apply the event only once', async () => {
+    const db = openTestControlDb();
+    insertTenant(db, 'tenant-race', 'race');
+    db.run(
+      `INSERT INTO subscriptions (tenant_id, provider, status, plan_id, square_subscription_id)
+       VALUES ('tenant-race', 'square', 'pending', 'q3m', 'sq-sub-race-1')`,
+    );
+    let squareCalls = 0;
+    globalThis.fetch = (async () => {
+      squareCalls++;
+      // Hold the first request inside its await so the duplicate arrives mid-flight.
+      await new Promise((r) => setTimeout(r, 20));
+      return new Response(
+        JSON.stringify({
+          subscription: { id: 'sq-sub-race-1', status: 'ACTIVE', charged_through_date: '2027-02-01T00:00:00.000Z' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+    const app = buildWebhookApp(db);
+    const body = {
+      event_id: 'evt-race-1',
+      type: 'invoice.payment_made',
+      data: { object: { invoice: { subscription_id: 'sq-sub-race-1' } } },
+    };
+    const [a, b] = await Promise.all([postWebhook(app, body), postWebhook(app, body)]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    assert.equal(squareCalls, 1, 'only one delivery may run the side effects');
+    assert.equal(billingEventSeen(db, 'evt-race-1'), true);
+  });
+
+  test('a failed handling releases the claim so the retry is processed', async () => {
+    const db = openTestControlDb();
+    insertTenant(db, 'tenant-retry', 'retry');
+    db.run(
+      `INSERT INTO subscriptions (tenant_id, provider, status, plan_id, square_subscription_id)
+       VALUES ('tenant-retry', 'square', 'pending', 'q3m', 'sq-sub-retry-1')`,
+    );
+    globalThis.fetch = (async () =>
+      new Response('boom', { status: 500 })) as typeof globalThis.fetch;
+    const app = buildWebhookApp(db);
+    const body = {
+      event_id: 'evt-retry-1',
+      type: 'invoice.payment_made',
+      data: { object: { invoice: { subscription_id: 'sq-sub-retry-1' } } },
+    };
+    const first = await postWebhook(app, body);
+    assert.equal(first.status, 500);
+    assert.equal(billingEventSeen(db, 'evt-retry-1'), false, 'claim released after failure');
+
+    stubSquareSubscription({ id: 'sq-sub-retry-1', status: 'ACTIVE', charged_through_date: '2027-03-01T00:00:00.000Z' });
+    const retry = await postWebhook(app, body);
+    assert.equal(retry.status, 200);
+    assert.equal(billingEventSeen(db, 'evt-retry-1'), true);
+    assert.equal(getSubscription(db, 'tenant-retry')!.status, 'active');
   });
 });

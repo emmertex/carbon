@@ -27,7 +27,9 @@ export function personalKeyGuard(db: Db): MiddlewareHandler<{ Variables: AuthVar
     const roots = c.get('tokenProjectIds');
     if (!c.get('tokenRestOnly') && roots == null) return next();
     const path = c.req.path.replace(/^\/api/, '');
-    const match = /^\/tasks(?:\/([^/]+)(?:\/(complete|comments))?)?$/.exec(path);
+    // The comment activity feed rides along; it filters to the key's projects itself.
+    if (c.req.method === 'GET' && path === '/comments') return next();
+    const match = /^\/tasks(?:\/([^/]+)(?:\/(complete|comments)(?:\/[^/]+)?)?)?$/.exec(path);
     if (!match) return c.json({ error: 'This API key supports the task REST API only.' }, 403);
     const id = match[1] ? decodeURIComponent(match[1]) : null;
     if (id && !withinKeyProjects(db, roots, id)) return c.json({ error: 'outside_key_projects' }, 403);

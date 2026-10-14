@@ -28,6 +28,7 @@ export function ensureFcmTable(db: Db): void {
       token      TEXT NOT NULL UNIQUE,
       created_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(user_id, token);
   `);
 }
 
@@ -149,6 +150,55 @@ async function getAccessToken(sa: ServiceAccount): Promise<string | null> {
 
 // ----- send -----------------------------------------------------------------
 
+/** Test hook: drop the cached OAuth token and re-read the service account. */
+export function resetFcmStateForTests(): void {
+  cachedToken = null;
+  serviceAccount = undefined;
+}
+
+/** J: FCM v1 error codes meaning the token itself is dead or not ours — drop it. */
+const DEAD_TOKEN_CODES = new Set(["UNREGISTERED", "SENDER_ID_MISMATCH"]);
+
+interface FcmErrorBody {
+  error?: {
+    status?: string;
+    message?: string;
+    details?: Array<{
+      "@type"?: string;
+      errorCode?: string;
+      fieldViolations?: Array<{ field?: string; description?: string }>;
+    }>;
+  };
+}
+
+/** Classify an FCM v1 error response: true when the registration token should be
+ *  removed (UNREGISTERED, SENDER_ID_MISMATCH, or INVALID_ARGUMENT blamed on the token
+ *  — not on some other part of the message, which would be our bug, not the token's). */
+export function isDeadFcmToken(status: number, bodyText: string): boolean {
+  if (status === 404 || status === 410) return true;
+  let body: FcmErrorBody;
+  try {
+    body = JSON.parse(bodyText) as FcmErrorBody;
+  } catch {
+    return false;
+  }
+  const err = body.error;
+  if (!err) return false;
+  const codes = new Set<string>();
+  if (err.status) codes.add(err.status);
+  for (const d of err.details ?? []) if (d.errorCode) codes.add(d.errorCode);
+  for (const c of codes) if (DEAD_TOKEN_CODES.has(c)) return true;
+  if (codes.has("INVALID_ARGUMENT")) {
+    const fields = (err.details ?? []).flatMap((d) =>
+      (d.fieldViolations ?? []).map((v) => v.field ?? ""),
+    );
+    if (fields.some((f) => /(^|\.)token$/.test(f))) return true;
+    if (fields.length === 0 && /registration token/i.test(err.message ?? ""))
+      return true;
+  }
+  return false;
+}
+
 /** Deliver a payload to every FCM token registered to a user. No-op if unconfigured.
  *  Returns delivery counts (see DeliveryResult in push.ts): unconfigured or tokenless
  *  users contribute zero targets; dead tokens removed mid-send don't count either. */
@@ -160,11 +210,10 @@ export async function sendFcmToUser(
   const result = { targets: 0, delivered: 0 };
   const sa = loadServiceAccount();
   if (!sa) return result;
-  result.targets =
-    db.get<{ n: number }>(
-      "SELECT COUNT(*) n FROM fcm_tokens WHERE user_id = ?",
-      [userId],
-    )?.n ?? 0;
+  // L: one indexed read (idx_fcm_tokens_user) for the targets instead of a COUNT(*)
+  // plus a per-token keyset walk.
+  const tokens = tokensForUser(db, userId);
+  result.targets = tokens.length;
   if (!result.targets) return result;
   let accessToken: string | null;
   try {
@@ -175,53 +224,59 @@ export async function sendFcmToUser(
   if (!accessToken) return result;
 
   const endpoint = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
-  let after = "";
-  while (true) {
-    const row = db.get<{ token: string }>(
-      "SELECT token FROM fcm_tokens WHERE user_id = ? AND token > ? ORDER BY token LIMIT 1",
-      [userId, after],
-    );
-    if (!row) break;
-    const token = row.token;
-    after = token;
-    try {
-      // A2: safeFetch — bounded response + timeout; the FCM Bearer token is stripped if
-      // (and only if) a redirect ever left the Google origin.
-      await fcmSem.run(async () => {
-        const res = await safeFetch(endpoint, false, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
+  const post = (token: string, bearer: string) =>
+    // A2: safeFetch — bounded response + timeout; the FCM Bearer token is stripped if
+    // (and only if) a redirect ever left the Google origin.
+    safeFetch(endpoint, false, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: {
+          token,
+          notification: { title: payload.title, body: payload.body },
+          data: {
+            ...(payload.url ? { url: payload.url } : {}),
+            ...(payload.tag ? { tag: payload.tag } : {}),
           },
-          body: JSON.stringify({
-            message: {
-              token,
-              notification: { title: payload.title, body: payload.body },
-              data: {
-                ...(payload.url ? { url: payload.url } : {}),
-                ...(payload.tag ? { tag: payload.tag } : {}),
-              },
-            },
-          }),
-        });
-        if (res.ok) {
-          result.delivered++;
-        } else if (res.status === 404 || res.status === 410) {
-          removeFcmToken(db, token); // token gone — drop it
-          result.targets--;
-        } else {
-          console.error(
-            "[carbon] FCM send failed:",
-            res.status,
-            await res.text(),
-          );
-        }
+        },
+      }),
+    });
+
+  const sendOne = (token: string) =>
+    fcmSem.run(async () => {
+      let res = await post(token, accessToken!);
+      if (res.status === 401) {
+        // Cached OAuth token revoked/expired early: drop it, mint a fresh one, retry once.
         await res.body?.cancel();
-      });
-    } catch (e) {
-      console.error("[carbon] FCM send error:", e);
-    }
-  }
+        if (cachedToken?.value === accessToken) cachedToken = null;
+        const fresh = await getAccessToken(sa);
+        if (!fresh) {
+          console.error("[carbon] FCM send failed: 401 and token refresh failed");
+          return;
+        }
+        accessToken = fresh;
+        res = await post(token, fresh);
+      }
+      if (res.ok) {
+        result.delivered++;
+        await res.body?.cancel();
+        return;
+      }
+      const text = await res.text();
+      if (isDeadFcmToken(res.status, text)) {
+        removeFcmToken(db, token); // token gone / not ours — drop it
+        result.targets--;
+      } else {
+        console.error("[carbon] FCM send failed:", res.status, text);
+      }
+    });
+
+  // D: all tokens in parallel, bounded by fcmSem.
+  const settled = await Promise.allSettled(tokens.map(sendOne));
+  for (const r of settled)
+    if (r.status === "rejected") console.error("[carbon] FCM send error:", r.reason);
   return result;
 }

@@ -21,6 +21,7 @@ import {
   listSharesForItem,
   listAssigneesForItem,
   visibleItemIds,
+  effectiveShares,
 } from './repo';
 
 // Minimal in-memory Db backed by node:sqlite (mirrors apps/server/src/sqlite.ts).
@@ -300,4 +301,31 @@ test('inheritedPriority: own priority wins, else inherits nearest ancestor task 
   // A task's own priority overrides an inherited one.
   const subOwn = createItem(db, DEVICE, { title: 'own', parentId: high.id, priority: 1 });
   assert.equal(inheritedPriority(db, getItem(db, subOwn.id)!), 1);
+});
+
+test('effectiveShares: nearest share wins, inherited flag + source, cycle-safe', () => {
+  const db = openMemoryDb();
+  const alice = createUser(db, { username: 'alice' });
+  const bob = createUser(db, { username: 'bob' });
+  const carol = createUser(db, { username: 'carol' });
+  const root = createItem(db, DEVICE, { title: 'root' });
+  const mid = createItem(db, DEVICE, { title: 'mid', parentId: root.id });
+  const leaf = createItem(db, DEVICE, { title: 'leaf', parentId: mid.id });
+  shareItem(db, DEVICE, root.id, alice.id, 'read');
+  shareItem(db, DEVICE, root.id, bob.id, 'read');
+  shareItem(db, DEVICE, mid.id, bob.id, 'write');
+  shareItem(db, DEVICE, leaf.id, carol.id, 'read');
+
+  const byUser = (id: string) =>
+    Object.fromEntries(effectiveShares(db, id).map((e) => [e.user_id, e]));
+  const s = byUser(leaf.id);
+  assert.equal(Object.keys(s).length, 3);
+  assert.deepEqual(s[carol.id], { user_id: carol.id, permission: 'read', inherited: false, source_id: leaf.id });
+  assert.deepEqual(s[bob.id], { user_id: bob.id, permission: 'write', inherited: true, source_id: mid.id });
+  assert.deepEqual(s[alice.id], { user_id: alice.id, permission: 'read', inherited: true, source_id: root.id });
+
+  // A corrupt parent cycle terminates and still reports each share once.
+  db.run('UPDATE items SET parent_id = ? WHERE id = ?', [leaf.id, root.id]);
+  assert.equal(effectiveShares(db, leaf.id).length, 3);
+  assert.equal(effectiveShares(db, 'missing-item').length, 0);
 });

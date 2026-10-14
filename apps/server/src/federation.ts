@@ -23,10 +23,12 @@ import {
 import {
   createSystemNotice,
   registerNoticeHandler,
+  resolveNotice,
   type SystemNotice,
   type NoticeState,
 } from './notices';
 import { safeFetch } from './safe-fetch';
+import { clientIp, stampedClientIp } from './client-ip';
 import type { AuthVars } from './auth';
 
 // ----- federation (Phase 1: storage + governance + pure gate logic) ----------
@@ -135,6 +137,25 @@ export function ensureFederationTables(db: Db): void {
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_record_ops_item_id ON record_ops(json_extract(data, '$.item_id'))",
   );
+  // Indexed lookup of a link by its secret: store sha256(secret) alongside it so
+  // `findActiveLinkBySecret` is an index probe instead of a scan of every link. Added
+  // idempotently; rows minted before the column existed are backfilled here (the
+  // plaintext `secret` column is kept — outbound pushes still send it).
+  const hasHash = db
+    .all<{ name: string }>('PRAGMA table_info(federation_links)')
+    .some((r) => r.name === 'secret_hash');
+  if (!hasHash) db.exec('ALTER TABLE federation_links ADD COLUMN secret_hash TEXT');
+  for (const r of db.all<{ id: string; secret: string }>(
+    'SELECT id, secret FROM federation_links WHERE secret_hash IS NULL',
+  )) {
+    db.run('UPDATE federation_links SET secret_hash = ? WHERE id = ?', [hashSecret(r.secret), r.id]);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fed_links_secret_hash ON federation_links(secret_hash)');
+}
+
+/** sha256 hex of a link secret — the indexed lookup key (never the credential itself). */
+function hashSecret(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex');
 }
 
 interface LinkRow {
@@ -181,8 +202,8 @@ export function createLink(db: Db, input: CreateLinkInput): FederationLink {
   };
   db.run(
     `INSERT INTO federation_links
-       (id, peer_base_url, peer_label, direction, secret, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (id, peer_base_url, peer_label, direction, secret, status, created_at, secret_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       link.id,
       link.peer_base_url,
@@ -191,6 +212,7 @@ export function createLink(db: Db, input: CreateLinkInput): FederationLink {
       link.secret,
       link.status,
       link.created_at,
+      hashSecret(link.secret),
     ],
   );
   return link;
@@ -859,6 +881,8 @@ export interface FederationDeps {
    *  outbound `/offers` route so it identifies the caller. The inbound/confirm/sync
    *  routes are secret-authed and must NOT run it. */
   sessionAuth: MiddlewareHandler<{ Variables: FedVars }>;
+  /** Override the per-page `/sync` caps (tests); defaults to FEDERATION_SYNC_LIMITS. */
+  syncLimits?: Partial<FederationSyncLimits>;
 }
 
 /** Parse a `user@subdomain` federation address. Returns null if malformed. */
@@ -914,6 +938,12 @@ function ensureOfferTable(db: Db): void {
     .all<{ name: string }>('PRAGMA table_info(federation_offers)')
     .some((r) => r.name === 'offered_by');
   if (!present) db.exec('ALTER TABLE federation_offers ADD COLUMN offered_by TEXT');
+  // The addressee USERNAME the offer was sent to (the `user` of `user@label`), so the
+  // confirm callback is bound to the offer we actually made. Nullable for older rows.
+  const hasAddressee = db
+    .all<{ name: string }>('PRAGMA table_info(federation_offers)')
+    .some((r) => r.name === 'addressee');
+  if (!hasAddressee) db.exec('ALTER TABLE federation_offers ADD COLUMN addressee TEXT');
 }
 
 function putOfferSecret(
@@ -921,15 +951,107 @@ function putOfferSecret(
   linkId: string,
   offerSecret: string,
   offeredBy?: string | null,
+  addressee?: string | null,
 ): void {
   ensureOfferTable(db);
   db.run(
-    `INSERT INTO federation_offers (link_id, offer_secret, created_at, offered_by)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO federation_offers (link_id, offer_secret, created_at, offered_by, addressee)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(link_id) DO UPDATE SET
-       offer_secret = excluded.offer_secret, offered_by = excluded.offered_by`,
-    [linkId, offerSecret, new Date().toISOString(), offeredBy ?? null],
+       offer_secret = excluded.offer_secret, offered_by = excluded.offered_by,
+       addressee = excluded.addressee`,
+    [linkId, offerSecret, new Date().toISOString(), offeredBy ?? null, addressee ?? null],
   );
+}
+
+/** The stored addressee username for an offer (null for pre-column rows). */
+function getOfferAddressee(db: Db, linkId: string): string | null {
+  ensureOfferTable(db);
+  return (
+    db.get<{ addressee: string | null }>('SELECT addressee FROM federation_offers WHERE link_id = ?', [
+      linkId,
+    ])?.addressee ?? null
+  );
+}
+
+// ----- pending-link bounds (H) ----------------------------------------------
+//
+// `/offers/inbound` is reachable by anyone who can stand up a verifying origin, so the
+// pending links it mints are bounded per peer and per addressee, and stale pending
+// links (either direction) expire.
+
+/** Max simultaneously-pending INBOUND links from one peer label. */
+export const FEDERATION_MAX_PENDING_PER_PEER = Math.max(
+  1,
+  Number(process.env.FEDERATION_MAX_PENDING_PER_PEER) || 50,
+);
+/** Max simultaneously-pending INBOUND links addressed to one local user. */
+export const FEDERATION_MAX_PENDING_PER_ADDRESSEE = Math.max(
+  1,
+  Number(process.env.FEDERATION_MAX_PENDING_PER_ADDRESSEE) || 20,
+);
+/** Age after which a still-pending link (either direction) is expired. */
+export const FEDERATION_PENDING_TTL_MS =
+  Math.max(1, Number(process.env.FEDERATION_PENDING_TTL_DAYS) || 14) * 86_400_000;
+
+function countPendingInboundFromPeer(db: Db, peerLabel: string): number {
+  return (
+    db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM federation_links
+        WHERE status = 'pending' AND direction = 'inbound' AND peer_label = ?`,
+      [peerLabel],
+    )?.n ?? 0
+  );
+}
+
+function countPendingInboundForAddressee(db: Db, addresseeId: string): number {
+  return (
+    db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM federation_links l
+         JOIN federation_cursors c ON c.link_id = l.id
+        WHERE l.status = 'pending' AND l.direction = 'inbound'
+          AND (CASE WHEN json_valid(c.need_json)
+                    THEN json_extract(c.need_json, '$.addressee_id') END) = ?`,
+      [addresseeId],
+    )?.n ?? 0
+  );
+}
+
+/** Whether a pending link is past its TTL (`now` injectable for tests). */
+function pendingExpired(link: FederationLink, now = Date.now()): boolean {
+  const t = Date.parse(link.created_at);
+  return Number.isFinite(t) && now - t > FEDERATION_PENDING_TTL_MS;
+}
+
+/**
+ * Expire every pending link older than the TTL: tombstone it (roots + any dangling
+ * grant shares), drop its offer-correlation row (so its offer_secret stops working),
+ * and mark its offer notice expired. Returns the number expired. Run from the
+ * federation sweep tick; `now` is injectable for tests.
+ */
+export function expireStalePendingLinks(db: Db, now = Date.now()): number {
+  let n = 0;
+  const deviceId = ensureDeviceId(db);
+  for (const link of listLinks(db)) {
+    if (link.status !== 'pending' || !pendingExpired(link, now)) continue;
+    tombstoneLink(db, deviceId, link.id);
+    deleteOfferRow(db, link.id);
+    try {
+      for (const r of db.all<{ id: string }>(
+        `SELECT id FROM system_notices
+          WHERE kind = 'federation_offer' AND state = 'pending'
+            AND (CASE WHEN json_valid(payload_json)
+                      THEN json_extract(payload_json, '$.actions.link_id') END) = ?`,
+        [link.id],
+      )) {
+        resolveNotice(db, deviceId, r.id, 'expired');
+      }
+    } catch {
+      /* no notices table on this tenant — nothing to resolve */
+    }
+    n++;
+  }
+  return n;
 }
 
 function findLinkByOfferSecret(db: Db, offerSecret: string): string | null {
@@ -1508,16 +1630,53 @@ export interface IncrementalPull {
   since: number;
   /** New `record_ops` rowid high-water. */
   rsince: number;
+  /** A size/scan cap was hit: more rows remain past `since`/`rsince` — fetch again. */
+  truncated: boolean;
 }
+
+/** Per-response caps for a federation exchange page — the same knobs (and defaults)
+ *  as `/api/sync`'s SYNC_MAX_* so a federated backlog arrives in bounded pages. */
+export interface FederationSyncLimits {
+  /** Max ops + records per page. */
+  maxOps: number;
+  /** Max serialized op/record bytes per page (a single oversized row still goes alone). */
+  maxBytes: number;
+  /** Max rows each side's SQL scan reads per page. */
+  maxScan: number;
+}
+
+export const FEDERATION_SYNC_LIMITS: FederationSyncLimits = {
+  maxOps: Math.max(1, Number(process.env.SYNC_MAX_RESPONSE_OPS) || 50_000),
+  maxBytes: Math.max(1, Number(process.env.SYNC_MAX_RESPONSE_MB) || 16) * 1024 * 1024,
+  maxScan: Math.max(1, Number(process.env.SYNC_MAX_SCAN_ROWS) || 200_000),
+};
+
+/** Request-body cap for federation JSON ingest (`/api/federation/*` except `/blob`).
+ *  A peer's push is built under `FEDERATION_SYNC_LIMITS.maxBytes` of op/record payload
+ *  (one oversized row may go alone, bounded by the per-op caps); the envelope, the
+ *  referenced-user projection and JSON escaping ride on top, so allow 2x + 4 MB. */
+export const FEDERATION_JSON_BODY_LIMIT = FEDERATION_SYNC_LIMITS.maxBytes * 2 + 4 * 1024 * 1024;
+
+/** Envelope overhead counted per op/record on top of its JSON payload. */
+const OP_ENVELOPE_BYTES = 256;
 
 /**
  * The INCREMENTAL analogue of `buildPullPayload`: only ops/records with `rowid >
  * since`/`rsince` whose item is in `subtreeIds(grantedRoots)`, plus the referenced-
- * user projection and the new high-water rowids. `need` (a move-in backfill request)
- * forces the FULL subtree for those roots regardless of cursor — idempotent, exactly
- * like the `/api/sync` backfill — so a newly-in-scope item predating the cursor is
- * still delivered. The scope is recomputed each call from CURRENT roots, so an item
- * moved OUT naturally stops being sent and one moved IN is picked up.
+ * user projection and the new high-water rowids. The scope is recomputed each call
+ * from CURRENT roots, so an item moved OUT naturally stops being sent and one moved
+ * IN is picked up.
+ *
+ * Paged like `/api/sync`: each page holds at most `limits.maxOps` rows /
+ * `limits.maxBytes` of payload and each scan reads at most `limits.maxScan` rows. On a
+ * cap the result is `truncated` and the cursors advance ONLY past rows actually
+ * consumed, so the caller re-requests from them. Records are deferred while ops are
+ * truncated (a record never arrives ahead of the item ops it hangs off).
+ *
+ * `need` (a move-in backfill request from a peer) rescans from rowid 0 over the
+ * current scope — the full subtree, idempotent like the `/api/sync` backfill — so a
+ * newly-in-scope item predating the cursor is still delivered, and the rescan pages
+ * under the same caps instead of arriving as one unbounded blob.
  */
 export function buildIncrementalPullPayload(
   db: Db,
@@ -1526,124 +1685,100 @@ export function buildIncrementalPullPayload(
   rsince: number,
   need?: string[],
   excludeDevices?: Set<string>,
+  limits?: Partial<FederationSyncLimits>,
 ): IncrementalPull {
+  const lim: FederationSyncLimits = { ...FEDERATION_SYNC_LIMITS, ...limits };
   const subtree = subtreeIds(db, grantedRoots);
+  if (Array.isArray(need) && need.some((id) => typeof id === 'string' && subtree.has(id))) {
+    since = 0;
+    rsince = 0;
+  }
   // When building a PUSH, `excludeDevices` holds the peer's own device ids (ops we
   // ingested FROM that peer): never push them back. The cursor still advances past
   // them (they were scanned) so it stays at the build-time high-water regardless.
   const excluded = (dev: string): boolean => !!excludeDevices && excludeDevices.has(dev);
 
+  let count = 0;
+  let bytes = 0;
+  let truncated = false;
+  const full = (): boolean => count >= lim.maxOps || bytes >= lim.maxBytes;
+
   const ops: Op[] = [];
   const referenced = new Set<string>();
   let cursor = since;
-  for (const r of db.all<{
+  const opRows = db.all<{
     seq: number;
     id: string;
     item_id: string;
     ts: number;
     device_id: string;
     fields: string;
-  }>('SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE rowid > ? ORDER BY rowid', [
-    since,
-  ])) {
+  }>(
+    'SELECT rowid AS seq, id, item_id, ts, device_id, fields FROM ops WHERE rowid > ? ORDER BY rowid LIMIT ?',
+    [since, lim.maxScan],
+  );
+  let opsTruncated = opRows.length >= lim.maxScan;
+  for (const r of opRows) {
+    if (full()) {
+      opsTruncated = true;
+      break;
+    }
     cursor = r.seq;
     if (!subtree.has(r.item_id) || excluded(r.device_id)) continue;
     const fields = JSON.parse(r.fields) as Record<string, unknown>;
     if (typeof fields.owner_id === 'string') referenced.add(fields.owner_id);
     ops.push({ id: r.id, item_id: r.item_id, ts: Number(r.ts), device_id: r.device_id, fields });
+    count++;
+    bytes += r.fields.length + OP_ENVELOPE_BYTES;
   }
+  if (opsTruncated) truncated = true;
 
   const records: RecordOp[] = [];
   let rcursor = rsince;
-  for (const r of db.all<{
-    seq: number;
-    id: string;
-    entity: string;
-    row_id: string;
-    ts: number;
-    device_id: string;
-    data: string;
-  }>(
-    'SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE rowid > ? ORDER BY rowid',
-    [rsince],
-  )) {
-    rcursor = r.seq;
-    if (!isFederatedRecord(r.entity) || excluded(r.device_id)) continue;
-    const data = JSON.parse(r.data) as Record<string, unknown>;
-    const itemId = data.item_id as string | undefined;
-    if (!itemId || !subtree.has(itemId)) continue;
-    if (typeof data.user_id === 'string') referenced.add(data.user_id);
-    if (typeof data.author_id === 'string') referenced.add(data.author_id);
-    if (Array.isArray(data.mentions)) {
-      for (const m of data.mentions) if (typeof m === 'string') referenced.add(m);
-    }
-    records.push({
-      id: r.id,
-      entity: r.entity,
-      row_id: r.row_id,
-      ts: Number(r.ts),
-      device_id: r.device_id,
-      data,
-    });
-  }
-
-  // Backfill: the caller reports roots it needs the full content for (a move-in it
-  // synced past). Send the whole subtree for those roots regardless of the cursor.
-  if (Array.isArray(need) && need.length) {
-    const needRoots = need.filter((id) => typeof id === 'string' && subtree.has(id));
-    const needSubtree = subtreeIds(db, needRoots);
-    if (needSubtree.size) {
-      const seenOps = new Set(ops.map((o) => o.id));
-      for (const r of db.all<{
-        id: string;
-        item_id: string;
-        ts: number;
-        device_id: string;
-        fields: string;
-      }>('SELECT id, item_id, ts, device_id, fields FROM ops ORDER BY rowid')) {
-        if (!needSubtree.has(r.item_id) || seenOps.has(r.id) || excluded(r.device_id)) continue;
-        const fields = JSON.parse(r.fields) as Record<string, unknown>;
-        if (typeof fields.owner_id === 'string') referenced.add(fields.owner_id);
-        ops.push({
-          id: r.id,
-          item_id: r.item_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          fields,
-        });
+  if (!opsTruncated) {
+    const recRows = db.all<{
+      seq: number;
+      id: string;
+      entity: string;
+      row_id: string;
+      ts: number;
+      device_id: string;
+      data: string;
+    }>(
+      'SELECT rowid AS seq, id, entity, row_id, ts, device_id, data FROM record_ops WHERE rowid > ? ORDER BY rowid LIMIT ?',
+      [rsince, lim.maxScan],
+    );
+    if (recRows.length >= lim.maxScan) truncated = true;
+    for (const r of recRows) {
+      if (full()) {
+        truncated = true;
+        break;
       }
-      const seenRecs = new Set(records.map((o) => o.id));
-      for (const r of db.all<{
-        id: string;
-        entity: string;
-        row_id: string;
-        ts: number;
-        device_id: string;
-        data: string;
-      }>('SELECT id, entity, row_id, ts, device_id, data FROM record_ops ORDER BY rowid')) {
-        if (seenRecs.has(r.id) || !isFederatedRecord(r.entity) || excluded(r.device_id)) continue;
-        const data = JSON.parse(r.data) as Record<string, unknown>;
-        const itemId = data.item_id as string | undefined;
-        if (!itemId || !needSubtree.has(itemId)) continue;
-        if (typeof data.user_id === 'string') referenced.add(data.user_id);
-        if (typeof data.author_id === 'string') referenced.add(data.author_id);
-        if (Array.isArray(data.mentions)) {
-          for (const m of data.mentions) if (typeof m === 'string') referenced.add(m);
-        }
-        records.push({
-          id: r.id,
-          entity: r.entity,
-          row_id: r.row_id,
-          ts: Number(r.ts),
-          device_id: r.device_id,
-          data,
-        });
+      rcursor = r.seq;
+      if (!isFederatedRecord(r.entity) || excluded(r.device_id)) continue;
+      const data = JSON.parse(r.data) as Record<string, unknown>;
+      const itemId = data.item_id as string | undefined;
+      if (!itemId || !subtree.has(itemId)) continue;
+      if (typeof data.user_id === 'string') referenced.add(data.user_id);
+      if (typeof data.author_id === 'string') referenced.add(data.author_id);
+      if (Array.isArray(data.mentions)) {
+        for (const m of data.mentions) if (typeof m === 'string') referenced.add(m);
       }
+      records.push({
+        id: r.id,
+        entity: r.entity,
+        row_id: r.row_id,
+        ts: Number(r.ts),
+        device_id: r.device_id,
+        data,
+      });
+      count++;
+      bytes += r.data.length + OP_ENVELOPE_BYTES;
     }
   }
 
   const users = projectReferencedUsers(db, referenced);
-  return { payload: { ops, records, users }, since: cursor, rsince: rcursor };
+  return { payload: { ops, records, users }, since: cursor, rsince: rcursor, truncated };
 }
 
 // ============================================================================
@@ -1747,6 +1882,53 @@ export async function fetchFederatedBlob(
 
 // ----- routes ---------------------------------------------------------------
 
+/** Per-IP cap on unauthenticated `/offers/inbound` calls (each may trigger one
+ *  outbound challenge request). */
+export const FEDERATION_INBOUND_PER_IP_HOUR = Math.max(
+  1,
+  Number(process.env.FEDERATION_INBOUND_PER_IP_HOUR) || 60,
+);
+const inboundOfferHits = new Map<string, number[]>();
+/** Test hook: clear the inbound-offer rate-limit window. */
+export function resetFederationRateLimits(): void {
+  inboundOfferHits.clear();
+}
+
+/** Sliding one-hour window limiter — the same shape as index.ts's `hitAllowed`. */
+function fedHitAllowed(map: Map<string, number[]>, key: string, cap: number): boolean {
+  const now = Date.now();
+  const win = now - 3_600_000;
+  for (const [k, v] of map) {
+    const fresh = v.filter((t) => t > win);
+    if (fresh.length) map.set(k, fresh);
+    else map.delete(k);
+  }
+  const hits = map.get(key) ?? [];
+  if (hits.length >= cap) return false;
+  hits.push(now);
+  map.set(key, hits);
+  return true;
+}
+
+const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+/** Whether `s` is an acceptable offer `callback_base_url`: a bare label (`acme`), a bare
+ *  DNS host with optional port (`acme.example.com[:443]`), or an `https://` origin of
+ *  the same — nothing else (no path beyond `/`, query, fragment, userinfo, other scheme,
+ *  whitespace, or `..`/empty host labels). */
+export function isValidCallbackBase(s: string): boolean {
+  if (typeof s !== 'string' || !s || s.length > 255) return false;
+  let hostPort = s;
+  if (/^https:\/\//i.test(s)) {
+    hostPort = s.slice('https://'.length);
+    if (hostPort.endsWith('/')) hostPort = hostPort.slice(0, -1);
+  }
+  const m = /^([^:/?#@\\\s]+)(?::(\d{1,5}))?$/.exec(hostPort);
+  if (!m) return false;
+  if (m[2] !== undefined && (Number(m[2]) < 1 || Number(m[2]) > 65535)) return false;
+  return m[1].split('.').every((part) => LABEL_RE.test(part));
+}
+
 /**
  * Build the per-tenant federation routes, to be mounted under `/api/federation`.
  * Auth modes:
@@ -1805,7 +1987,7 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     addLinkRoot(db, link.id, body.root_item_id, permission);
     const offerSecret = randomBytes(24).toString('hex');
     // Record WHICH local user made the offer so a decline callback can target them.
-    putOfferSecret(db, link.id, offerSecret, callerId);
+    putOfferSecret(db, link.id, offerSecret, callerId, addr.user);
 
     const fromUser = getUser(db, callerId);
     const rootLabel = root.title || 'a shared item';
@@ -1855,6 +2037,13 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
 
   // --- inbound: receive an offer (authed by the offer/link secret) ---
   app.post('/offers/inbound', async (c) => {
+    // Unauthenticated + triggers outbound I/O (the origin challenge): rate-limit per IP
+    // BEFORE reading anything. The host dispatcher stamps the trusted client IP.
+    const ipRaw = stampedClientIp(c);
+    const ip = ipRaw !== 'unknown' ? ipRaw : clientIp(c);
+    if (!fedHitAllowed(inboundOfferHits, ip, FEDERATION_INBOUND_PER_IP_HOUR)) {
+      return c.json({ error: 'rate_limited' }, 429);
+    }
     const body = (await c.req.json().catch(() => ({}))) as {
       from?: string; // the recipient-local addressee (the `user` of the offer's `to`)
       from_address?: string;
@@ -1867,17 +2056,47 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     };
     // Secret-authed (not session/token): the presence of link_secret + offer_secret is
     // the credential. Reject if absent.
-    if (!body.link_secret || !body.offer_secret || !body.callback_base_url) {
+    if (
+      typeof body.link_secret !== 'string' ||
+      typeof body.offer_secret !== 'string' ||
+      typeof body.callback_base_url !== 'string' ||
+      !body.link_secret ||
+      !body.offer_secret
+    ) {
       return c.json({ error: 'unauthorized' }, 401);
+    }
+    // The callback is where we POST the challenge (and later secrets): only a bare label,
+    // a bare host[:port], or an `https://host[:port]` origin — no path/query/userinfo.
+    if (!isValidCallbackBase(body.callback_base_url)) {
+      return c.json({ error: 'bad_callback' }, 400);
     }
     // Derive the peer's label from the callback base (its own subdomain).
     const peerLabel = body.callback_base_url;
-    // Origin verification (before ANY policy decision): `callback_base_url` is entirely
-    // attacker-controllable yet is what `tierForLabel`/`peerWhitelisted`/`peerDenied` gate on
-    // and what we later deliver secrets to. Challenge it — POST the offer_secret back to that
-    // origin's /offers/verify — and require it to confirm it actually minted this offer. A
-    // caller can only pass for a host it truly controls, so it cannot forge a benign label to
-    // slip past the deny list. Unreachable / non-confirming ⇒ reject before trusting anything.
+
+    // Gates FIRST (no I/O): host ceiling, workspace policy, allow/deny lists on the
+    // CLAIMED label. These can only refuse, never grant — the origin challenge below
+    // still has to pass — so evaluating them before verification is safe and means a
+    // denied/disabled peer never makes us send a request anywhere.
+    const tier = tierForLabel(peerLabel);
+    const gate = canAccept({
+      mode: deps.resolveMode(),
+      policy: getFederationPolicy(db),
+      tier,
+      peerOnAllowlist: peerWhitelisted(db, peerLabel),
+      peerOnDenylist: peerDenied(db, peerLabel),
+    });
+    if (!gate.ok) return c.json({ error: 'federation_denied', reason: gate.reason }, 403);
+
+    // Per-peer pending cap (independent of which user is addressed, so no oracle).
+    if (countPendingInboundFromPeer(db, peerLabel) >= FEDERATION_MAX_PENDING_PER_PEER) {
+      return c.json({ error: 'too_many_pending' }, 429);
+    }
+
+    // Origin verification: `callback_base_url` is attacker-controllable yet is what the
+    // gates above keyed on and what we later deliver secrets to. Challenge it — POST the
+    // offer_secret back to that origin's /offers/verify — and require it to confirm it
+    // actually minted this offer. A caller can only pass for a host it truly controls.
+    // Unreachable / non-confirming ⇒ reject before trusting anything.
     let originVerified = false;
     try {
       const vr = await deps.deliverToPeer(peerLabel, '/api/federation/offers/verify', {
@@ -1889,20 +2108,18 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     }
     if (!originVerified) return c.json({ error: 'unverified_origin' }, 403);
 
-    const tier = tierForLabel(peerLabel);
-    const gate = canAccept({
-      mode: deps.resolveMode(),
-      policy: getFederationPolicy(db),
-      tier,
-      peerOnAllowlist: peerWhitelisted(db, peerLabel),
-      peerOnDenylist: peerDenied(db, peerLabel),
-    });
-    if (!gate.ok) return c.json({ error: 'federation_denied', reason: gate.reason }, 403);
-
-    // Resolve the addressed local user (the `user` part of the offer's `to`). 404 if unknown.
-    const addressedName = (body.from ?? '').trim();
+    // Resolve the addressed local user (the `user` part of the offer's `to`). An unknown
+    // user, or one already at the per-addressee pending cap, gets the SAME accepted
+    // response as a delivered offer (no link, no notice) so usernames can't be
+    // enumerated; the issuer's dangling pending link simply expires.
+    const addressedName = typeof body.from === 'string' ? body.from.trim() : '';
     const addressed = addressedName ? getUserByUsernameLocal(db, addressedName) : undefined;
-    if (!addressed) return c.json({ error: 'no_such_user' }, 404);
+    if (
+      !addressed ||
+      countPendingInboundForAddressee(db, addressed.id) >= FEDERATION_MAX_PENDING_PER_ADDRESSEE
+    ) {
+      return c.json({ ok: true }, 200);
+    }
 
     const permission: Permission = body.permission === 'write' ? 'write' : 'read';
     // Mint the recipient-side pending inbound link, keyed by the peer's link_secret so
@@ -1924,6 +2141,7 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
         offer_secret: body.offer_secret,
         link_secret: body.link_secret,
         addressee_id: addressed.id,
+        addressee_username: addressedName,
         permission,
       }),
     });
@@ -1955,15 +2173,42 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
     const body = (await c.req.json().catch(() => ({}))) as {
       offer_secret?: string;
       addressee_id?: string;
+      addressee_username?: string;
     };
-    if (!body.offer_secret) return c.json({ error: 'unauthorized' }, 401);
+    if (typeof body.offer_secret !== 'string' || !body.offer_secret) {
+      return c.json({ error: 'unauthorized' }, 401);
+    }
     const linkId = findLinkByOfferSecret(db, body.offer_secret);
     if (!linkId) return c.json({ error: 'unauthorized' }, 401);
-    setLinkStatus(db, linkId, 'active');
     const link = getLink(db, linkId);
-    if (link && body.addressee_id) {
+    // One-shot: only a still-PENDING OUTBOUND link may be confirmed. A revoked/declined/
+    // already-active link (or an inbound one) can never be (re)activated by this secret.
+    if (!link || link.direction !== 'outbound' || link.status !== 'pending') {
+      return c.json({ error: 'conflict' }, 409);
+    }
+    if (pendingExpired(link)) {
+      expireStalePendingLinks(db);
+      return c.json({ error: 'conflict' }, 409);
+    }
+    // Bind the confirm to the offer we made: the recipient must name the same addressee
+    // username we addressed (rows predating the column carry none and skip this check).
+    const addressee = getOfferAddressee(db, linkId);
+    if (addressee !== null && body.addressee_username !== addressee) {
+      return c.json({ error: 'conflict' }, 409);
+    }
+    // The addressee id is the recipient's own local user id; accept it exactly once (the
+    // offer row is consumed below) and only as a plain id — never something that could
+    // smuggle a different shadow ref (`remote:<label>:<id>`) through the `:` separator.
+    const addresseeId = typeof body.addressee_id === 'string' ? body.addressee_id : '';
+    if (addresseeId && !/^[A-Za-z0-9_-]{1,128}$/.test(addresseeId)) {
+      return c.json({ error: 'bad_addressee' }, 400);
+    }
+    // Consume the offer: the offer_secret works once.
+    deleteOfferRow(db, linkId);
+    setLinkStatus(db, linkId, 'active');
+    if (addresseeId) {
       const recipientLabel = link.peer_label ?? link.peer_base_url;
-      const shadowRef = shadowUserId(recipientLabel, body.addressee_id);
+      const shadowRef = shadowUserId(recipientLabel, addresseeId);
       for (const r of listLinkRoots(db, linkId)) {
         // shareItem regenerates the deterministic join id (`s:<item>:<user>`) itself.
         shareItem(db, serverDeviceId, r.root_item_id, shadowRef, r.permission);
@@ -2080,14 +2325,17 @@ export function federationRoutes(deps: FederationDeps): Hono<{ Variables: FedVar
 
     // ----- pull side: our scoped content, incrementally by the caller's cursor ---
     const roots = listLinkRoots(db, link.id).map((r) => r.root_item_id);
-    const { payload, since, rsince } = buildIncrementalPullPayload(
+    const { payload, since, rsince, truncated } = buildIncrementalPullPayload(
       db,
       roots,
       Number(body.since ?? 0),
       Number(body.rsince ?? 0),
       body.need,
+      undefined,
+      deps.syncLimits,
     );
-    return c.json({ ...payload, since, rsince });
+    // `truncated` ⇒ more rows remain past since/rsince; the caller re-requests from them.
+    return c.json({ ...payload, since, rsince, truncated });
   });
 
   // --- link-authed blob serve (Phase 5): raw bytes for a federated attachment ---
@@ -2405,26 +2653,25 @@ export function registerFederationConfigRoutes(
       await retractAllRoots(db, link, deps.deliverToPeer);
     }
     setLinkStatus(db, id, 'revoked');
+    // Drop the offer-correlation row so its offer_secret can never confirm this link again.
+    deleteOfferRow(db, id);
     return c.json({ ok: true, status: 'revoked' });
   });
 }
 
-/** Constant-time active-link lookup by secret. Guards length first (a length
- *  mismatch short-circuits to a per-link dummy compare of equal length so the scan
- *  itself is not a length oracle), then `crypto.timingSafeEqual` on equal-length
- *  buffers. Keeps the active-link filter. */
+/** Active-link lookup by secret. The candidate rows come from an indexed probe on
+ *  sha256(secret) (no scan of every link), then each candidate's stored secret is
+ *  confirmed with `crypto.timingSafeEqual` (length-guarded) — so the final credential
+ *  comparison stays constant-time. Keeps the active-link filter. */
 export function findActiveLinkBySecret(db: Db, secret: string): FederationLink | undefined {
   const provided = Buffer.from(secret);
-  for (const l of listLinks(db)) {
-    if (l.status !== 'active') continue;
-    const stored = Buffer.from(l.secret);
-    if (stored.length !== provided.length) {
-      // Length differs ⇒ not a match; still burn a compare of equal length so we
-      // don't branch on secret length before doing constant-time work.
-      timingSafeEqual(stored, stored);
-      continue;
-    }
-    if (timingSafeEqual(stored, provided)) return l;
+  for (const r of db.all<LinkRow>(
+    "SELECT * FROM federation_links WHERE secret_hash = ? AND status = 'active'",
+    [hashSecret(secret)],
+  )) {
+    const stored = Buffer.from(r.secret);
+    if (stored.length !== provided.length) continue;
+    if (timingSafeEqual(stored, provided)) return rowToLink(r);
   }
   return undefined;
 }
@@ -2492,6 +2739,15 @@ async function federationOfferHandler(
 
   const link = getLink(db, linkId);
   if (!link) return;
+  // Only a still-pending INBOUND link can be accepted/declined from its notice: a
+  // declined, revoked or expired link must never be reactivated by a stale notice.
+  if (link.direction !== 'inbound' || link.status !== 'pending') {
+    return action === 'accept' ? { state: 'expired' } : undefined;
+  }
+  if (pendingExpired(link)) {
+    expireStalePendingLinks(db);
+    return { state: 'expired' };
+  }
 
   // Read the stashed issuer callback + secrets (used by both branches).
   const cur = getCursor(db, linkId);
@@ -2543,6 +2799,13 @@ async function federationOfferHandler(
  * can be awaited by the accept path. Pulls the issuer's scoped subtree, records the
  * granted root, ingests with identity remap, then confirms back to the issuer.
  */
+/** Upper bound on pages followed by one initial pull (a runaway/non-advancing peer
+ *  can't hold the accept open forever; the exchange loop continues from the cursor). */
+const INITIAL_PULL_MAX_PAGES = 1000;
+/** Upper bound on back-to-back exchange rounds per link per sweep tick while either
+ *  side reports `truncated`; the next tick resumes from the stored cursors. */
+const EXCHANGE_MAX_ROUNDS = 20;
+
 export async function runInitialPull(
   db: Db,
   delivery: { deliverToPeer: DeliverToPeer; myLabel: string },
@@ -2552,6 +2815,7 @@ export async function runInitialPull(
     offer_secret?: string;
     link_secret?: string;
     addressee_id?: string;
+    addressee_username?: string;
     permission?: Permission;
   },
 ): Promise<void> {
@@ -2567,17 +2831,46 @@ export async function runInitialPull(
       .deliverToPeer(stash.callback_base_url!, '/api/federation/offers/confirm', {
         offer_secret: stash.offer_secret,
         addressee_id: stash.addressee_id,
+        addressee_username: stash.addressee_username,
       })
       .catch(() => undefined);
   }
 
-  // 2. Pull the scoped subtree from the issuer.
-  const res = await delivery.deliverToPeer(stash.callback_base_url!, '/api/federation/sync', {
-    __link_secret: stash.link_secret,
-  });
-  if (!res.ok) return;
-  const payload = (await res.json().catch(() => null)) as PullPayload | null;
-  if (!payload) return;
+  // 2. Pull the scoped subtree from the issuer, page by page: the issuer caps each
+  //    response and sets `truncated` while more remains, so follow its cursors until
+  //    done (bounded), then infer the roots over the whole subtree and ingest once.
+  const payload: PullPayload = { ops: [], records: [], users: [] };
+  const seenUsers = new Set<string>();
+  let since = 0;
+  let rsince = 0;
+  let gotAny = false;
+  for (let page = 0; page < INITIAL_PULL_MAX_PAGES; page++) {
+    const res = await delivery.deliverToPeer(stash.callback_base_url!, '/api/federation/sync', {
+      __link_secret: stash.link_secret,
+      since,
+      rsince,
+    });
+    if (!res.ok) break;
+    const pg = (await res.json().catch(() => null)) as
+      | (PullPayload & { since?: number; rsince?: number; truncated?: boolean })
+      | null;
+    if (!pg) break;
+    gotAny = true;
+    payload.ops.push(...(pg.ops ?? []));
+    payload.records.push(...(pg.records ?? []));
+    for (const u of pg.users ?? []) {
+      if (seenUsers.has(u.id)) continue;
+      seenUsers.add(u.id);
+      payload.users.push(u);
+    }
+    const nextSince = Number(pg.since ?? since);
+    const nextRsince = Number(pg.rsince ?? rsince);
+    const progressed = nextSince !== since || nextRsince !== rsince;
+    since = nextSince;
+    rsince = nextRsince;
+    if (!pg.truncated || !progressed) break;
+  }
+  if (!gotAny) return;
 
   // The granted root(s) are the top-level item ops in the payload (Phase 2: a single
   // root). Record them so `visibleItemIds`/scope resolve; then ingest. The permission
@@ -2590,8 +2883,9 @@ export async function runInitialPull(
   ingestFederatedPull(db, deviceId, rootIds, peerLabel, delivery.myLabel, payload, linkId);
 
   // The offer stash lived in `need_json` during pending→accept; now that the roots are
-  // recorded and the subtree materialized, free the cursor field for real cursor use.
-  setCursor(db, linkId, { needJson: null });
+  // recorded and the subtree materialized, free the cursor field for real cursor use,
+  // and record the pull high-water so the exchange loop resumes from it.
+  setCursor(db, linkId, { needJson: null, since: String(since), rsince: String(rsince) });
 }
 
 // ============================================================================
@@ -2705,17 +2999,34 @@ export async function runFederationExchange(
   link: FederationLink,
   deliverToPeer: DeliverToPeer,
   myLabel: string,
+  limits?: Partial<FederationSyncLimits>,
 ): Promise<void> {
-  if (link.status !== 'active') return;
+  // Each round is capped (FEDERATION_SYNC_LIMITS); while our push or the peer's pull
+  // response is `truncated`, run another round straight away (bounded per tick).
+  for (let round = 0; round < EXCHANGE_MAX_ROUNDS; round++) {
+    const more = await runFederationExchangeRound(db, link, deliverToPeer, myLabel, limits);
+    if (!more) return;
+  }
+}
+
+/** One capped exchange round; resolves true when either side has more to send. */
+async function runFederationExchangeRound(
+  db: Db,
+  link: FederationLink,
+  deliverToPeer: DeliverToPeer,
+  myLabel: string,
+  limits?: Partial<FederationSyncLimits>,
+): Promise<boolean> {
+  if (getLink(db, link.id)?.status !== 'active') return false;
   const peerLabel = link.peer_label ?? link.peer_base_url;
   // Deny always wins, even for an already-active link: `peerDenied` was only ever checked at
   // offer time, so a peer added to the deny list AFTER its link went active kept syncing. Re-
   // check every exchange round so the deny list actually cuts an existing channel — matching
   // the UI's "deny-listed peers are ALWAYS blocked" promise.
-  if (peerDenied(db, peerLabel)) return;
+  if (peerDenied(db, peerLabel)) return false;
   const deviceId = ensureDeviceId(db);
   const roots = listLinkRoots(db, link.id).map((r) => r.root_item_id);
-  if (!roots.length) return; // grant not yet materialized (pre-initial-pull)
+  if (!roots.length) return false; // grant not yet materialized (pre-initial-pull)
 
   const cur = getCursor(db, link.id);
   const pushSince = Number(cur?.push_since ?? 0);
@@ -2755,6 +3066,8 @@ export async function runFederationExchange(
   //       high-water without re-sending them, while a concurrent local edit below that
   //       high-water is caught next round.
   const peerDevices = getPeerDevices(db, link.id);
+  //       A scope-grew round sends the backfill as a rescan from rowid 0 (`need`), which
+  //       pages under the same caps as any other round.
   const push = buildIncrementalPullPayload(
     db,
     roots,
@@ -2762,6 +3075,7 @@ export async function runFederationExchange(
     pushRsince,
     scopeGrew ? roots : undefined,
     peerDevices,
+    limits,
   );
 
   // ----- POST push + our pull cursors to the peer; get its scoped pull response.
@@ -2772,21 +3086,22 @@ export async function runFederationExchange(
       push_ops: push.payload.ops,
       push_records: push.payload.records,
       users: push.payload.users,
-      since: pullSince,
-      rsince: pullRsince,
-      need: scopeGrew ? roots : undefined,
+      // Pull backfill on a scope change = rescan the peer's log from 0 (paged by the
+      // peer's caps; an older peer without paging still returns the full scope).
+      since: scopeGrew ? 0 : pullSince,
+      rsince: scopeGrew ? 0 : pullRsince,
       // Owner→grantee retraction: ids that left our shared subtree since last sync. Only
       // ever non-empty on an outbound (owner) link; the grantee honors it only inbound.
       retract: retract.length ? retract : undefined,
     });
   } catch {
-    return; // peer unreachable this round; cursors unchanged, retried next tick
+    return false; // peer unreachable this round; cursors unchanged, retried next tick
   }
-  if (!res.ok) return;
+  if (!res.ok) return false;
   const body = (await res.json().catch(() => null)) as
-    | (PullPayload & { since?: number; rsince?: number })
+    | (PullPayload & { since?: number; rsince?: number; truncated?: boolean })
     | null;
-  if (!body) return;
+  if (!body) return false;
 
   // ----- ingest the peer's scoped content. Trust depends on link direction (above):
   //       grantee (inbound) trusts the owner; owner (outbound) write-gates the grantee.
@@ -2829,8 +3144,18 @@ export async function runFederationExchange(
     pushRsince: String(push.rsince),
     since: body.since != null ? String(body.since) : cur?.since ?? null,
     rsince: body.rsince != null ? String(body.rsince) : cur?.rsince ?? null,
-    needJson: JSON.stringify([...scope]),
+    // While the peer is still paging its log to us (`truncated`), items arriving in a page
+    // are being delivered BY the paging itself, so fold them into the snapshot — else each
+    // page would look like a move-in and restart the rescan from 0 forever. On the final
+    // page keep the pre-ingest snapshot so a genuine move-in still triggers one backfill.
+    needJson: JSON.stringify([...(body.truncated ? subtreeIds(db, roots) : scope)]),
   });
+  // Continue only while a cursor actually moved (a non-advancing peer can't spin us).
+  const pullMoved =
+    body.since != null &&
+    (String(body.since) !== String(cur?.since ?? '') || String(body.rsince) !== String(cur?.rsince ?? ''));
+  const pushMoved = push.since !== pushSince || push.rsince !== pushRsince;
+  return (!!body.truncated && pullMoved) || (push.truncated && pushMoved);
 }
 
 /**
@@ -2860,20 +3185,23 @@ export async function retractAllRoots(
 }
 
 /**
- * Run one exchange round for EVERY active link across the provided tenant DBs. Wired
- * onto the existing periodic sweep tick (piggybacking the reminder sweep) rather than a
- * competing timer. Errors on one link/tenant don't abort the rest.
+ * Run one exchange round for EVERY active link across the tenants `sweep` visits
+ * (bounded, leased — see TenantRegistry.sweepActive). Wired onto the existing periodic
+ * sweep tick (piggybacking the reminder sweep) rather than a competing timer. Errors on
+ * one link/tenant don't abort the rest.
  */
 export async function runAllFederationExchanges(
-  ctxs: () => { db: Db; myLabel: string }[],
+  sweep: (job: (t: { db: Db; myLabel: string }) => Promise<void>) => Promise<void>,
   deliverToPeer: DeliverToPeer,
 ): Promise<void> {
-  for (const { db, myLabel } of ctxs()) {
+  await sweep(async ({ db, myLabel }) => {
     let links: FederationLink[];
     try {
+      // Expire stale pending offers on the same tick (bounded pending-link lifetime).
+      expireStalePendingLinks(db);
       links = listLinks(db).filter((l) => l.status === 'active');
     } catch {
-      continue; // table absent (non-federation tenant) — skip
+      return; // table absent (non-federation tenant) — skip
     }
     for (const link of links) {
       try {
@@ -2882,7 +3210,7 @@ export async function runAllFederationExchanges(
         console.error('[carbon] federation exchange failed:', (e as Error).message);
       }
     }
-  }
+  });
 }
 
 /** The root item ids of a pulled payload: items whose parent is null OR whose parent

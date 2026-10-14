@@ -544,4 +544,20 @@ MIGRATIONS.push({
   CREATE INDEX IF NOT EXISTS idx_review_progress_cycle ON review_progress(user_id, item_id, cycle);`,
 });
 
+MIGRATIONS.push({
+  version: 25,
+  // Reminder scan (server push.ts checkReminders): partial indexes over the items
+  // carrying each alert date, so the per-minute scan seeks (deleted=0, status=active,
+  // date <= now) instead of scanning every item. deleted/status lead the key so the
+  // planner prefers these over idx_items_deleted_updated without ANALYZE stats.
+  up: `
+    CREATE INDEX IF NOT EXISTS idx_items_due_active ON items(deleted, status, due_date)
+      WHERE due_date IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_items_defer_active ON items(deleted, status, defer_date)
+      WHERE defer_date IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_items_reminder_active ON items(deleted, status, reminder_at)
+      WHERE reminder_at IS NOT NULL;
+  `,
+});
+
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -1,7 +1,7 @@
 // Client for the workspace's subscription endpoints (/api/billing*), authed as the
 // signed-in tenant admin. The provider is 'square' (real auto-renewing subscriptions,
 // card collected via the Web Payments SDK) or 'simulate' (local pending→pay→renew→cancel).
-import { getServerConfig, authHeaders } from './config';
+import { getServerConfig, authHeaders, defaultServerUrl } from './config';
 
 export interface BillingPlan {
   id: string;
@@ -38,7 +38,7 @@ export interface BillingInfo {
 }
 
 function billingBase(): string {
-  return getServerConfig().url || window.location.origin;
+  return getServerConfig().url || defaultServerUrl();
 }
 
 async function parseError(res: Response): Promise<string> {

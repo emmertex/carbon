@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Bot, Trash2, Pencil, FlaskConical, Copy, Check } from 'lucide-react';
+import { Bot, Trash2, Pencil, FlaskConical, Copy, Check, KeyRound } from 'lucide-react';
 import {
   adminListAgents,
   adminCreateAgent,
   adminUpdateAgent,
   adminDeleteAgent,
   adminTestAgent,
+  adminIssueAgentKey,
   HOST_LM_AGENT_ID,
   type Agent,
   type AgentKind,
@@ -71,7 +72,9 @@ function AgentFields({
       {webhook ? (
         <>
           <label className="block">
-            <span className="mb-1 block text-xs text-text-muted">Webhook URL (Carbon calls this on trigger)</span>
+            <span className="mb-1 block text-xs text-text-muted">
+              Webhook URL (Carbon calls this on trigger; leave empty for an agent that polls, like the MCP connector)
+            </span>
             <input
               className={inputCls}
               placeholder="https://example.com/carbon-hook"
@@ -282,7 +285,7 @@ export function Agents() {
           Bot users you can <strong>assign</strong> or <strong>@mention</strong>. Two styles: a{' '}
           <strong>direct LLM</strong> (Carbon calls the model and posts the reply), or an{' '}
           <strong>agentic webhook</strong> (Carbon notifies your framework — your external client — which
-          acts back via the API with the token issued at creation).
+          acts back via the API). Issue the agent an API key with the key button.
         </>
       }
     >
@@ -322,6 +325,22 @@ export function Agents() {
                     />
                     enabled
                   </label>
+                  {a.kind === 'webhook' && (
+                    <button
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          setCreatedToken(await adminIssueAgentKey(a.id));
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                      }}
+                      className={cn(btnIcon, 'hover:text-accent')}
+                      title="Issue API key"
+                    >
+                      <KeyRound size={15} />
+                    </button>
+                  )}
                   <button
                     onClick={() => test(a.id)}
                     disabled={testing === a.id}

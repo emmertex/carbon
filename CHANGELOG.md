@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.3.4
+**Talk to agents through task comments**
+
+- Agents can now read a task's comments, see new comments addressed to them across all tasks, and edit or delete their own comments through the API.
+- @mentions in comments posted through the API now notify people and start mentioned agents.
+- Admins can issue an agent its own API key from Settings → Agents. An External webhook agent with no URL waits for the agent to check in instead of posting an error.
+
+**Server reliability**
+
+- Fixed a case where a failed calendar (CalDAV) sync could restart the server.
+- Background jobs (reminders, calendar sync, federation, agents) no longer lose their database connection when many workspaces are active.
+- Reduced server memory growth and improved sync performance under heavy use.
+
+**Security and performance**
+
+- Fixed sharing and federation permission issues, strengthened two-factor login protection, and one-time use of authenticator codes.
+- Reminders and push notifications are sent faster, and devices that can no longer receive notifications are cleaned up.
+- Re-subscribing no longer creates a duplicate billing subscription.
+- The desktop app now enforces a Content Security Policy.
+
 ## v1.3.3
 **Maintenance**
 

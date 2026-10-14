@@ -153,6 +153,30 @@ describe('makeOsmProvider', () => {
     assert.equal(count, afterFirst, 'second identical search should hit the cache');
   });
 
+  test('the cache is a size-capped LRU (least-recently-used lookup is evicted)', async () => {
+    let count = 0;
+    globalThis.fetch = (async () => {
+      count++;
+      return new Response(
+        JSON.stringify({ elements: [{ lat: -37.81, lon: 145.01, tags: { name: 'X' } }] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const cfg = { ...geocodeConfigFromEnv({}, false), requestIntervalMs: 0, cacheMaxEntries: 2 };
+    const provider = makeOsmProvider(cfg, true)!;
+    const near = { lat: -37.8, lng: 145.0 };
+    await provider.search('a', near);
+    await provider.search('b', near);
+    await provider.search('a', near); // hit: 'a' becomes most-recently-used
+    await provider.search('c', near); // evicts 'b'
+    const before = count;
+    await provider.search('a', near);
+    await provider.search('c', near);
+    assert.equal(count, before, "'a' and 'c' should still be cached");
+    await provider.search('b', near);
+    assert.equal(count, before + 1, "'b' should have been evicted");
+  });
+
   test('nearestBrand still returns the single nearest via search()', async () => {
     stubFetch({
       elements: [

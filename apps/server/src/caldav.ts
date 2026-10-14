@@ -1059,14 +1059,14 @@ const chains = new Map<string, Promise<unknown>>();
 function runExclusive<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
   const prev = chains.get(projectId) ?? Promise.resolve();
   const next = prev.catch(() => {}).then(fn);
-  chains.set(
-    projectId,
-    next
-      .catch(() => {})
-      .finally(() => {
-        if (chains.get(projectId) === next) chains.delete(projectId);
-      }),
-  );
+  // Store (and compare against) the settled tail itself: comparing against `next` never
+  // matched, so finished chains were never removed.
+  const tail: Promise<unknown> = next
+    .catch(() => {})
+    .finally(() => {
+      if (chains.get(projectId) === tail) chains.delete(projectId);
+    });
+  chains.set(projectId, tail);
   return next;
 }
 
@@ -1078,23 +1078,30 @@ export function runSync(
   allowPrivate: boolean,
 ): Promise<SyncResult> {
   return runExclusive(projectId, async () => {
-    const cfg = getCaldavConfigRow(db, projectId);
-    if (!cfg || !cfg.enabled)
-      return { pulled: 0, pushed: 0, errors: ["not configured"] };
-    let result: SyncResult;
+    // The whole body is guarded: the config read and status write touch the DB too (and
+    // can throw, e.g. on a closed handle); callers fire-and-forget, so this must not reject.
     try {
-      result = await syncProject(db, deviceId, cfg, allowPrivate);
+      const cfg = getCaldavConfigRow(db, projectId);
+      if (!cfg || !cfg.enabled)
+        return { pulled: 0, pushed: 0, errors: ["not configured"] };
+      let result: SyncResult;
+      try {
+        result = await syncProject(db, deviceId, cfg, allowPrivate);
+      } catch (e) {
+        result = { pulled: 0, pushed: 0, errors: [(e as Error).message] };
+      }
+      setSyncState(
+        db,
+        projectId,
+        result.errors.length
+          ? `error: ${result.errors[0]}`
+          : `ok (pulled ${result.pulled} from calendar, pushed ${result.pushed} to calendar)`,
+      );
+      return result;
     } catch (e) {
-      result = { pulled: 0, pushed: 0, errors: [(e as Error).message] };
+      console.error("[carbon] caldav sync failed:", e);
+      return { pulled: 0, pushed: 0, errors: [(e as Error).message] };
     }
-    setSyncState(
-      db,
-      projectId,
-      result.errors.length
-        ? `error: ${result.errors[0]}`
-        : `ok (pulled ${result.pulled} from calendar, pushed ${result.pushed} to calendar)`,
-    );
-    return result;
   });
 }
 
@@ -1149,29 +1156,57 @@ export interface CaldavTenant {
   allowPrivate: boolean;
 }
 
+/** True while a sync for `projectId` is queued or running. */
+export function isSyncQueued(projectId: string): boolean {
+  return chains.has(projectId);
+}
+
 /**
- * Sweep every active tenant once a minute; for each enabled config whose
- * frequency has elapsed since its last sync, enqueue one sync pass. `tenants` is
- * re-evaluated each tick so newly-provisioned tenants are picked up. Mirrors
- * startReminderScheduler. Started `startDelayMs` after boot so this sweep's
- * `activeCtxs()` call doesn't force-load every active tenant into the LRU on the
- * same tick as the reminder/federation sweep and the GPS sweep.
+ * Run one sync pass for each of a tenant's enabled configs whose frequency has elapsed,
+ * skipping projects that already have a sync queued or running (a slow sync must not
+ * stack another one behind it every tick). Resolves when the started syncs finish, so a
+ * caller holding a DB lease keeps the handle open for their duration. Returns the
+ * number of syncs started.
  */
-export function startCaldavScheduler(tenants: () => CaldavTenant[], startDelayMs = 40_000): void {
+export async function syncDueProjects(t: CaldavTenant, now = Date.now()): Promise<number> {
+  const started: Promise<SyncResult>[] = [];
+  for (const cfg of listEnabledConfigs(t.db)) {
+    const last = cfg.last_sync_at ? Date.parse(cfg.last_sync_at) : 0;
+    if (now - last < cfg.frequency_seconds * 1000) continue;
+    if (isSyncQueued(cfg.project_id)) continue;
+    started.push(runSync(t.db, t.deviceId, cfg.project_id, t.allowPrivate));
+  }
+  await Promise.all(started);
+  return started.length;
+}
+
+/**
+ * Sweep every active tenant once a minute; for each enabled config whose frequency has
+ * elapsed since its last sync, run one sync pass. `sweep` visits every active tenant
+ * (bounded, leased — see TenantRegistry.sweepActive) and is re-run each tick so
+ * newly-provisioned tenants are picked up. A tick is skipped while the previous sweep
+ * is still running. Started `startDelayMs` after boot so it doesn't land on the same
+ * tick as the reminder/federation sweep and the GPS sweep.
+ */
+export function startCaldavScheduler(
+  sweep: (job: (t: CaldavTenant) => Promise<void>) => Promise<void>,
+  startDelayMs = 40_000,
+): void {
+  let running = false;
   setTimeout(() => {
     setInterval(() => {
+      if (running) return;
+      running = true;
       const now = Date.now();
-      for (const t of tenants()) {
+      void sweep(async (t) => {
         try {
-          for (const cfg of listEnabledConfigs(t.db)) {
-            const last = cfg.last_sync_at ? Date.parse(cfg.last_sync_at) : 0;
-            if (now - last < cfg.frequency_seconds * 1000) continue;
-            void runSync(t.db, t.deviceId, cfg.project_id, t.allowPrivate);
-          }
+          await syncDueProjects(t, now);
         } catch (e) {
           console.error("[carbon] caldav sweep failed:", e);
         }
-      }
+      })
+        .catch((e) => console.error("[carbon] caldav sweep failed:", e))
+        .finally(() => (running = false));
     }, 60_000);
   }, startDelayMs);
 }

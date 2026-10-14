@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
-import { openDb } from './sqlite';
+import { openDb, stmtCacheSize } from './sqlite';
 
 describe('openDb', () => {
   test('opens an in-memory database and runs basic operations', () => {
@@ -62,5 +62,23 @@ describe('openDb', () => {
     db.run('INSERT INTO test3 VALUES (1, ?)', ['a']);
     const rows = db.all<{ v: string }>('SELECT v FROM test3');
     assert.equal(rows[0]!.v, 'a');
+  });
+});
+
+describe('openDb prepared-statement cache', () => {
+  test('is bounded (LRU) and cleared on close', () => {
+    const db = openDb(':memory:', { stmtCacheMax: 2 });
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+    db.get('SELECT 1');
+    db.get('SELECT 2');
+    db.get('SELECT 1'); // hit: same statement reused
+    assert.equal(stmtCacheSize(db.raw), 2);
+    db.get('SELECT 3'); // evicts the LRU entry
+    assert.equal(stmtCacheSize(db.raw), 2);
+    db.run('INSERT INTO t (id) VALUES (?)', [1]);
+    db.run('INSERT INTO t (id) VALUES (?)', [2]); // reused statement, new params
+    assert.equal(db.all('SELECT id FROM t').length, 2);
+    db.raw.close();
+    assert.equal(stmtCacheSize(db.raw), 0);
   });
 });

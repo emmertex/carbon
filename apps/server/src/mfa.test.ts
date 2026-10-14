@@ -26,6 +26,9 @@ import {
   MfaEmailSendLimitError,
   MFA_EMAIL_SENDS_MAX,
   MFA_EMAIL_SEND_COOLDOWN_MS,
+  MFA_FAIL_MAX,
+  mfaAttemptsAllowed,
+  bumpChallengeAttempts,
 } from './mfa';
 import {
   basicAuth,
@@ -38,14 +41,14 @@ import {
 import { getUser } from '@carbon/core';
 import { makeTestDb, appFetch } from './test-app';
 
-function currentTotp(secretBase32: string): string {
+function currentTotp(secretBase32: string, stepOffset = 0): string {
   const totp = new TOTP({
     algorithm: 'SHA1',
     digits: 6,
     period: 30,
     secret: Secret.fromBase32(secretBase32),
   });
-  return totp.generate();
+  return totp.generate({ timestamp: Date.now() + stepOffset * 30_000 });
 }
 
 describe('MFA helpers', () => {
@@ -124,7 +127,47 @@ describe('MFA helpers', () => {
     assert.equal(mfaReady(db, id), false);
     assert.ok(confirmTotpEnroll(db, id, currentTotp(secret)));
     assert.equal(mfaReady(db, id), true);
-    assert.ok(verifyTotpCode(db, id, currentTotp(secret)));
+    // The enrolment code's step is spent; the next step's code is still accepted.
+    assert.equal(verifyTotpCode(db, id, currentTotp(secret)), false);
+    assert.ok(verifyTotpCode(db, id, currentTotp(secret, 1)));
+  });
+
+  test('a TOTP code (or an earlier one) is never accepted twice', () => {
+    const { db, addUser } = makeTestDb();
+    const { id } = addUser('replay', 'pw');
+    const { secret } = startTotpEnroll(db, id, 'replay');
+    const now = Date.now();
+    const gen = (ts: number) =>
+      new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: Secret.fromBase32(secret) })
+        .generate({ timestamp: ts });
+    assert.ok(verifyTotpCode(db, id, gen(now), now));
+    assert.equal(verifyTotpCode(db, id, gen(now), now), false, 'same code replayed');
+    assert.equal(verifyTotpCode(db, id, gen(now - 30_000), now), false, 'older step in window');
+    assert.ok(verifyTotpCode(db, id, gen(now + 30_000), now + 30_000), 'next step accepted');
+    assert.equal(verifyTotpCode(db, id, gen(now), now + 30_000), false, 'step below last');
+    // Re-enrolling (new secret) resets the replay floor.
+    const { secret: s2 } = startTotpEnroll(db, id, 'replay');
+    const gen2 = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: Secret.fromBase32(s2) })
+      .generate({ timestamp: now });
+    assert.ok(verifyTotpCode(db, id, gen2, now));
+  });
+
+  test('failed 2FA is budgeted per account across challenges', () => {
+    const { db, addUser } = makeTestDb();
+    const { id } = addUser('brute', 'pw');
+    assert.ok(mfaAttemptsAllowed(db, id));
+    // Each challenge only takes MFA_MAX_ATTEMPTS (5) misses before dying, so spread the
+    // failures over several fresh challenges, as a /login loop would.
+    let fails = 0;
+    while (fails < MFA_FAIL_MAX) {
+      const ch = validateMfaChallenge(db, createMfaChallenge(db, id, 'login'))!;
+      for (let i = 0; i < 5 && fails < MFA_FAIL_MAX; i++, fails++) {
+        bumpChallengeAttempts(db, ch.id);
+      }
+    }
+    assert.equal(mfaAttemptsAllowed(db, id), false, 'window exhausted');
+    const { id: other } = addUser('bystander', 'pw');
+    assert.ok(mfaAttemptsAllowed(db, other), 'other accounts unaffected');
   });
 
   test('trusted devices have no expiry', () => {
@@ -416,7 +459,7 @@ describe('MFA login HTTP flow', () => {
         Authorization: `Bearer ${login.challenge}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ device_id: 'new-laptop', totp: currentTotp(secret) }),
+      body: JSON.stringify({ device_id: 'new-laptop', totp: currentTotp(secret, 1) }),
     });
     assert.equal(verifyRes.status, 200);
     const { token } = (await verifyRes.json()) as { token: string };

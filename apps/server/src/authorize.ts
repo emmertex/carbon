@@ -69,8 +69,6 @@ export interface Credential {
   userId: string;
   role: "admin" | "member";
   scopes: string[];
-  /** When set, this credential is restricted to a specific project subtree (API key restriction). */
-  restrictedProjectId?: string;
 }
 
 /** Build a {@link Credential} from Hono's `AuthVars` context values. */
@@ -79,14 +77,12 @@ export function credentialFromVars(v: {
   userId?: unknown;
   role?: unknown;
   scopes?: unknown;
-  restrictedProjectId?: unknown;
 }): Credential {
   return {
     authMethod: typeof v.authMethod === "string" ? v.authMethod : "",
     userId: typeof v.userId === "string" ? v.userId : "",
     role: v.role === "admin" ? "admin" : "member",
     scopes: Array.isArray(v.scopes) ? v.scopes.map(String) : [],
-    restrictedProjectId: typeof v.restrictedProjectId === "string" && v.restrictedProjectId ? v.restrictedProjectId : undefined,
   };
 }
 
@@ -180,15 +176,8 @@ export function effectiveAccess(
   return "none";
 }
 
-// Check if the item is a descendant of the restricted project
-function isItemInRestrictedSubtree(db: Db, cred: Credential, itemId: string): boolean {
-  if (!cred.restrictedProjectId) return true;
-  if (itemId === cred.restrictedProjectId) return true;
-  return subtreeIds(db, [cred.restrictedProjectId]).has(itemId);
-}
-
 export function canReadItem(db: Db, cred: Credential, itemId: string): boolean {
-  return effectiveAccess(db, cred, itemId) !== "none" && isItemInRestrictedSubtree(db, cred, itemId);
+  return effectiveAccess(db, cred, itemId) !== "none";
 }
 
 export function canWriteItem(
@@ -197,12 +186,12 @@ export function canWriteItem(
   itemId: string,
 ): boolean {
   const a = effectiveAccess(db, cred, itemId);
-  return (a === "write" || a === "own") && isItemInRestrictedSubtree(db, cred, itemId);
+  return a === "write" || a === "own";
 }
 
 /** True only when the credential's user is the item's owner (or local/bot). */
 export function isItemOwner(db: Db, cred: Credential, itemId: string): boolean {
-  return effectiveAccess(db, cred, itemId) === "own" && isItemInRestrictedSubtree(db, cred, itemId);
+  return effectiveAccess(db, cred, itemId) === "own";
 }
 
 // ----- destination access (creation & moves) ----------------------------------
@@ -290,6 +279,7 @@ export function validateRecordOp(
   cred: Credential,
   op: RecordOp,
   justCreated?: ReadonlySet<string>,
+  spawnSources?: ReadonlyMap<string, string>,
 ): RecordOp | null {
   if (isDenied(cred)) return null;
   if (!op || typeof op !== "object") return null;
@@ -384,16 +374,22 @@ export function validateRecordOp(
         return { ...op, data };
       }
       // Create a grant: owner-only. Sole exception — a write-sharee replicating their own
-      // grant onto a just-created recurring spawn (still owned by the series owner).
+      // grant onto a just-created recurring spawn (still owned by the series owner). The
+      // permission is copied from the caller's existing direct grant on the completed
+      // source item, never taken from the pushed data, so it can't exceed that role.
       const target = typeof data.user_id === "string" ? data.user_id : null;
       if (isItemOwner(db, cred, itemId)) return { ...op, data };
-      if (
-        target === uid &&
-        just.has(itemId) &&
-        (hasWriteAccess(db, itemId, uid) ||
-          itemOwnedBySeriesCaller(db, itemId, uid))
-      ) {
-        return { ...op, data };
+      const source = spawnSources?.get(itemId);
+      if (target === uid && just.has(itemId) && source) {
+        const grant = db.get<{ permission: string }>(
+          "SELECT permission FROM shares WHERE item_id = ? AND user_id = ? AND deleted = 0",
+          [source, uid],
+        );
+        if (!grant) return null;
+        return {
+          ...op,
+          data: { ...data, permission: grant.permission, deleted: false },
+        };
       }
       return null;
     }
@@ -518,6 +514,7 @@ export function validateRecordOps(
   cred: Credential,
   ops: RecordOp[],
   justCreated?: ReadonlySet<string>,
+  spawnSources?: ReadonlyMap<string, string>,
 ): RecordOp[] {
   const out: RecordOp[] = [];
   // Reserve immutable identities within this batch as well as checking stored rows.
@@ -538,7 +535,7 @@ export function validateRecordOps(
     plan: ["id", "item_id", "user_id"],
   };
   for (const op of ops) {
-    const ok = validateRecordOp(db, cred, op, justCreated);
+    const ok = validateRecordOp(db, cred, op, justCreated, spawnSources);
     if (!ok) continue;
     const fields = immutable[ok.entity];
     if (fields) {
@@ -561,17 +558,6 @@ function rowIdOf(op: RecordOp, data: Record<string, unknown>): string | null {
   const dataId = typeof data.id === "string" ? data.id : null;
   if (rowId && dataId && rowId !== dataId) return null; // identity collision with mismatched id
   return rowId ?? dataId;
-}
-
-/**
- * True when `itemId` is an item the caller is completing as part of a recurring series it
- * has write access to — i.e. the spawn is owned by the series owner (not the caller), so the
- * caller replicating their own grant onto it is the legitimate completion path, not an
- * onward grant. Mirrors `sanitizeOps`' `seriesOwnersBeingCompleted` rationale.
- */
-function itemOwnedBySeriesCaller(db: Db, itemId: string, uid: string): boolean {
-  const item = getItem(db, itemId);
-  return !!item && !!item.owner_id && item.owner_id !== uid;
 }
 
 // Re-export the item-op sanitizer seam so sync-guard and any other surface share the same

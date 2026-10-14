@@ -18,6 +18,7 @@ import {
 import { recordOpShapeError } from "./field-shape";
 import { rebuildSyncLogFromMaterialization } from "./sync-epoch";
 import { migrate } from "./migrate";
+import { LATEST_SCHEMA_VERSION } from "./schema";
 
 test("review migration and writes leave task rows and item op history unchanged", () => {
   const db = openMemoryDb();
@@ -27,7 +28,7 @@ test("review migration and writes leave task rows and item op history unchanged"
   const ops = db.all("SELECT * FROM ops");
   db.exec("DROP TABLE review_progress");
   db.run("UPDATE meta SET value = '23' WHERE key = 'schema_version'");
-  assert.equal(migrate(db).to, 24);
+  assert.equal(migrate(db).to, LATEST_SCHEMA_VERSION);
   startReview(db, "a", "alice", project);
   writeReviewEntry(db, "a", "alice", project, "check:tasksRelevant", {
     checked: true,

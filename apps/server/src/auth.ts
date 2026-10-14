@@ -678,20 +678,29 @@ export function checkGpsProximity(db: Db): void {
 }
 
 /** Start a 1-minute GPS proximity check across all tenants (also sweeps stale devices).
- *  Started `startDelayMs` after boot (default: offset from the reminder/federation
- *  sweep, which fires on-the-minute) so the two don't force-load every active tenant
- *  into the LRU on the same tick. */
-export function startGpsScheduler(dbs: () => Db[], startDelayMs = 20_000): void {
+ *  `sweep` visits every active tenant (bounded, leased — see
+ *  TenantRegistry.sweepActive). Started `startDelayMs` after boot (default: offset from
+ *  the reminder/federation sweep, which fires on-the-minute) so the sweeps don't land
+ *  on the same tick. A tick is skipped while the previous sweep is still running. */
+export function startGpsScheduler(
+  sweep: (job: (db: Db) => void) => Promise<void>,
+  startDelayMs = 20_000,
+): void {
+  let running = false;
   setTimeout(() => {
     setInterval(() => {
-      for (const db of dbs()) {
+      if (running) return;
+      running = true;
+      void sweep((db) => {
         try {
           checkGpsProximity(db);
           pruneStaleDeviceLocations(db);
         } catch (e) {
           console.error('[carbon] gps proximity check failed:', e);
         }
-      }
+      })
+        .catch((e) => console.error('[carbon] gps sweep failed:', e))
+        .finally(() => (running = false));
     }, 60_000);
   }, startDelayMs);
 }

@@ -34,7 +34,20 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval' https://web.squarecdn.com https://sandbox.web.squarecdn.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' blob: data: https:",
+        "media-src": "'self' blob: data:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https: http://localhost:* http://127.0.0.1:* ws://localhost:*",
+        "worker-src": "'self' blob:",
+        "frame-src": "https://web.squarecdn.com https://sandbox.web.squarecdn.com https://*.squareup.com https://*.squareupsandbox.com",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self'"
+      }
     }
   },
   "bundle": {
