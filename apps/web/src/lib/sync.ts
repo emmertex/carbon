@@ -23,6 +23,7 @@ import {
   getMeta,
   setMeta,
   persist,
+  schedulePersist,
   flushPersist,
   wipeLocalDb,
   rebindIdentity,
@@ -149,6 +150,27 @@ const MAX_FOLLOWUP_ROUNDS = 8;
  *  offline long enough to exceed that would otherwise be stuck failing forever, so drain
  *  in chunks and sync again immediately until the backlog is gone. */
 const SYNC_PUSH_CHUNK = 2500;
+/** Drain state: set when a round schedules an immediate continuation (push backlog,
+ *  truncated pull, roster paging). Continuation rounds skip the per-round fixed
+ *  costs — /api/me, awaited whole-DB persist, blob upload, a full UI re-render — and
+ *  the final round does them once. On a large initial sync those fixed costs, not
+ *  the network, dominated (~1s × dozens of rounds). */
+let drainQueued = false;
+let draining = false;
+let drainChanged = false;
+let lastDrainBump = 0;
+const DRAIN_BUMP_INTERVAL_MS = 1500;
+const DRAIN_DELAY_MS = 20;
+function scheduleDrain(stale: () => boolean): void {
+  drainQueued = true;
+  setTimeout(() => {
+    if (stale()) {
+      drainQueued = false;
+      return;
+    }
+    void syncNow();
+  }, DRAIN_DELAY_MS);
+}
 
 // Roots to re-request a full-subtree backfill for, because access to them was just
 // (re)granted — their children may have been added while we couldn't see them and
@@ -574,6 +596,12 @@ export async function syncNow(): Promise<boolean> {
   }
   if (inFlight || signingOut) return false;
   inFlight = true;
+  // A drain continuation only counts if it is the round the previous one queued;
+  // any other trigger (30s poll, mutation, reconnect) is a full round.
+  const continuing = drainQueued && draining;
+  drainQueued = false;
+  if (!continuing) drainChanged = false;
+  draining = false;
   store.setSyncStatus("syncing");
   // Identity at the start of this round — if it changes before the response is
   // ingested (sign-in/out, workspace switch), the response belongs to a
@@ -589,9 +617,13 @@ export async function syncNow(): Promise<boolean> {
     JSON.stringify(getServerConfig()) !== startCfg;
 
   try {
-    // Always refresh identity so credential changes take effect immediately.
-    await fetchIdentity();
-    if (stale(false)) return false;
+    // Refresh identity so credential changes take effect immediately — except on a
+    // drain continuation, which follows a round that just authenticated; a revoked
+    // session still surfaces as a 401 from /api/sync and the next full round.
+    if (!continuing || !useStore.getState().currentUser) {
+      await fetchIdentity();
+      if (stale(false)) return false;
+    }
     cfg = getServerConfig();
     if (!useStore.getState().currentUser) {
       // Server requires sign-in and we're not authenticated — don't push/pull. Use
@@ -847,8 +879,36 @@ export async function syncNow(): Promise<boolean> {
       "sync_pending_cursor",
       JSON.stringify(backlog ? page.next : { ops: 0, recordOps: 0 }),
     );
-    await persist();
+    const rejectedAny =
+      page.oversized.length > 0 ||
+      !!(data.rejected && (data.rejected.ops > 0 || data.rejected.recordOps > 0));
+    // Go straight round again when more is waiting. This can't spin: a backlog round
+    // marks what it pushed synced, and a truncated page advances the cursor past
+    // what it sent, so every round strictly drains — hence it doesn't consume the
+    // backfill follow-up budget. Rejections take the error path below instead.
+    const drainMore =
+      !rejectedAny && (backlog || !!(data.truncated || data.rosterMore));
+    const changed = freshOps.length > 0 || freshRecords.length > 0;
+    drainChanged ||= changed;
+    // A pull-only continuation needn't block on a whole-DB export: cursors and
+    // ingest are idempotent, so a crash just re-pulls. Debounce it to once after the
+    // drain. Rounds that acknowledged pushed work, and the final round, persist now.
+    const pushedAny = acceptedOps.length > 0 || acceptedRecs.length > 0;
+    if (drainMore && !pushedAny) schedulePersist();
+    else await persist();
     if (stale()) return false;
+    if (drainMore) {
+      draining = true;
+      // Keep the UI roughly current on a long initial sync without re-running
+      // every query on every page.
+      if (Date.now() - lastDrainBump > DRAIN_BUMP_INTERVAL_MS) {
+        lastDrainBump = Date.now();
+        store.bump();
+      }
+      followUpDepth = 0;
+      scheduleDrain(stale);
+      return true;
+    }
     await uploadPendingBlobs();
     if (stale()) return false;
     db = getDb();
@@ -856,7 +916,8 @@ export async function syncNow(): Promise<boolean> {
     // Blob housekeeping runs detached: fetching thumbnails / pruning the cache can
     // take a while on a big workspace and must not hold the sync status at
     // "syncing" or delay the UI bump below. Failures are logged, never fatal.
-    const changed = freshOps.length > 0 || freshRecords.length > 0;
+    const anyChanged = drainChanged;
+    drainChanged = false;
     void (async () => {
       const eager = getServerConfig().blobFetch === "all";
       if (stale()) return;
@@ -867,7 +928,7 @@ export async function syncNow(): Promise<boolean> {
       // Only worth re-scanning when something actually arrived (or on the first
       // sync of the session); an idle 30s poll shouldn't re-walk every note whose
       // source image simply isn't cached on this device.
-      if (changed || !backfilledThisSession) {
+      if (anyChanged || !backfilledThisSession) {
         backfilledThisSession = true;
         await backfillThumbs(getDb(), eager);
       }
@@ -875,6 +936,7 @@ export async function syncNow(): Promise<boolean> {
       if (!stale()) console.warn("[carbon] blob housekeeping failed:", error);
     });
     store.setLastSyncedAt(Date.now());
+    lastDrainBump = 0;
     store.bump();
     if (
       page.oversized.length ||
@@ -889,26 +951,6 @@ export async function syncNow(): Promise<boolean> {
           if (!stale()) void syncNow();
         }, 200); // next bounded SQL page, never this rejected prefix
       return false;
-    }
-    // More pending ops than one chunk holds: go straight round again. This can't spin —
-    // what we just pushed is now marked synced, so every round strictly drains the
-    // backlog — so it deliberately doesn't consume the backfill follow-up budget.
-    if (backlog) {
-      followUpDepth = 0;
-      setTimeout(() => {
-        if (!stale()) void syncNow();
-      }, 200);
-      return true;
-    }
-    // A2: the server capped this response (op/byte/scan budget). The cursor advanced
-    // only past what was actually sent, so go straight round again to drain the rest.
-    // This can't spin: each round strictly advances the cursor past the ops it sent.
-    if (data.truncated || data.rosterMore) {
-      followUpDepth = 0;
-      setTimeout(() => {
-        if (!stale()) void syncNow();
-      }, 200);
-      return true;
     }
     // A2: server-side validation rejected some pushed entries. They were NOT ingested,
     // so our local copies remain unsynced and will be re-pushed — surface the count so

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { Check, Flag, Trash2, Target, PanelRightOpen } from 'lucide-react';
-import { subtaskProgress, type Item } from '@carbon/core';
+import type { Item } from '@carbon/core';
+import { cachedSubtaskProgress } from '@/lib/childrenIndex';
 import { useQuery } from '@/hooks/useQuery';
 import { useStore } from '@/lib/store';
 import { zoneForX } from '@/lib/gestures';
@@ -42,7 +43,7 @@ export function SwipeableRow({ item, children }: { item: Item; children: React.R
   const showToast = useStore((s) => s.showToast);
 
   const progress =
-    useQuery((db) => subtaskProgress(db, item.id, countScope), [item.id, countScope]) ?? {
+    useQuery((db) => cachedSubtaskProgress(db, item.id, countScope), [item.id, countScope]) ?? {
       done: 0,
       total: 0,
     };

@@ -14,9 +14,19 @@ export interface BackfillCursor {
   done?: boolean;
 }
 
+/** Rows of log metadata fetched per SQL round trip while scanning. */
+const SCAN_BATCH = 512;
+
 /** Bounded, resumable log scans. Backfill uses a separate high-water cursor over
  * the logs and tests ancestry per candidate; it never materializes full subtrees
- * or entire item histories. Tags travel through the ordinary record cursor. */
+ * or entire item histories. Tags travel through the ordinary record cursor.
+ *
+ * Budget: `limits.scan` caps metadata rows read across the whole page, and
+ * `limits.deadline` (epoch ms) stops the scan once wall time runs out — so a large
+ * log drains in a few time-boxed rounds instead of many tiny fixed-row ones. At
+ * least one row is always read so every page makes progress. Visibility and
+ * ancestry answers are memoized for the request: a log revisits the same items
+ * many times, and each uncached answer is a recursive share/ancestry query. */
 export function pullSyncPage(
   db: Db,
   userId: string,
@@ -24,7 +34,7 @@ export function pullSyncPage(
   rsince: number,
   need: string[],
   backfill: BackfillCursor | undefined,
-  limits: { count: number; bytes: number; scan: number },
+  limits: { count: number; bytes: number; scan: number; deadline?: number },
   reviewSince?: number,
 ) {
   const ops: Op[] = [];
@@ -33,17 +43,46 @@ export function pullSyncPage(
   let truncated = false;
   let scans = 0;
   const open = userId === "local";
-  const visible = (id: string) => open || hasReadAccess(db, id, userId);
+  const visibility = new Map<string, boolean>();
+  const visible = (id: string) => {
+    if (open) return true;
+    let v = visibility.get(id);
+    if (v === undefined) {
+      v = hasReadAccess(db, id, userId);
+      visibility.set(id, v);
+    }
+    return v;
+  };
+  // Only one backfill root per page, so one memo suffices: every node on a walked
+  // path shares the walk's answer (descendant of root, or not).
+  const rootedMemo = new Map<string, boolean>();
   const rooted = (id: string, root: string): boolean => {
-    const seen = new Set<string>();
+    const seen: string[] = [];
+    const seenSet = new Set<string>();
     let next: string | null = id;
-    while (next && !seen.has(next) && seen.size < limits.scan) {
-      if (next === root) return true;
-      seen.add(next);
+    let found = false;
+    while (next && !seenSet.has(next) && seenSet.size < limits.scan) {
+      if (next === root) {
+        found = true;
+        break;
+      }
+      const known = rootedMemo.get(next);
+      if (known !== undefined) {
+        found = known;
+        break;
+      }
+      seen.push(next);
+      seenSet.add(next);
       next = getItem(db, next)?.parent_id ?? null;
     }
-    return false;
+    for (const n of seen) rootedMemo.set(n, found);
+    return found;
   };
+  const outOfBudget = () =>
+    scans >= limits.scan ||
+    (scans > 0 &&
+      limits.deadline !== undefined &&
+      Date.now() > limits.deadline);
   const scan = (
     table: "ops" | "record_ops",
     start: number,
@@ -53,22 +92,37 @@ export function pullSyncPage(
     let cursor = start;
     let done = false;
     const column = table === "ops" ? "fields" : "data";
-    while (scans < limits.scan) {
-      // Fetch metadata first so an oversized historical value is never buffered.
-      const meta = db.get<{
-        seq: number;
-        size: number;
-        item_id: string | null;
-        entity?: string;
-        user_id?: string;
-      }>(
-        `SELECT rowid AS seq, length(CAST(${column} AS BLOB)) AS size, ${table === "ops" ? "item_id" : "entity, json_extract(data, '$.item_id') AS item_id, json_extract(data, '$.user_id') AS user_id"} FROM ${table} WHERE rowid > ? ${reviewOnly ? "AND entity = 'review_progress'" : ""} ORDER BY rowid LIMIT 1`,
-        [cursor],
-      );
-      if (!meta) {
+    type Meta = {
+      seq: number;
+      size: number;
+      item_id: string | null;
+      entity?: string;
+      user_id?: string;
+    };
+    let batch: Meta[] = [];
+    let at = 0;
+    let exhausted = false;
+    for (;;) {
+      if (at >= batch.length && exhausted) {
         done = true;
         break;
       }
+      if (outOfBudget()) break;
+      if (at >= batch.length) {
+        // Fetch metadata first so an oversized historical value is never buffered.
+        const want = Math.min(SCAN_BATCH, limits.scan - scans);
+        batch = db.all<Meta>(
+          `SELECT rowid AS seq, length(CAST(${column} AS BLOB)) AS size, ${table === "ops" ? "item_id" : "entity, json_extract(data, '$.item_id') AS item_id, json_extract(data, '$.user_id') AS user_id"} FROM ${table} WHERE rowid > ? ${reviewOnly ? "AND entity = 'review_progress'" : ""} ORDER BY rowid LIMIT ?`,
+          [cursor, want],
+        );
+        at = 0;
+        exhausted = batch.length < want;
+        if (!batch.length) {
+          done = true;
+          break;
+        }
+      }
+      const meta = batch[at++];
       scans++;
       const itemId = meta.item_id;
       const personal = [

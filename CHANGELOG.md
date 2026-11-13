@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.5
+**Faster**
+
+- Adding a subtask, and most edits in large workspaces, respond several times faster.
+- The first sync on a new device or browser finishes in a few rounds instead of dozens.
+
 ## v1.3.4
 **Talk to agents through task comments**
 

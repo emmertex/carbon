@@ -52,7 +52,6 @@ import {
   reorderItem,
   moveProjectToFolder,
   deleteFolder,
-  subtaskProgress,
   openCountsByContainer,
   sharedRoots,
   tasksNearLocation,
@@ -76,6 +75,7 @@ import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { useSuppressClickAfterDrag } from '@/hooks/useSuppressClickAfterDrag';
 import { TagMark } from './TagMark';
 import { useDeferredQuery } from '@/hooks/useQuery';
+import { childrenIndex, cachedSubtaskProgress } from '@/lib/childrenIndex';
 import { useWhere } from '@/hooks/useWhere';
 import { useFeature } from '@/hooks/useFeature';
 import { undo, redo } from '@/lib/undo';
@@ -317,7 +317,7 @@ function ProjectsSection() {
       const folders = getFolders(db);
       // One pass for every project's open count, instead of a recursive
       // subtaskProgress walk per project on each (deferred) sidebar render.
-      const counts = openCountsByContainer(db, projects.map((p) => p.id), countScope);
+      const counts = openCountsByContainer(db, projects.map((p) => p.id), countScope, childrenIndex(db));
       const openById: Record<string, number> = {};
       for (const p of projects) openById[p.id] = counts.get(p.id) ?? 0;
       return { projects, archivedProjects, folders, openById };
@@ -1025,7 +1025,7 @@ export function Sidebar() {
 
       // Remaining work in scope (recursive for 'all'), kept consistent with the pie.
       const remaining = (id: string) => {
-        const { done, total } = subtaskProgress(db, id, countScope);
+        const { done, total } = cachedSubtaskProgress(db, id, countScope);
         return total - done;
       };
       const planCount = listPlan(db, me)

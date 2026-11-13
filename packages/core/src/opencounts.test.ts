@@ -6,6 +6,7 @@ import {
   setCompleted,
   subtaskProgress,
   openCountsByContainer,
+  buildChildrenIndex,
   type CountScope,
 } from './repo';
 
@@ -35,6 +36,17 @@ test('openCountsByContainer matches subtaskProgress per container', () => {
     for (const id of ids) {
       const { done, total } = subtaskProgress(db, id, scope);
       assert.equal(batch.get(id), total - done, `${scope} count for ${id}`);
+    }
+  }
+
+  // A shared prebuilt index (the UI caches one per revision) must give exactly
+  // the same answers as the per-call scan.
+  const index = buildChildrenIndex(db);
+  for (const scope of ['all', 'direct'] as CountScope[]) {
+    const batch = openCountsByContainer(db, ids, scope, index);
+    for (const id of ids) {
+      assert.deepEqual(subtaskProgress(db, id, scope, index), subtaskProgress(db, id, scope), `${scope} progress for ${id}`);
+      assert.equal(batch.get(id), openCountsByContainer(db, [id], scope).get(id), `${scope} indexed count for ${id}`);
     }
   }
 });

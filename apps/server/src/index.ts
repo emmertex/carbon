@@ -410,6 +410,14 @@ const SYNC_MAX_SCAN_ROWS = Math.max(
   100,
   Number(process.env.SYNC_MAX_SCAN_ROWS) || 200_000,
 );
+// Wall-time budget for one pull page's log scans. The row cap alone used to be pinned
+// at 2000 to keep a request short, which made an initial sync over a large shared log
+// take ~80 round trips of mostly-skipped rows; a time box keeps each request short
+// while letting cheap (memoized) rows drain in a few rounds.
+const SYNC_PULL_BUDGET_MS = Math.max(
+  10,
+  Number(process.env.SYNC_PULL_BUDGET_MS) || 300,
+);
 // The backfill (`need`) expands each requested id to its whole subtree; cap the
 // MERGED item set at this many (deterministic prefix, need order preserved —
 // explicit missing items first, so progress is monotonic across rounds).
@@ -1672,7 +1680,8 @@ export function buildTenantApp(
         {
           count: SYNC_MAX_RESPONSE_OPS,
           bytes: available,
-          scan: Math.min(SYNC_MAX_SCAN_ROWS, 2000),
+          scan: SYNC_MAX_SCAN_ROWS,
+          deadline: Date.now() + SYNC_PULL_BUDGET_MS,
         },
         body.reviewSince,
       );

@@ -1246,16 +1246,23 @@ export function restoreItem(db: Db, deviceId: string, id: string): number {
 
 export type CountScope = "all" | "direct";
 
-interface ChildRow {
+export interface ChildRow {
   id: string;
   type: string;
   status: string;
 }
 
+/** Parent id → live children, as built by {@link buildChildrenIndex}. */
+export type ChildrenIndex = ReadonlyMap<string, readonly ChildRow[]>;
+
 /** One scan of every live item, grouped by parent — the shared building block
  *  behind both `subtaskProgress` and `openCountsByContainer` so neither one
  *  issues a SQL query per BFS node (a single query, followed by an in-memory
  *  walk, regardless of subtree size or how many containers are queried). */
+export function buildChildrenIndex(db: Db): ChildrenIndex {
+  return childrenByParent(db);
+}
+
 function childrenByParent(db: Db): Map<string, ChildRow[]> {
   const kids = new Map<string, ChildRow[]>();
   for (const r of db.all<{
@@ -1277,7 +1284,7 @@ function childrenByParent(db: Db): Map<string, ChildRow[]> {
  *  leaf-descendant tasks — shared by `subtaskProgress('all')` and
  *  `openCountsByContainer('all')` so the traversal logic lives in one place. */
 function leafTaskProgress(
-  kids: Map<string, ChildRow[]>,
+  kids: ChildrenIndex,
   rootId: string,
 ): { done: number; total: number } {
   const taskKids = (id: string) =>
@@ -1303,11 +1310,16 @@ function leafTaskProgress(
  *  - `direct`: immediate child tasks (done / total).
  *  - `all`: leaf descendant tasks — a task with no task-children counts once.
  *  Both ignore non-task children and deleted items. Uses a single query (see
- *  `childrenByParent`) rather than one `getChildren` query per BFS node. */
+ *  `childrenByParent`) rather than one `getChildren` query per BFS node.
+ *
+ *  `index` lets a caller that asks for many items share one prebuilt
+ *  {@link buildChildrenIndex} — without it, every 'all' call scans the whole
+ *  items table, which is O(workspace) per visible row. */
 export function subtaskProgress(
   db: Db,
   id: string,
   scope: CountScope,
+  index?: ChildrenIndex,
 ): { done: number; total: number } {
   if (scope === "direct") {
     const kids = getChildren(db, id).filter((c) => c.type === "task");
@@ -1316,7 +1328,7 @@ export function subtaskProgress(
       total: kids.length,
     };
   }
-  return leafTaskProgress(childrenByParent(db), id);
+  return leafTaskProgress(index ?? childrenByParent(db), id);
 }
 
 /**
@@ -1329,10 +1341,11 @@ export function openCountsByContainer(
   db: Db,
   containerIds: string[],
   scope: CountScope,
+  index?: ChildrenIndex,
 ): Map<string, number> {
   const out = new Map<string, number>();
   if (containerIds.length === 0) return out;
-  const kids = childrenByParent(db);
+  const kids = index ?? childrenByParent(db);
   const remaining = (id: string): number => {
     if (scope === "direct") {
       return (kids.get(id) ?? []).filter(

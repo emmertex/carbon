@@ -15,7 +15,6 @@ import {
   FileText,
 } from 'lucide-react';
 import {
-  subtaskProgress,
   inheritedPriority,
   isInPlan,
   isOverdue,
@@ -26,6 +25,7 @@ import {
   type User,
 } from '@carbon/core';
 import { useQuery } from '@/hooks/useQuery';
+import { cachedSubtaskProgress } from '@/lib/childrenIndex';
 import { useCompact } from '@/hooks/useCompact';
 import { useFocusItem } from '@/hooks/useFocusItem';
 import { TagMark } from './TagMark';
@@ -152,7 +152,7 @@ export function TaskRow({
 
   // Sub-task progress for the pie ring (and to decide leaf vs parent behaviour).
   const progress =
-    useQuery((db) => subtaskProgress(db, item.id, countScope), [item.id, countScope]) ?? {
+    useQuery((db) => cachedSubtaskProgress(db, item.id, countScope), [item.id, countScope]) ?? {
       done: 0,
       total: 0,
     };

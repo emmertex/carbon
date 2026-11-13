@@ -560,4 +560,18 @@ MIGRATIONS.push({
   `,
 });
 
-export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+MIGRATIONS.push({
+  version: 26,
+  // v23's idx_items_deleted_updated(deleted, ...) made the planner (no ANALYZE
+  // stats) answer every `parent_id = ? AND deleted = 0` / `folder_id = ? AND
+  // deleted = 0` from that index — `deleted = 0` matches nearly every row, so
+  // each getChildren became a full table walk (~6ms at 10k items, thousands of
+  // calls per sidebar/list pass). Two-column equality keys outrank it, and the
+  // sort columns let getChildren skip its temp B-tree.
+  up: `
+    CREATE INDEX IF NOT EXISTS idx_items_parent_live ON items(parent_id, deleted, sort_order, created_at);
+    CREATE INDEX IF NOT EXISTS idx_items_folder_live ON items(folder_id, deleted);
+  `,
+});
+
+export const LATEST_SCHEMA_VERSION =MIGRATIONS[MIGRATIONS.length - 1]!.version;
