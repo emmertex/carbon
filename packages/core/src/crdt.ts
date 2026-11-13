@@ -9,8 +9,114 @@ const BOOLEAN_FIELDS = new Set<keyof ItemPatch>([
   "notes_project",
 ]);
 
-type Clock = { ts: number; dev: string };
-type ClockMap = Record<string, Clock>;
+export type Clock = { ts: number; dev: string };
+export type ClockMap = Record<string, Clock>;
+
+// ----- clock storage --------------------------------------------------------
+// `items.clocks` holds the per-field LWW clock of every field. The original
+// encoding, `{ field: { ts, dev } }`, repeats the full device UUID and both key
+// names per field (~1.75 KB per item), so clocks were over half of `items` and
+// every table scan walked pages of them. The compact encoding groups fields that
+// share a clock (a create op stamps all of them at once) and stores each device
+// once:
+//
+//   [2, [dev0, dev1, ...], [ts, devIndex, field, field, ...], ...]
+//
+// where `field` is an index into CLOCK_FIELD_CODES, or the field name itself for
+// a field not in that list. Readers accept both encodings; writers emit the
+// compact one. Clocks are local materialization state — they never travel in
+// sync — so no peer ever has to read another replica's encoding.
+
+/** Field codes for the compact clock encoding. APPEND-ONLY: a stored code means
+ *  this position forever. (A field missing here is stored by name.) */
+const CLOCK_FIELD_CODES: readonly string[] = [
+  "parent_id", "type", "owner_id", "title", "note", "status", "flagged",
+  "priority", "defer_date", "due_date", "reminder_at", "estimate_minutes",
+  "completed_at", "review_interval", "reviewed_at", "recurrence", "geo", "color",
+  "notes_project", "thumb", "folder_id", "sort_order", "order_mode", "sys_kind",
+  "metadata", "deleted",
+];
+const CLOCK_FIELD_INDEX = new Map(CLOCK_FIELD_CODES.map((f, i) => [f, i]));
+const CLOCK_FORMAT = 2;
+
+/** Decode a stored `items.clocks` value (either encoding). Malformed input
+ *  decodes to whatever well-formed entries it holds. */
+export function decodeClocks(json: string | null | undefined): ClockMap {
+  const raw: unknown = JSON.parse(json || "{}");
+  const out: ClockMap = {};
+  if (Array.isArray(raw)) {
+    const devs = Array.isArray(raw[1]) ? (raw[1] as unknown[]) : [];
+    for (let g = 2; g < raw.length; g++) {
+      const group = raw[g];
+      if (!Array.isArray(group) || group.length < 2) continue;
+      const ts = group[0];
+      const dev = devs[group[1] as number];
+      if (typeof ts !== "number" || typeof dev !== "string") continue;
+      for (let k = 2; k < group.length; k++) {
+        const f = group[k];
+        const name = typeof f === "number" ? CLOCK_FIELD_CODES[f] : f;
+        if (typeof name === "string") out[name] = { ts, dev };
+      }
+    }
+    return out;
+  }
+  if (raw && typeof raw === "object")
+    for (const [field, c] of Object.entries(raw as Record<string, unknown>)) {
+      const clock = c as Partial<Clock> | null;
+      if (clock && typeof clock.ts === "number" && typeof clock.dev === "string")
+        out[field] = { ts: clock.ts, dev: clock.dev };
+    }
+  return out;
+}
+
+/** Encode a clock map compactly (deterministic: groups by ts then device). */
+export function encodeClocks(clocks: ClockMap): string {
+  const groups = new Map<string, { ts: number; dev: string; fields: (number | string)[] }>();
+  for (const [field, c] of Object.entries(clocks)) {
+    const key = `${c.ts}\u0000${c.dev}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = { ts: c.ts, dev: c.dev, fields: [] }));
+    g.fields.push(CLOCK_FIELD_INDEX.get(field) ?? field);
+  }
+  const sorted = [...groups.values()].sort((a, b) =>
+    a.ts !== b.ts ? a.ts - b.ts : a.dev < b.dev ? -1 : a.dev > b.dev ? 1 : 0,
+  );
+  const devs: string[] = [];
+  const devIndex = new Map<string, number>();
+  const out: unknown[] = [CLOCK_FORMAT, devs];
+  for (const g of sorted) {
+    let d = devIndex.get(g.dev);
+    if (d === undefined) {
+      devIndex.set(g.dev, (d = devs.length));
+      devs.push(g.dev);
+    }
+    g.fields.sort((a, b) =>
+      typeof a === "number" && typeof b === "number"
+        ? a - b
+        : typeof a === "number" ? -1 : typeof b === "number" ? 1 : a < b ? -1 : 1,
+    );
+    out.push([g.ts, d, ...g.fields]);
+  }
+  return JSON.stringify(out);
+}
+
+/** Re-encode every item still holding legacy (object) clocks. Returns the
+ *  number of rows rewritten. Idempotent. */
+export function recodeLegacyClocks(db: Db): number {
+  const rows = db.all<{ id: string; clocks: string }>(
+    "SELECT id, clocks FROM items WHERE clocks LIKE '{%'",
+  );
+  for (const r of rows) {
+    let encoded: string;
+    try {
+      encoded = encodeClocks(decodeClocks(r.clocks));
+    } catch {
+      continue; // unparsable: leave it for the reader's error path, as before
+    }
+    db.run("UPDATE items SET clocks = ? WHERE id = ?", [encoded, r.id]);
+  }
+  return rows.length;
+}
 
 // ----- causal clock ---------------------------------------------------------
 // Op timestamps drive per-field LWW. Raw Date.now() is unsafe across devices: a
@@ -102,7 +208,7 @@ export function applyOp(db: Db, op: Op): void {
     );
   }
 
-  const clocks: ClockMap = JSON.parse(existing?.clocks ?? "{}") as ClockMap;
+  const clocks = decodeClocks(existing?.clocks);
 
   const setCols: string[] = [];
   const setVals: SqlValue[] = [];
@@ -119,7 +225,7 @@ export function applyOp(db: Db, op: Op): void {
   if (setCols.length === 0 && existing) return; // nothing newer to apply
 
   setCols.push("clocks = ?");
-  setVals.push(JSON.stringify(clocks));
+  setVals.push(encodeClocks(clocks));
   setCols.push("updated_at = ?");
   setVals.push(nowIso);
   setVals.push(op.item_id);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, describe, beforeEach, afterEach } from "node:test";
-import { recordOp, ingestOps, type Db } from "@carbon/core";
+import { recordOp, ingestOps, decodeClocks, type Db } from "@carbon/core";
 import type { BcLike } from "./db";
 
 // ---------------------------------------------------------------------------
@@ -184,6 +184,11 @@ const store = await import("./store");
 
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A key whose write commits a generation: the snapshot record (compaction) or
+ *  the journal head (routine journal append). */
+const isCommitKey = (k: string) =>
+  k.startsWith("db|") || k.startsWith("dbjhead|");
+
 const now = () => new Date().toISOString();
 
 function insertItem(db: Db, id: string, title: string): void {
@@ -196,10 +201,9 @@ function insertItem(db: Db, id: string, title: string): void {
 /** Item ids persisted under a given identity namespace ('local|local' by
  *  default — the no-server, no-user identity used throughout these tests). */
 async function storeItemIds(nsKey = "local|local"): Promise<string[]> {
-  const saved = kvStore.get(`db|${nsKey}`) as
-    { gen: number; snap: Uint8Array } | undefined;
-  assert.ok(saved, `a snapshot should be persisted under ${nsKey}`);
-  const snap = await tab1.openSnapshot(saved.snap);
+  // The durable state is the snapshot plus its journal (see db.ts "journal").
+  const snap = await tab1.loadStoreState(nsKey);
+  assert.ok(snap, `a snapshot should be persisted under ${nsKey}`);
   return snap
     .all<{ id: string }>("SELECT id FROM items")
     .map((r) => r.id)
@@ -1214,8 +1218,8 @@ describe("A3 review: durable journals, fencing and isolation", () => {
     assert.equal(row.title, "peer title");
     assert.equal(row.note, "pending note");
     assert.equal(row.flagged, 1);
-    assert.equal(JSON.parse(row.clocks).title.ts, future);
-    assert.equal(JSON.parse(row.clocks).flagged.ts, future + 1);
+    assert.equal(decodeClocks(row.clocks).title.ts, future);
+    assert.equal(decodeClocks(row.clocks).flagged.ts, future + 1);
     assert.ok(Number(tab3.getMeta("op_clock")) >= future + 1);
   });
 
@@ -1231,7 +1235,7 @@ describe("A3 review: durable journals, fencing and isolation", () => {
           fn({
             ...tx,
             put: async (k, v) => {
-              snapshot ||= k.startsWith("db|");
+              snapshot ||= isCommitKey(k);
               await tx.put(k, v);
             },
           }),
@@ -1320,7 +1324,7 @@ describe("A3 review: durable journals, fencing and isolation", () => {
     tab1.setKvSeam({
       ...kvSeam,
       get: async (k) => {
-        if (k.startsWith("db|"))
+        if (isCommitKey(k))
           kvStore.set("lock|local|local", {
             owner: "new",
             token: "new",
@@ -1330,8 +1334,10 @@ describe("A3 review: durable journals, fencing and isolation", () => {
       },
     });
     insertItem(tab1.getDb(), "stale", "stale");
+    const headBefore = kvStore.get("dbjhead|local|local");
     await assert.rejects(tab1.flushPersist(), /Stale persistence/);
     assert.equal(kvStore.get("db|local|local"), before);
+    assert.equal(kvStore.get("dbjhead|local|local"), headBefore);
     assert.equal(
       (kvStore.get("lock|local|local") as { token: string }).token,
       "new",
@@ -1357,7 +1363,7 @@ describe("A3 review: durable journals, fencing and isolation", () => {
           fn({
             ...tx,
             put: async (k, v) => {
-              snapshot ||= k.startsWith("db|");
+              snapshot ||= isCommitKey(k);
               await tx.put(k, v);
             },
           }),
@@ -1422,7 +1428,7 @@ describe("A3 review: durable journals, fencing and isolation", () => {
           fn({
             ...tx,
             put: async (k, v) => {
-              snapshot ||= k.startsWith("db|");
+              snapshot ||= isCommitKey(k);
               await tx.put(k, v);
             },
           }),
@@ -1513,5 +1519,235 @@ describe("A3 review: durable journals, fencing and isolation", () => {
       JSON.stringify({ url: "https://two.example" }),
     );
     assert.notEqual(settingsKey("carbon.viewprefs", "inbox"), first);
+  });
+});
+
+describe("journal: incremental persistence on top of the A3 snapshot", () => {
+  let reloads = 0;
+  beforeEach(() => {
+    for (const tab of [tab1, tab2, tab3, sharedDb]) tab.resetDbForTest();
+    kvStore.clear();
+    fakeLocalStorage.clear();
+    putBehavior = "ok";
+    reloads = 0;
+    sharedDb.setReloadFn(() => {});
+    for (const tab of [tab1, tab2, tab3]) {
+      tab.setKvSeam(kvSeam);
+      tab.setBcFactory(bc.factory);
+      tab.setReloadFn(() => reloads++);
+    }
+  });
+
+  const headOf = () =>
+    kvStore.get("dbjhead|local|local") as
+      | { gen: number; base: number; n: number }
+      | undefined;
+  const journalKeys = () =>
+    [...kvStore.keys()].filter((k) => k.startsWith("dbj|local|local|"));
+
+  test("routine persists append journal entries and never rewrite the snapshot", async () => {
+    await tab1.initDb(); // first boot writes the base snapshot
+    const snap = kvStore.get("db|local|local");
+    for (let i = 0; i < 5; i++) {
+      insertItem(tab1.getDb(), `j${i}`, `edit ${i}`);
+      await tab1.flushPersist();
+    }
+    assert.equal(kvStore.get("db|local|local"), snap, "snapshot untouched");
+    assert.equal(journalKeys().length, 5);
+    assert.equal(headOf()!.n, 5);
+    // A reload redoes the journal on the snapshot.
+    await tab2.initDb();
+    assert.deepEqual(
+      tab2.getDb().all<{ id: string }>("SELECT id FROM items ORDER BY id").map((r) => r.id),
+      ["j0", "j1", "j2", "j3", "j4"],
+    );
+  });
+
+  test("a nothing-changed persist writes nothing", async () => {
+    await tab1.initDb();
+    const head = headOf();
+    await tab1.flushPersist();
+    assert.equal(headOf(), head);
+    assert.equal(journalKeys().length, 0);
+  });
+
+  test("the journal compacts into a snapshot past its entry budget and drops covered entries", async () => {
+    await tab1.initDb();
+    for (let i = 0; i < 101; i++) {
+      insertItem(tab1.getDb(), `c${String(i).padStart(3, "0")}`, "x");
+      await tab1.flushPersist();
+    }
+    const head = headOf()!;
+    assert.equal(head.base, head.gen, "head reset to the compacted snapshot");
+    assert.equal(head.n, 0);
+    assert.equal(journalKeys().length, 0);
+    assert.equal((kvStore.get("db|local|local") as { gen: number }).gen, head.gen);
+    assert.equal((await storeItemIds()).length, 101);
+  });
+
+  test("a broken journal entry stops replay there and the next persist re-bases on a snapshot", async () => {
+    await tab1.initDb();
+    insertItem(tab1.getDb(), "kept", "kept");
+    await tab1.flushPersist();
+    insertItem(tab1.getDb(), "broken", "broken");
+    await tab1.flushPersist();
+    const head = headOf()!;
+    // Corrupt the newest entry: replaying it now fails (duplicate primary key).
+    kvStore.set(`dbj|local|local|${head.gen}`, {
+      gen: head.gen,
+      recs: [
+        { sql: "INSERT INTO items (id, type, title, created_at, updated_at) VALUES ('kept','task','dup','x','x')", params: [] },
+      ],
+    });
+    const errors: unknown[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a);
+    try {
+      await tab2.initDb();
+    } finally {
+      console.error = orig;
+    }
+    assert.ok(errors.length, "the broken entry is reported");
+    assert.deepEqual(
+      tab2.getDb().all<{ id: string }>("SELECT id FROM items").map((r) => r.id),
+      ["kept"],
+    );
+    // Boot persisted a fresh snapshot past the broken chain.
+    const after = headOf()!;
+    assert.ok(after.gen > head.gen);
+    assert.equal(after.base, after.gen);
+    assert.equal(journalKeys().length, 0);
+  });
+
+  test("a snapshot rewritten by a pre-journal build keeps both its edits and the orphaned journal's", async () => {
+    await tab1.initDb();
+    insertItem(tab1.getDb(), "journaled", "new build edit");
+    await tab1.flushPersist();
+    const old = kvStore.get("db|local|local") as { gen: number };
+    const head = kvStore.get("dbjhead|local|local");
+    const entries = journalKeys().map((k) => [k, kvStore.get(k)] as const);
+    // An old build sees only the snapshot: hide the journal, boot, edit, and write
+    // a whole snapshot the way it would (no head update).
+    kvStore.delete("dbjhead|local|local");
+    for (const [k] of entries) kvStore.delete(k);
+    await tab3.initDb();
+    insertItem(tab3.getDb(), "legacy", "old build edit");
+    kvStore.set("db|local|local", { gen: old.gen + 1, snap: tab3.exportDb() });
+    kvStore.set("dbjhead|local|local", head);
+    for (const [k, v] of entries) kvStore.set(k, v);
+    // The new build boots: the chain no longer matches the snapshot, so it is
+    // merged on top instead of discarded, and re-based on a fresh snapshot.
+    tab2.resetDbForTest();
+    await tab2.initDb();
+    assert.deepEqual(
+      tab2.getDb().all<{ id: string }>("SELECT id FROM items ORDER BY id").map((r) => r.id),
+      ["journaled", "legacy"],
+    );
+    assert.equal(journalKeys().length, 0);
+  });
+
+  test("a peer with no pending work catches up by applying journal entries in place", async () => {
+    await tab1.initDb();
+    await tab2.initDb();
+    const before = tab2.getDb();
+    insertItem(tab1.getDb(), "remote", "from tab 1");
+    await tab1.flushPersist();
+    await tick(0);
+    await tick(0);
+    assert.equal(tab2.getDb(), before, "live handle kept (no full reload)");
+    assert.ok(tab2.getDb().get("SELECT 1 AS x FROM items WHERE id = 'remote'"));
+  });
+
+  test("the boot-time format announcement reloads only pre-journal tabs", async () => {
+    await tab1.initDb();
+    await tab2.initDb(); // posts { t: 'rebind', fmt: 2 }
+    assert.equal(reloads, 0, "a journal-aware tab ignores the announcement");
+    // A plain rebind (sign-out, workspace switch) still reloads peers.
+    // (Channels left open by earlier suites' module instances use the real
+    // reload, which has no `location` under node; only ours count.)
+    for (const ch of bc.channelsOf("carbon|local|local")) {
+      try {
+        ch.onmessage?.({ data: { t: "rebind", tab: "elsewhere" } });
+      } catch {
+        /* a stale instance's real reload */
+      }
+    }
+    assert.ok(reloads >= 1);
+  });
+
+  test("erase removes the namespace's journal", async () => {
+    await tab1.initDb();
+    insertItem(tab1.getDb(), "gone", "gone");
+    await tab1.flushPersist();
+    assert.ok(journalKeys().length);
+    await tab1.discardLocalCapture();
+    assert.equal(journalKeys().length, 0);
+    assert.equal(kvStore.has("dbjhead|local|local"), false);
+  });
+});
+
+describe("read-replica feed", () => {
+  beforeEach(() => {
+    for (const tab of [tab1, tab2, tab3, sharedDb]) tab.resetDbForTest();
+    kvStore.clear();
+    fakeLocalStorage.clear();
+    putBehavior = "ok";
+    for (const tab of [tab1, tab2, tab3]) {
+      tab.setKvSeam(kvSeam);
+      tab.setBcFactory(bc.factory);
+      tab.setReloadFn(() => {});
+    }
+  });
+
+  /** Redo a feed the way replica.worker.ts does. */
+  function applyFeed(target: Db & { close(): void }, recs: ReturnType<typeof tab1.takeReplicaFeed>["recs"]) {
+    for (const rec of recs) {
+      if ("tx" in rec)
+        target.exec(rec.tx === "begin" ? "BEGIN" : rec.tx === "commit" ? "COMMIT" : "ROLLBACK");
+      else if (rec.exec) target.exec(rec.sql);
+      else target.run(rec.sql, rec.params as never);
+    }
+  }
+  const dump = (d: Db) =>
+    JSON.stringify(d.all("SELECT id, title, deleted, clocks FROM items ORDER BY id"));
+
+  test("redoing the feed on a seeded copy reproduces the live DB, rollbacks included", async () => {
+    await tab1.initDb();
+    tab1.enableReplicaFeed();
+    const first = tab1.takeReplicaFeed();
+    assert.equal(first.reseed, true, "a new replica is seeded from an export");
+    const replica = await tab1.openSnapshot(tab1.exportForReplica());
+    insertItem(tab1.getDb(), "r1", "one");
+    recordOp(tab1.getDb(), "dev", "r2", { type: "task", title: "two" });
+    assert.throws(() =>
+      tab1.getDb().transaction(() => {
+        insertItem(tab1.getDb(), "rolled-back", "never");
+        throw new Error("abort");
+      }),
+    );
+    ingestOps(
+      tab1.getDb(),
+      [{ id: "remote", item_id: "r1", device_id: "remote", ts: Date.now() + 1000, fields: { title: "remote title" } }],
+      true,
+    );
+    await tab1.flushPersist(); // persistence trims mutLog, never the replica feed
+    const feed = tab1.takeReplicaFeed();
+    assert.equal(feed.reseed, false);
+    applyFeed(replica, feed.recs);
+    assert.equal(dump(replica), dump(tab1.getDb()));
+    assert.equal(replica.get("SELECT 1 AS x FROM items WHERE id = 'rolled-back'"), undefined);
+    replica.close();
+  });
+
+  test("a wholesale swap of the live DB asks the replica to reseed", async () => {
+    await tab1.initDb();
+    await tab2.initDb();
+    tab2.enableReplicaFeed();
+    tab2.takeReplicaFeed();
+    insertItem(tab2.getDb(), "pending", "unflushed"); // forces a full resync, not in-place
+    insertItem(tab1.getDb(), "peer", "peer");
+    await tab1.flushPersist();
+    await tab2.flushPersist(); // resyncs onto tab1's commit
+    assert.equal(tab2.takeReplicaFeed().reseed, true);
   });
 });

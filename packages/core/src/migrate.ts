@@ -77,7 +77,8 @@ export function migrate(db: Db): { from: number; to: number } {
   db.transaction(() => {
     for (const migration of MIGRATIONS) {
       if (migration.version > from) {
-        db.exec(migration.up);
+        if (migration.up) db.exec(migration.up);
+        migration.run?.(db);
         setVersion(db, migration.version);
       }
     }

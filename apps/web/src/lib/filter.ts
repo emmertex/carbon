@@ -9,7 +9,7 @@ import {
   type Item,
 } from '@carbon/core';
 import type { Filters } from './views';
-import { pendingHideIds } from './completion';
+import { pendingHideIds } from './completionHold';
 
 /** True if any ancestor of the item is a project. */
 function hasProjectAncestor(db: Db, item: Item): boolean {

@@ -7,7 +7,9 @@
 //
 // Mirrors the main-thread direct path in `db.ts` (`landDirect`): the main record
 // (`db|<ns>`) and its snapshot-log entry (`dblog|<ns>`) land in ONE transaction,
-// so a crash can leave at most a missing write, never a torn one.
+// so a crash can leave at most a missing write, never a torn one. The same
+// transaction resets the journal head to this snapshot and deletes the journal
+// entries it covers (see "journal" in db.ts).
 //
 // Keep MAX_LOG in sync with db.ts.
 const MAX_LOG = 4;
@@ -19,6 +21,9 @@ interface PersistRequest {
   key: string;
   logKey: string;
   lockKey: string;
+  headKey: string;
+  head: { gen: number; base: number; writer?: string; n: number; bytes: number };
+  dropKeys: string[];
   token: string;
   gen: number;
   snap: Uint8Array;
@@ -43,7 +48,8 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 self.onmessage = (e: MessageEvent<PersistRequest>) => {
-  const { id, key, logKey, lockKey, token, gen, snap } = e.data;
+  const { id, key, logKey, lockKey, headKey, head, dropKeys, token, gen, snap } =
+    e.data;
   const fail = (error: unknown): void =>
     self.postMessage({
       id,
@@ -65,9 +71,18 @@ self.onmessage = (e: MessageEvent<PersistRequest>) => {
           tx.abort();
           return;
         }
-        const current = st.get(key);
-        current.onsuccess = () => {
-          if ((current.result?.gen ?? -1) >= gen) {
+        // The head is the generation of record; a store last written by a build
+        // without the journal has none, so fall back to the snapshot's.
+        const currentHead = st.get(headKey);
+        currentHead.onsuccess = () => {
+          if (currentHead.result) check(currentHead.result.gen);
+          else {
+            const current = st.get(key);
+            current.onsuccess = () => check(current.result?.gen ?? -1);
+          }
+        };
+        const check = (currentGen: number) => {
+          if (currentGen >= gen) {
             tx.abort();
             return;
           }
@@ -84,6 +99,8 @@ self.onmessage = (e: MessageEvent<PersistRequest>) => {
               log.pop();
             st.put({ gen, snap, writer: token }, key);
             st.put(log, logKey);
+            for (const k of dropKeys) st.delete(k);
+            st.put(head, headKey);
           };
         };
       };

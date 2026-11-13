@@ -8,6 +8,7 @@ import { bindBlobIdentity, clearBlobs, migrateLegacyBlobs } from "./blobs";
 import { identityKey, eraseIdentitySettings } from "./identity";
 import {
   applyOp,
+  decodeClocks,
   migrate,
   ensureDeviceId,
   backfillTagRecordOps,
@@ -186,6 +187,61 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const lockKey = (n?: string) => `lock|${n ?? ns()}`;
+/** Journal entry for generation `gen` (see "Journal" below). */
+const journalKey = (gen: number, n?: string) => `dbj|${n ?? ns()}|${gen}`;
+/** Small head record: the namespace's current generation and the snapshot
+ *  generation its journal chains from. Read instead of the (large) snapshot
+ *  whenever only the generation is needed. */
+const headKey = (n?: string) => `dbjhead|${n ?? ns()}`;
+
+// ----- journal (incremental persistence) ---------------------------------------
+//
+// A persist used to export the whole DB (`sqlDb.export()`, which also finalizes
+// every cached statement) and rewrite the snapshot plus a four-deep snapshot log —
+// several times the DB size in IndexedDB writes per edit. Now a routine persist
+// appends the write statements it captured from the mutation log as one journal
+// entry `dbj|ns|<gen>`. The state of a namespace is its base snapshot (`db|ns`,
+// generation `head.base`) plus the journal entries `base+1 … head.gen` replayed
+// verbatim in order. Core issues no nondeterministic SQL (times/ids are bound
+// parameters), so redo on the exact base an entry was recorded against
+// reproduces the state. Compaction writes a fresh snapshot (the old path) and
+// drops the entries it covers. See docs/internal/worker-db-plan.md.
+
+interface JournalHead {
+  /** Current generation of the namespace. */
+  gen: number;
+  /** Generation of the base snapshot the journal chains from. */
+  base: number;
+  writer?: string;
+  /** Entries since the base snapshot, and their approximate byte size. */
+  n: number;
+  bytes: number;
+}
+
+interface JournalEntry {
+  gen: number;
+  recs: MutRec[];
+}
+
+/** Compact (write a full snapshot) once the journal grows past either budget. */
+const JOURNAL_MAX_ENTRIES = 100;
+const JOURNAL_MAX_BYTES = 2 * 1024 * 1024;
+/** A single capture bigger than this (e.g. a large sync pull) goes straight to a
+ *  snapshot: replaying it on boot would cost more than loading it. */
+const JOURNAL_MAX_ENTRY_BYTES = 1024 * 1024;
+/** Idle compaction: keep boot replay short and the old-code rollback window small. */
+const JOURNAL_IDLE_COMPACT_MS = 30_000;
+const JOURNAL_IDLE_MIN_ENTRIES = 10;
+
+/** The generation a namespace's store is at: the journal head when present
+ *  (current format), else the snapshot record (a store last written by an older
+ *  build). The snapshot is only read when there is no head. */
+async function storeGen(n?: string): Promise<number> {
+  const head = (await kv().get(headKey(n))) as JournalHead | null;
+  if (head) return head.gen;
+  const cur = (await kv().get(dbKey(n))) as SnapRec | null;
+  return cur?.gen ?? 0;
+}
 
 /** The snapshot log keeps the last few whole-DB snapshots (newest first) so a
  *  corrupt or missing current record can be recovered from the last good one. */
@@ -235,7 +291,10 @@ interface PeerMsg {
   t: "persisted" | "hello" | "wiped" | "rebind";
   gen?: number;
   tab?: string;
+  fmt?: number;
 }
+/** Store format with the journal (see "journal" below). */
+const JOURNAL_FORMAT = 2;
 
 function postMsg(msg: PeerMsg): void {
   try {
@@ -254,9 +313,8 @@ function postMsg(msg: PeerMsg): void {
 async function catchUpToStoreImpl(): Promise<void> {
   await assertNotWiped();
   if (!sqlDb) return;
-  const cur = (await kv().get(dbKey())) as SnapRec | null;
-  if (!cur || cur.gen <= baseGen) return;
-  await resyncFromStore(cur.snap, cur.gen);
+  if ((await storeGen()) <= baseGen) return;
+  await resyncToStore();
 }
 
 function catchUpToStore(): Promise<void> {
@@ -295,20 +353,19 @@ function onPeerMsg(e: { data: unknown }): void {
     case "hello":
       // A tab is joining: answer with the store's CURRENT generation so a
       // boot that raced a peer's commit resyncs before its first write.
-      void kv()
-        .get(dbKey())
-        .then((cur) =>
-          postMsg({
-            t: "persisted",
-            gen: (cur as SnapRec | null)?.gen ?? 0,
-            tab: tabId,
-          }),
-        )
+      void storeGen()
+        .then((gen) => postMsg({ t: "persisted", gen, tab: tabId }))
         .catch(() => {});
       break;
     case "wiped":
-    case "rebind":
       reloadFn();
+      break;
+    case "rebind":
+      // `fmt` marks the journal-format announcement a new build posts at boot:
+      // it exists to make tabs still running an older build (which only read the
+      // snapshot and would miss journal entries) reload into the new one. Tabs
+      // that understand the journal ignore it.
+      if (msg.fmt !== JOURNAL_FORMAT) reloadFn();
       break;
   }
 }
@@ -348,6 +405,49 @@ type MutRec =
   | { tx: "begin" | "commit" | "rollback" };
 
 let mutLog: MutRec[] = [];
+
+// ----- read-replica feed ---------------------------------------------------------
+// Every write recorded on the live DB is also queued here for the read-replica
+// worker (replica.ts), which redoes them in order on its own copy. Unlike mutLog
+// it is never trimmed by persistence, only drained by the replica. When the live
+// DB is replaced wholesale (peer resync, import, rebind) the replica must be
+// re-seeded from a full export instead.
+let replicaOutbox: MutRec[] = [];
+let replicaEnabled = false;
+let replicaStale = true;
+
+/** Start feeding the read replica (replica.ts). */
+export function enableReplicaFeed(): void {
+  replicaEnabled = true;
+  replicaStale = true;
+  replicaOutbox = [];
+}
+
+/** Drain the writes since the last call. `reseed` means the live DB was replaced:
+ *  discard the replica and seed it from `exportForReplica()` instead. */
+export function takeReplicaFeed(): { reseed: boolean; recs: MutRec[] } {
+  const out = { reseed: replicaStale, recs: replicaOutbox };
+  replicaOutbox = [];
+  replicaStale = false;
+  return out;
+}
+
+/** A copy of the live DB for seeding the replica. Like any export it finalizes the
+ *  live statement cache; it only runs at startup and after a wholesale swap. */
+export function exportForReplica(): Uint8Array {
+  if (!sqlDb) throw new Error("DB not initialized");
+  const data = sqlDb.export();
+  clearLiveStmtCache();
+  return data;
+}
+
+function markReplicaStale(): void {
+  if (!replicaEnabled) return;
+  replicaStale = true;
+  replicaOutbox = [];
+}
+
+export type { MutRec };
 
 let dbInstance: Db | null = null;
 let sqlDb: SqlJsDatabase | null = null;
@@ -458,8 +558,11 @@ function wrap(
       try {
         st.bind(params as never);
         st.step();
-        if (record)
-          mutLog.push({ sql, params: structuredClone(params) as unknown[] });
+        if (record) {
+          const rec = { sql, params: structuredClone(params) as unknown[] };
+          mutLog.push(rec);
+          if (replicaEnabled) replicaOutbox.push(rec);
+        }
       } finally {
         st.reset();
       }
@@ -486,23 +589,37 @@ function wrap(
     },
     exec(sql: string): void {
       sdb.exec(sql);
-      if (record) mutLog.push({ sql, params: [], exec: true });
+      if (record) {
+        const rec = { sql, params: [], exec: true };
+        mutLog.push(rec);
+        if (replicaEnabled) replicaOutbox.push(rec);
+      }
     },
     transaction<T>(fn: () => T): T {
       // BEGIN/COMMIT/ROLLBACK go straight to the raw handle (not recorded as
       // statements); the log records explicit markers so a replay re-wraps them
       // in a real transaction.
       const start = mutLog.length;
+      const outStart = replicaOutbox.length;
       sdb.run("BEGIN");
-      if (record) mutLog.push({ tx: "begin" });
+      if (record) {
+        mutLog.push({ tx: "begin" });
+        if (replicaEnabled) replicaOutbox.push({ tx: "begin" });
+      }
       try {
         const result = fn();
         sdb.run("COMMIT");
-        if (record) mutLog.push({ tx: "commit" });
+        if (record) {
+          mutLog.push({ tx: "commit" });
+          if (replicaEnabled) replicaOutbox.push({ tx: "commit" });
+        }
         return result;
       } catch (e) {
         sdb.run("ROLLBACK");
-        if (record) mutLog.splice(start);
+        if (record) {
+          mutLog.splice(start);
+          if (replicaEnabled) replicaOutbox.splice(outStart);
+        }
         throw e;
       }
     },
@@ -553,10 +670,13 @@ function validSnapshot(
 
 /** Replay into a disposable candidate. Unexpected failures abort replacement
  * and persistence, retaining the complete original live state and journal. */
-function replayMutations(sdb: SqlJsDatabase): void {
+function replayMutations(
+  sdb: SqlJsDatabase,
+  recs: readonly MutRec[] = mutLog,
+): void {
   // The candidate database is disposable until EVERY pending mutation has
   // replayed. Failure must retain both the old live database and its journal.
-  for (const rec of mutLog) {
+  for (const rec of recs) {
     if ("tx" in rec) {
       sdb.run(
         rec.tx === "begin"
@@ -590,7 +710,7 @@ function replayStatement(
       .split(" WHERE ")[0]
       .split(", ")
       .map((c) => c.split(" = ")[0].replaceAll('"', ""));
-    const clocks = JSON.parse(String(rec.params[columns.indexOf("clocks")]));
+    const clocks = decodeClocks(String(rec.params[columns.indexOf("clocks")]));
     const itemId = String(rec.params.at(-1));
     for (let i = 0; i < columns.length; i++) {
       const field = columns[i];
@@ -618,6 +738,188 @@ function replayStatement(
   sdb.run(rec.sql, rec.params as never);
 }
 
+/** Redo one journal entry on the exact state it was recorded against. The entry
+ *  is wrapped in a savepoint (its own transaction markers become nested
+ *  savepoints), so a failure leaves `sdb` exactly as before the entry. Unlike
+ *  `replayMutations` (merge onto a *different* base, skipping what no longer
+ *  applies) nothing is skipped: any failure means the chain is broken. */
+function applyJournalEntry(sdb: SqlJsDatabase, recs: readonly MutRec[]): void {
+  sdb.run("SAVEPOINT carbon_journal");
+  try {
+    for (const rec of recs) {
+      if ("tx" in rec) {
+        if (rec.tx === "begin") sdb.run("SAVEPOINT carbon_journal_tx");
+        else if (rec.tx === "commit") sdb.run("RELEASE carbon_journal_tx");
+        else {
+          sdb.run("ROLLBACK TO carbon_journal_tx");
+          sdb.run("RELEASE carbon_journal_tx");
+        }
+      } else if (rec.exec) sdb.exec(rec.sql);
+      else sdb.run(rec.sql, rec.params as never);
+    }
+    sdb.run("RELEASE carbon_journal");
+  } catch (e) {
+    sdb.run("ROLLBACK TO carbon_journal");
+    sdb.run("RELEASE carbon_journal");
+    throw e;
+  }
+}
+
+/** Approximate stored size of a captured mutation prefix. */
+function recsBytes(recs: readonly MutRec[]): number {
+  let n = 0;
+  for (const r of recs) n += "tx" in r ? 8 : r.sql.length + JSON.stringify(r.params).length;
+  return n;
+}
+
+/**
+ * Bring `sdb` (loaded from the snapshot at generation `snapGen`) up to the
+ * journal head. Returns the generation reached and whether the result is an
+ * exact redo (`exact: false` means the next persist must write a snapshot).
+ *
+ * - Chain intact (`head.base === snapGen`): entries are redone verbatim; a broken
+ *   entry stops the chain there (logged; later entries are unusable).
+ * - Orphaned chain (an older build rewrote the snapshot without knowing about the
+ *   journal, or the snapshot was recovered from history): the entries are merged
+ *   onto it with the same lenient replay a tab uses for its unflushed edits.
+ */
+async function applyStoredJournal(
+  sdb: SqlJsDatabase,
+  snapGen: number,
+  n?: string,
+): Promise<{ gen: number; exact: boolean }> {
+  const head = (await kv().get(headKey(n))) as JournalHead | null;
+  if (!head || head.gen <= snapGen && head.base === snapGen)
+    return { gen: Math.max(snapGen, head?.gen ?? 0), exact: true };
+  const exactChain = head.base === snapGen;
+  let gen = snapGen;
+  for (let g = head.base + 1; g <= head.gen; g++) {
+    const entry = (await kv().get(journalKey(g, n))) as JournalEntry | null;
+    if (!entry || !Array.isArray(entry.recs)) {
+      console.error(`[carbon] journal entry ${g} missing; stopping replay`);
+      return { gen: Math.max(gen, head.gen), exact: false };
+    }
+    try {
+      if (exactChain) applyJournalEntry(sdb, entry.recs);
+      else replayMutations(sdb, entry.recs);
+    } catch (e) {
+      console.error(`[carbon] journal entry ${g} failed to apply:`, e);
+      return { gen: Math.max(gen, head.gen), exact: false };
+    }
+    gen = g;
+  }
+  return { gen: Math.max(gen, head.gen), exact: exactChain };
+}
+
+/** Open a namespace's full durable state (snapshot + journal) as a throwaway
+ *  database. Null when nothing valid is stored. */
+async function openStoreState(
+  n?: string,
+): Promise<{ sdb: SqlJsDatabase; gen: number; exact: boolean; snapGen: number } | null> {
+  const SQL = await getSql();
+  const cur = (await kv().get(dbKey(n))) as SnapRec | null;
+  if (!cur) return null;
+  const sdb = tryOpenSnapshot(SQL, cur.snap);
+  if (!sdb) return null;
+  try {
+    const { gen, exact } = await applyStoredJournal(sdb, cur.gen, n);
+    return { sdb, gen, exact, snapGen: cur.gen };
+  } catch (e) {
+    sdb.close();
+    throw e;
+  }
+}
+
+/** Every journal key a namespace's head covers (for deletion). */
+function journalKeysOf(head: JournalHead | null, n?: string): string[] {
+  if (!head) return [];
+  const keys: string[] = [];
+  for (let g = head.base + 1; g <= head.gen; g++) keys.push(journalKey(g, n));
+  return keys;
+}
+
+/** True once the live state is no longer "base + journal + mutLog redone
+ *  verbatim" (a merge replay or recovery happened): the next persist must write
+ *  a full snapshot instead of a journal entry. */
+let mustSnapshot = false;
+/** The live namespace's journal size since its base snapshot (mirrors head). */
+let journalN = 0;
+let journalBytes = 0;
+let idleCompactTimer: ReturnType<typeof setTimeout> | null = null;
+function resetJournalState(): void {
+  mustSnapshot = false;
+  journalN = 0;
+  journalBytes = 0;
+  if (idleCompactTimer) clearTimeout(idleCompactTimer);
+  idleCompactTimer = null;
+}
+
+/**
+ * Bring the live DB up to the store (another tab committed first) and replay
+ * this tab's unflushed mutations on top. With no unflushed work and an intact
+ * chain, the missing journal entries are applied to the live DB in place —
+ * cheap, and the live statement cache survives. Otherwise the full store state
+ * is loaded and the unflushed work merged onto it (`resyncFromStore`'s model).
+ */
+async function resyncToStore(): Promise<void> {
+  const head = (await kv().get(headKey())) as JournalHead | null;
+  if (sqlDb && head && !mutLog.length && head.base <= baseGen && head.gen > baseGen) {
+    try {
+      for (let g = baseGen + 1; g <= head.gen; g++) {
+        const entry = (await kv().get(journalKey(g))) as JournalEntry | null;
+        if (!entry) throw new Error(`journal entry ${g} missing`);
+        applyJournalEntry(sqlDb, entry.recs);
+        if (replicaEnabled) replicaOutbox.push(...entry.recs);
+        baseGen = g;
+      }
+      journalN = head.n;
+      journalBytes = head.bytes;
+      void import("./store")
+        .then((m) => m.useStore.getState().bump())
+        .catch(() => {});
+      return;
+    } catch (e) {
+      console.warn("[carbon] incremental catch-up failed; reloading store:", e);
+    }
+  }
+  const state = await openStoreState();
+  if (!state) return;
+  try {
+    replayMutations(state.sdb);
+  } catch (e) {
+    state.sdb.close();
+    throw new Error(
+      "Pending local edits could not be replayed; original data retained",
+      { cause: e },
+    );
+  }
+  swapLive(state.sdb, state.gen);
+  // Pending edits were merged onto a different base (or the store itself needed
+  // a lenient merge): no verbatim journal reproduces this state.
+  if (mutLog.length || !state.exact) mustSnapshot = true;
+  journalN = head?.n ?? 0;
+  journalBytes = head?.bytes ?? 0;
+}
+
+/** Replace the live DB handle and re-render. */
+function swapLive(fresh: SqlJsDatabase, gen: number): void {
+  markReplicaStale();
+  sqlDb?.close();
+  sqlDb = fresh;
+  const wrapped = wrap(sqlDb, true);
+  dbInstance = wrapped.db;
+  clearLiveStmtCache = wrapped.clearCache;
+  baseGen = gen;
+  // Re-render the UI from the new state. The store is imported lazily: it
+  // reads localStorage at module load, and db.ts must stay importable without
+  // a DOM (see dbRevision's header comment for why the counter lives apart).
+  void import("./store")
+    .then((m) => m.useStore.getState().bump())
+    .catch(() => {
+      /* store unavailable (e.g. mid-test) — the next mutation bumps anyway */
+    });
+}
+
 /**
  * Replace the live in-memory DB with `snap` (a store snapshot at generation
  * `gen`) and replay this tab's unflushed mutations on top. Called when another
@@ -638,20 +940,10 @@ async function resyncFromStore(snap: Uint8Array, gen: number): Promise<void> {
       { cause: e },
     );
   }
-  sqlDb?.close();
-  sqlDb = fresh;
-  const wrapped = wrap(sqlDb, true);
-  dbInstance = wrapped.db;
-  clearLiveStmtCache = wrapped.clearCache;
-  baseGen = gen;
-  // Re-render the UI from the new state. The store is imported lazily: it
-  // reads localStorage at module load, and db.ts must stay importable without
-  // a DOM (see dbRevision's header comment for why the counter lives apart).
-  void import("./store")
-    .then((m) => m.useStore.getState().bump())
-    .catch(() => {
-      /* store unavailable (e.g. mid-test) — the next mutation bumps anyway */
-    });
+  swapLive(fresh, gen);
+  // The live state is now `snap` + merged edits — not a verbatim redo of any
+  // stored journal — so the next persist writes a snapshot.
+  if (mutLog.length) mustSnapshot = true;
 }
 
 export function initDb(): Promise<{ db: Db; deviceId: string }> {
@@ -736,10 +1028,26 @@ async function initDbImpl(): Promise<{ db: Db; deviceId: string }> {
     }
   }
   if (sql) {
-    baseGen = loadedGen;
+    sql.run("PRAGMA foreign_keys = OFF");
+    // Redo the journal on top of the snapshot. A snapshot recovered from history
+    // is not the base the journal was recorded against, so that chain is merged
+    // leniently instead (applyStoredJournal), and either way an inexact result is
+    // re-based by writing a snapshot on the boot persist below.
+    const recovered = loadedGen !== cur?.gen;
+    const head = (await kv().get(headKey())) as JournalHead | null;
+    const applied = await applyStoredJournal(
+      sql,
+      recovered ? -1 : loadedGen,
+    );
+    // A recovered snapshot is not what the store's main record (or any journal)
+    // says it is: re-base on the boot persist.
+    if (recovered) mustSnapshot = true;
+    if (!applied.exact) mustSnapshot = true;
+    journalN = head?.n ?? 0;
+    journalBytes = head?.bytes ?? 0;
+    baseGen = Math.max(applied.gen, loadedGen);
 
     sqlDb = sql;
-    sqlDb.run("PRAGMA foreign_keys = OFF");
   } else {
     if (hadStoredData)
       throw new Error(
@@ -751,7 +1059,14 @@ async function initDbImpl(): Promise<{ db: Db; deviceId: string }> {
   const wrapped = wrap(sqlDb, true);
   dbInstance = wrapped.db;
   clearLiveStmtCache = wrapped.clearCache;
-  migrate(dbInstance);
+  markReplicaStale(); // a (re)boot replaces the live DB
+  const migrated = migrate(dbInstance);
+  // A schema upgrade can rewrite many rows (v27 re-encodes every item's clocks):
+  // land it as a fresh, vacuumed snapshot rather than a large journal entry.
+  if (migrated.from > 0 && migrated.to > migrated.from) {
+    mustSnapshot = true;
+    vacuumNext = true;
+  }
   deviceId = ensureDeviceId(dbInstance);
   // One-time: emit record-ops for tags/links created before they were syncable.
   if (getMeta("tags_backfilled") !== "1") {
@@ -772,6 +1087,8 @@ async function initDbImpl(): Promise<{ db: Db; deviceId: string }> {
   // while booting) makes us resync before our first write.
   openPeerChannel();
   postMsg({ t: "hello", tab: tabId });
+  // Make any tab of this namespace still running a pre-journal build reload.
+  postMsg({ t: "rebind", fmt: JOURNAL_FORMAT, tab: tabId });
   return { db: dbInstance, deviceId };
 }
 
@@ -806,6 +1123,7 @@ export function resetDbForTest(): void {
   dbInstance = null;
   mutLog = [];
   baseGen = 0;
+  resetJournalState();
   boundNs = null;
   wipeEpoch = undefined;
   activeLock = null;
@@ -931,10 +1249,12 @@ function getPersistWorker(): Worker {
 
 /** Write generation `nextGen`'s snapshot to IndexedDB off the main thread via
  *  a transferable (zero-copy) postMessage. Only for the routine debounced path
- *  — see `landDirect` for the must-land-before-unload path. */
+ *  — see `landDirect` for the must-land-before-unload path. The same transaction
+ *  resets the journal head to the new snapshot and drops the entries it covers. */
 function writeSnapshotViaWorker(
   snap: Uint8Array,
   nextGen: number,
+  dropKeys: string[],
 ): Promise<void> {
   const id = ++persistReqId;
   return new Promise((resolve, reject) => {
@@ -946,6 +1266,9 @@ function writeSnapshotViaWorker(
           key: dbKey(),
           logKey: logKey(),
           lockKey: lockKey(),
+          headKey: headKey(),
+          head: snapshotHead(nextGen),
+          dropKeys,
           token: activeLock?.token,
           gen: nextGen,
           snap,
@@ -963,39 +1286,117 @@ function logBytes(log: SnapRec[]): number {
   return log.reduce((n, e) => n + e.snap.byteLength, 0);
 }
 
+/** The head after a snapshot at `gen`: no journal entries on top of it. */
+function snapshotHead(gen: number): JournalHead {
+  return { gen, base: gen, writer: activeLock?.token, n: 0, bytes: 0 };
+}
+
+/** Inside a commit transaction: the lease must still be ours and the store must
+ *  still be below the generation we are about to write. */
+async function assertWriter(tx: KvTx, nextGen: number): Promise<JournalHead | null> {
+  const held = (await tx.get(lockKey())) as LockVal | null;
+  const head = (await tx.get(headKey())) as JournalHead | null;
+  const gen =
+    head?.gen ??
+    ((await tx.get(dbKey())) as SnapRec | null)?.gen ??
+    -1;
+  if (
+    !activeLock ||
+    held?.token !== activeLock.token ||
+    Date.now() - held.ts > LOCK_TTL_MS ||
+    gen >= nextGen
+  )
+    throw new Error("Stale persistence writer rejected");
+  return head;
+}
+
 /** Land `snap` as generation `nextGen` directly on the main thread: the main
- *  record and its snapshot-log entry go in ONE transaction, so a crash or
- *  storage failure can leave at most a MISSING write, never a torn one. Used
- *  by `flushPersist()` (a page about to unload can't reliably wait on a worker
- *  round trip) and as the worker's fallback. */
+ *  record, its snapshot-log entry and the reset journal head go in ONE
+ *  transaction (which also drops the journal entries the snapshot covers), so a
+ *  crash or storage failure can leave at most a MISSING write, never a torn one.
+ *  Used by `flushPersist()` (a page about to unload can't reliably wait on a
+ *  worker round trip), imports, and as the worker's fallback. */
 async function landDirect(snap: Uint8Array, nextGen: number): Promise<void> {
   await kv().transaction(async (tx) => {
-    const held = (await tx.get(lockKey())) as LockVal | null;
-    const cur = (await tx.get(dbKey())) as SnapRec | null;
-    if (
-      !activeLock ||
-      held?.token !== activeLock.token ||
-      Date.now() - held.ts > LOCK_TTL_MS ||
-      (cur?.gen ?? -1) >= nextGen
-    )
-      throw new Error("Stale persistence writer rejected");
-    return tx.get(logKey()).then((oldLog) => {
-      const old = Array.isArray(oldLog) ? (oldLog as SnapRec[]) : [];
-      let log = [{ gen: nextGen, snap }, ...old].slice(0, MAX_LOG);
-      // Cap by total bytes as well so a huge workspace can't blow out storage.
-      while (log.length && logBytes(log) > LOG_MAX_BYTES) log.pop();
-      return tx
-        .put(logKey(), log)
-        .then(() =>
-          tx.put(dbKey(), { gen: nextGen, snap, writer: activeLock!.token }),
-        );
-    });
+    const head = await assertWriter(tx, nextGen);
+    const oldLog = await tx.get(logKey());
+    const old = Array.isArray(oldLog) ? (oldLog as SnapRec[]) : [];
+    let log = [{ gen: nextGen, snap }, ...old].slice(0, MAX_LOG);
+    // Cap by total bytes as well so a huge workspace can't blow out storage.
+    while (log.length && logBytes(log) > LOG_MAX_BYTES) log.pop();
+    await tx.put(logKey(), log);
+    await tx.put(dbKey(), { gen: nextGen, snap, writer: activeLock!.token });
+    for (const key of journalKeysOf(head)) await tx.del(key);
+    await tx.put(headKey(), snapshotHead(nextGen));
   });
+}
+
+/** Append `recs` as journal entry `nextGen` on top of `head` (one transaction). */
+async function landJournal(
+  recs: MutRec[],
+  bytes: number,
+  nextGen: number,
+): Promise<JournalHead> {
+  let next!: JournalHead;
+  await kv().transaction(async (tx) => {
+    const head = await assertWriter(tx, nextGen);
+    // No head = a store written by a build before the journal; the snapshot's
+    // generation is the base. Callers never journal without a snapshot.
+    const base =
+      head?.base ?? ((await tx.get(dbKey())) as SnapRec | null)?.gen ?? 0;
+    const entry: JournalEntry = { gen: nextGen, recs };
+    await tx.put(journalKey(nextGen), entry);
+    next = {
+      gen: nextGen,
+      base,
+      writer: activeLock!.token,
+      n: (head?.n ?? 0) + 1,
+      bytes: (head?.bytes ?? 0) + bytes,
+    };
+    await tx.put(headKey(), next);
+  });
+  return next;
+}
+
+function scheduleIdleCompaction(): void {
+  if (idleCompactTimer) clearTimeout(idleCompactTimer);
+  idleCompactTimer = null;
+  if (journalN < JOURNAL_IDLE_MIN_ENTRIES) return;
+  idleCompactTimer = setTimeout(() => {
+    idleCompactTimer = null;
+    serialize(() => persistImpl(false, undefined, true)).catch((e) =>
+      console.warn("[carbon] idle compaction failed:", e),
+    );
+  }, JOURNAL_IDLE_COMPACT_MS);
+}
+
+/** Compaction exports the whole file, free and half-empty pages included. Rows
+ *  that shrink in place (the v27 clock re-encoding: 58 MB -> 20 MB on the 10k
+ *  seed) leave pages underfilled rather than freed, so scans and every snapshot
+ *  keep paying for the old size. Rebuild the file after a schema upgrade, or
+ *  whenever a quarter of it is free. Runs on the raw handle, outside capture: it
+ *  changes no rows, so the journal and the read replica are unaffected. */
+let vacuumNext = false;
+function vacuumIfSparse(sdb: SqlJsDatabase): void {
+  try {
+    const n = (sql: string) => Number(sdb.exec(sql)[0]?.values[0]?.[0] ?? 0);
+    if (!vacuumNext) {
+      const free = n("PRAGMA freelist_count");
+      if (free < 256 || free * 4 < n("PRAGMA page_count")) return;
+    }
+    const t0 = performance.now();
+    sdb.run("VACUUM");
+    perf.record("persist", "vacuum", performance.now() - t0);
+  } catch (e) {
+    console.warn("[carbon] vacuum skipped:", e);
+  }
+  vacuumNext = false;
 }
 
 async function persistImpl(
   direct: boolean,
   lockWaitMs?: number,
+  compact = false,
 ): Promise<void> {
   if (!sqlDb) return;
 
@@ -1003,50 +1404,71 @@ async function persistImpl(
     throw new Error("Persist lock busy; pending work retained");
   try {
     await assertNotWiped();
-    // Generation check (the heart of the fix): if the store's current snapshot
-    // is from a generation AHEAD of this tab's base, another tab committed
-    // first. Resync — load their snapshot and replay this tab's unflushed
-    // mutations on top — so a stale tab's older state can never be written
-    // back over newer committed work.
-    let gen = baseGen;
-    const cur = (await kv().get(dbKey())) as SnapRec | null;
-    if (cur && cur.gen > gen && validSnapshot(await getSql(), cur.snap)) {
-      gen = cur.gen;
-      await resyncFromStore(cur.snap, cur.gen);
-    }
+    // Generation check (the heart of the fix): if the store is at a generation
+    // AHEAD of this tab's base, another tab committed first. Resync — bring the
+    // live DB up to the store and replay this tab's unflushed mutations on top —
+    // so a stale tab's older state can never be written back over newer work.
+    const gen = await storeGen();
+    if (gen > baseGen) await resyncToStore();
+    const hasSnapshot = !!(await kv().get(headKey())) || gen > 0;
 
-    const nextGen = Math.max(gen, cur?.gen ?? 0) + 1;
-    const t0 = performance.now();
+    const nextGen = Math.max(baseGen, gen) + 1;
     let writtenCount = mutLog.length;
-    const data = sqlDb.export();
-    clearLiveStmtCache(); // export() finalized every prepared statement
-    perf.record("persist", "export", performance.now() - t0);
-    const t1 = performance.now();
+    const recs = mutLog.slice(0, writtenCount);
+    const bytes = recsBytes(recs);
+    const snapshot =
+      compact ||
+      mustSnapshot ||
+      !hasSnapshot ||
+      bytes > JOURNAL_MAX_ENTRY_BYTES ||
+      journalN + 1 > JOURNAL_MAX_ENTRIES ||
+      journalBytes + bytes > JOURNAL_MAX_BYTES;
 
-    if (direct || directRequests || persistWorkerBroken) {
-      await landDirect(data, nextGen);
+    if (!snapshot && !recs.length) return; // nothing new to make durable
+    if (!snapshot) {
+      const t0 = performance.now();
+      const head = await landJournal(recs, bytes, nextGen);
+      perf.record("persist", "journal", performance.now() - t0);
+      journalN = head.n;
+      journalBytes = head.bytes;
     } else {
-      try {
-        await writeSnapshotViaWorker(data, nextGen);
-      } catch (e) {
-        // The worker (or its write) failed. The snapshot buffer was transferred
-        // and lost with the message, so re-export (cheap, ~1ms) and land the
-        // write on the main thread rather than dropping it.
-        console.error(
-          "[carbon] persist worker write failed; writing directly:",
-          e,
-        );
-        if (!sqlDb) return;
-        const receipt = (await kv().get(dbKey())) as SnapRec | null;
-        if (receipt?.gen !== nextGen || receipt.writer !== activeLock?.token) {
-          writtenCount = mutLog.length;
-          const retry = sqlDb.export();
-          clearLiveStmtCache();
-          await landDirect(retry, nextGen);
-        } // A committed worker whose acknowledgement was lost already landed the original prefix.
+      const head = (await kv().get(headKey())) as JournalHead | null;
+      const dropKeys = journalKeysOf(head);
+      const t0 = performance.now();
+      vacuumIfSparse(sqlDb);
+      const data = sqlDb.export();
+      clearLiveStmtCache(); // export() finalized every prepared statement
+      perf.record("persist", "export", performance.now() - t0);
+      const t1 = performance.now();
+
+      if (direct || directRequests || persistWorkerBroken) {
+        await landDirect(data, nextGen);
+      } else {
+        try {
+          await writeSnapshotViaWorker(data, nextGen, dropKeys);
+        } catch (e) {
+          // The worker (or its write) failed. The snapshot buffer was transferred
+          // and lost with the message, so re-export (cheap, ~1ms) and land the
+          // write on the main thread rather than dropping it.
+          console.error(
+            "[carbon] persist worker write failed; writing directly:",
+            e,
+          );
+          if (!sqlDb) return;
+          const receipt = (await kv().get(headKey())) as JournalHead | null;
+          if (receipt?.gen !== nextGen || receipt.writer !== activeLock?.token) {
+            writtenCount = mutLog.length;
+            const retry = sqlDb.export();
+            clearLiveStmtCache();
+            await landDirect(retry, nextGen);
+          } // A committed worker whose acknowledgement was lost already landed the original prefix.
+        }
       }
+      perf.record("persist", "idb", performance.now() - t1);
+      mustSnapshot = false;
+      journalN = 0;
+      journalBytes = 0;
     }
-    perf.record("persist", "idb", performance.now() - t1);
 
     baseGen = nextGen;
     mutLog.splice(0, writtenCount); // Edits made while awaiting IDB remain pending.
@@ -1055,6 +1477,7 @@ async function persistImpl(
   } finally {
     await releaseLock();
   }
+  scheduleIdleCompaction();
 }
 
 export async function persist(): Promise<void> {
@@ -1104,6 +1527,10 @@ let rebindPromise: Promise<void> | null = null;
  * `rebindIdentity`).
  */
 function cancelInFlightWrites(): void {
+  if (idleCompactTimer) {
+    clearTimeout(idleCompactTimer);
+    idleCompactTimer = null;
+  }
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -1142,6 +1569,7 @@ async function doRebind(next: string, flushOld = true): Promise<void> {
   dbInstance = null;
   mutLog = [];
   baseGen = 0;
+  resetJournalState();
   // 5. Boot the new identity (binds, loads its store, reopens the channel).
   await initDbImpl();
   // 6. Re-read the new identity's namespaced settings + user into the UI.
@@ -1245,11 +1673,11 @@ export async function importDb(bytes: Uint8Array): Promise<void> {
       throw new Error("Import rejected: another tab is persisting");
     try {
       await assertNotWiped();
-      const cur = (await kv().get(dbKey())) as SnapRec | null;
-      const nextGen = Math.max(baseGen, cur?.gen ?? 0) + 1;
+      const nextGen = Math.max(baseGen, await storeGen()) + 1;
       await landDirect(bytes, nextGen);
       baseGen = nextGen;
       mutLog = [];
+      resetJournalState();
       await resyncFromStore(bytes, nextGen);
       postMsg({ t: "persisted", gen: nextGen, tab: tabId });
     } finally {
@@ -1268,8 +1696,8 @@ export async function commitImport(apply: (db: Db) => void, expectedIdentity: st
     try {
       await assertNotWiped();
       const SQL = await getSql();
-      const cur = (await kv().get(dbKey())) as SnapRec | null;
-      if (cur && cur.gen > baseGen) await resyncFromStore(cur.snap, cur.gen);
+      const gen = await storeGen();
+      if (gen > baseGen) await resyncToStore();
       if (!sqlDb) throw new Error("Import cancelled: database closed");
       const bytes = sqlDb.export();
       clearLiveStmtCache();
@@ -1282,10 +1710,11 @@ export async function commitImport(apply: (db: Db) => void, expectedIdentity: st
         merged = staged.export();
       } finally { staged.close(); }
       const writtenCount = mutLog.length;
-      const nextGen = Math.max(baseGen, cur?.gen ?? 0) + 1;
+      const nextGen = Math.max(baseGen, gen) + 1;
       if (identityKey() !== expectedIdentity) throw new Error("Import cancelled: workspace changed");
       await landDirect(merged, nextGen);
       mutLog.splice(0, writtenCount);
+      resetJournalState();
       await resyncFromStore(merged, nextGen);
       postMsg({ t: "persisted", gen: nextGen, tab: tabId });
     } finally { await releaseLock(); }
@@ -1327,10 +1756,9 @@ const LOCAL_NS = "local|local";
  *  work is namespaced under local|local, a *separate* store from the signed-in
  *  identity's — so the live DB count (localItemCount) wouldn't see it. */
 export async function localNamespaceItemCount(): Promise<number> {
-  const saved = (await kv().get(dbKey(LOCAL_NS))) as SnapRec | null;
-  if (!saved) return 0;
-  const sdb = tryOpenSnapshot(await getSql(), saved.snap);
-  if (!sdb) return 0;
+  const state = await openStoreState(LOCAL_NS).catch(() => null);
+  if (!state) return 0;
+  const sdb = state.sdb;
   const res = sdb.exec("SELECT COUNT(*) FROM items WHERE deleted = 0");
   sdb.close();
   return (res[0]?.values?.[0]?.[0] as number) ?? 0;
@@ -1350,10 +1778,9 @@ export async function mergeLocalCapture(userId: string): Promise<number> {
   const destination = getBoundIdentity();
   if (!destination || destination === LOCAL_NS)
     throw new Error("Sign in before merging local capture");
-  const saved = (await kv().get(dbKey(LOCAL_NS))) as SnapRec | null;
+  const saved = await openStoreState(LOCAL_NS);
   if (!saved) return 0;
-  const sdb = tryOpenSnapshot(await getSql(), saved.snap);
-  if (!sdb) return 0;
+  const sdb = saved.sdb;
 
   const db = getDb();
   const deviceId = getDeviceId();
@@ -1420,14 +1847,19 @@ async function eraseNamespace(
   expectedGen?: number,
 ): Promise<void> {
   await kv().transaction(async (tx) => {
-    const current = (await tx.get(dbKey(namespace))) as SnapRec | null;
-    if (expectedGen !== undefined && current?.gen !== expectedGen) return;
+    const head = (await tx.get(headKey(namespace))) as JournalHead | null;
+    const current = head
+      ? head.gen
+      : ((await tx.get(dbKey(namespace))) as SnapRec | null)?.gen;
+    if (expectedGen !== undefined && current !== expectedGen) return;
     // Revocation and deletion are atomic. Even a sleeping peer missing the
     // broadcast must check this epoch before writing its old in-memory state.
     await tx.put(wipeKey(namespace), `${tabId}:${++lockSerial}`);
     await tx.del(dbKey(namespace));
     await tx.del(logKey(namespace));
     await tx.del(lockKey(namespace));
+    for (const key of journalKeysOf(head, namespace)) await tx.del(key);
+    await tx.del(headKey(namespace));
   });
 }
 
@@ -1441,6 +1873,23 @@ export async function openSnapshot(bytes: Uint8Array): Promise<Db & { close(): v
   return Object.assign(wrapped.db, { close() { wrapped.clearCache(); sdb.close(); } });
 }
 
+/** The full durable state (snapshot + journal) of a namespace as a throwaway
+ *  database, or null when nothing is stored. Tests and diagnostics. */
+export async function loadStoreState(
+  namespace?: string,
+): Promise<(Db & { gen: number; close(): void }) | null> {
+  const state = await openStoreState(namespace);
+  if (!state) return null;
+  const wrapped = wrap(state.sdb);
+  return Object.assign(wrapped.db, {
+    gen: state.gen,
+    close() {
+      wrapped.clearCache();
+      state.sdb.close();
+    },
+  });
+}
+
 /**
  * Open a read-only snapshot of the persisted database straight from IndexedDB,
  * without initializing the live DB. Returns null when nothing has been persisted
@@ -1448,11 +1897,9 @@ export async function openSnapshot(bytes: Uint8Array): Promise<Db & { close(): v
  * while leaving all writes to the main window (the single DB owner).
  */
 export async function loadSnapshot(): Promise<Db | null> {
-  const saved = (await kv().get(dbKey())) as SnapRec | null;
-  if (!saved) return null;
-  const opened = tryOpenSnapshot(await getSql(), saved.snap);
-  if (!opened) return null;
-  return wrap(opened).db;
+  const state = await openStoreState().catch(() => null);
+  if (!state) return null;
+  return wrap(state.sdb).db;
 }
 
 // ----- meta key/value helpers ----------------------------------------------

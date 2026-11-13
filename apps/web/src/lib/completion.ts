@@ -1,4 +1,7 @@
 import { useStore } from './store';
+import { pendingHideIds, setPendingHideIds } from './completionHold';
+
+export { pendingHideIds };
 
 // Global grace before just-completed tasks hide from not-completed views. The
 // timer is GLOBAL and resets on every completion, so ticking several tasks in a
@@ -7,18 +10,12 @@ import { useStore } from './store';
 
 export const COMPLETE_GRACE_MS = 2500;
 
-let pending = new Set<string>();
 let timer: ReturnType<typeof setTimeout> | null = null;
-
-/** Ids of completed tasks currently held visible during the grace window. */
-export function pendingHideIds(): Set<string> {
-  return pending;
-}
 
 function resetTimer(): void {
   if (timer) clearTimeout(timer);
   timer = setTimeout(() => {
-    pending = new Set();
+    setPendingHideIds([]);
     timer = null;
     useStore.getState().bump(); // re-render so the held tasks now hide
   }, COMPLETE_GRACE_MS);
@@ -26,11 +23,11 @@ function resetTimer(): void {
 
 /** Mark a task just-completed: hold it visible and (re)arm the global hide timer. */
 export function holdCompleted(id: string): void {
-  pending.add(id);
+  pendingHideIds().add(id);
   resetTimer();
 }
 
 /** A task was un-completed before it hid — stop holding it. */
 export function releaseCompleted(id: string): void {
-  pending.delete(id);
+  pendingHideIds().delete(id);
 }

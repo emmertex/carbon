@@ -3,6 +3,7 @@ import { test, before, after } from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { decodeClocks } from "@carbon/core";
 import {
   chromium,
   type Browser,
@@ -134,8 +135,8 @@ test("real IDB tabs preserve field clocks through concurrent commits, reload, an
     assert.equal(row.title, "A title");
     assert.equal(row.note, "B latest");
     assert.equal(row.flagged, 1);
-    assert.equal(JSON.parse(row.clocks).title.dev, "a");
-    assert.equal(JSON.parse(row.clocks).note.dev, "b");
+    assert.equal(decodeClocks(row.clocks).title.dev, "a");
+    assert.equal(decodeClocks(row.clocks).note.dev, "b");
     await a.evaluate(() => (window as any).a3.db.wipeLocalDb());
     await c.reload();
     await c.waitForFunction(() => !!(window as any).a3);
@@ -269,6 +270,11 @@ test("flush terminates a worker that never answers and lands directly without a 
       const { db } = (window as any).a3;
       // Reset terminates the boot worker. A hung worker is then installed before boot.
       db.resetDbForTest();
+      // An already-current store has nothing to write at boot (journal format);
+      // start empty so the boot persist must write a snapshot through the worker.
+      const seam = db.makeIdbSeam();
+      for (const k of ["db|local|local", "dblog|local|local", "dbjhead|local|local"])
+        await seam.del(k);
       (window as any).Worker = class {
         onmessage: unknown;
         onerror: unknown;
@@ -432,6 +438,8 @@ test("production worker fences stale leases, caps history at 64 MB, and closes i
       const snap = new Uint8Array(34 * 1024 * 1024);
       await seam.put("db|worker", { gen: 0, snap });
       await seam.put("dblog|worker", [{ gen: 0, snap }]);
+      await seam.put("dbjhead|worker", { gen: 0, base: 0, n: 0, bytes: 0 });
+      await seam.put("dbj|worker|0", { gen: 0, recs: [] });
       await seam.put("lock|worker", {
         owner: "test",
         token: "current",
@@ -446,6 +454,9 @@ test("production worker fences stale leases, caps history at 64 MB, and closes i
             key: "db|worker",
             logKey: "dblog|worker",
             lockKey: "lock|worker",
+            headKey: "dbjhead|worker",
+            head: { gen, base: gen, writer: token, n: 0, bytes: 0 },
+            dropKeys: ["dbj|worker|0"],
             token,
             gen,
             snap,
@@ -455,6 +466,8 @@ test("production worker fences stale leases, caps history at 64 MB, and closes i
       const stale = await send("expired-token", 2);
       const history = await seam.get("dblog|worker");
       const current = await seam.get("db|worker");
+      const head = await seam.get("dbjhead|worker");
+      const dropped = (await seam.get("dbj|worker|0")) === undefined;
       // A leaked worker connection would block deletion even though the seam
       // closes its own connection via onversionchange.
       const closed = await new Promise<boolean>((resolve, reject) => {
@@ -468,6 +481,8 @@ test("production worker fences stale leases, caps history at 64 MB, and closes i
         first: first.ok,
         stale: stale.ok,
         gen: current.gen,
+        headGen: head.gen,
+        dropped,
         bytes: history.reduce((n: number, e: any) => n + e.snap.byteLength, 0),
         closed,
       };
@@ -475,6 +490,8 @@ test("production worker fences stale leases, caps history at 64 MB, and closes i
     assert.equal(result.first, true);
     assert.equal(result.stale, false);
     assert.equal(result.gen, 1);
+    assert.equal(result.headGen, 1, "the snapshot resets the journal head");
+    assert.equal(result.dropped, true, "covered journal entries are deleted");
     assert.ok(result.bytes <= 64 * 1024 * 1024);
     assert.equal(result.closed, true);
   } finally {

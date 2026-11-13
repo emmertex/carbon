@@ -1,4 +1,10 @@
-import { useDeferredValue, useMemo } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { localQuery, replicaAvailable, replicaQuery } from '@/lib/replica';
+import type {
+  SidebarQueryArgs,
+  SidebarQueryName,
+  SidebarQueryResult,
+} from '@/lib/sidebarQueries';
 import type { Db } from '@carbon/core';
 import { getDb } from '@/lib/db';
 import { useStore } from '@/lib/store';
@@ -55,4 +61,57 @@ export function useDeferredQuery<T>(
     return perfLabel ? perf.time('query', perfLabel, () => fn(db)) : fn(db);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, deferredRev, ...deps]);
+}
+
+/**
+ * A sidebar read-out (lib/sidebarQueries.ts) computed in the read-replica worker,
+ * so its cost never blocks input (docs/internal/worker-db-plan.md, phase 2).
+ *
+ * The first value is computed synchronously on the main thread (no empty sidebar
+ * on first paint). After that, every DB revision (or `deps` change) posts the
+ * query to the replica and keeps showing the previous value until the answer
+ * arrives; answers for superseded requests are dropped. If the replica is
+ * unavailable the query runs on the main thread instead, as before.
+ */
+export function useReplicaQuery<N extends SidebarQueryName>(
+  name: N,
+  args: SidebarQueryArgs<N>,
+  deps: unknown[] = [],
+): SidebarQueryResult<N> | null {
+  const rev = useStore((s) => s.dbRevision);
+  const ready = useStore((s) => s.ready);
+  const [state, setState] = useState<{ value: SidebarQueryResult<N> } | null>(null);
+  const latest = useRef(0);
+  // First paint: compute inline, exactly like useQuery did.
+  const initial = useMemo(
+    () => (ready && !state ? { value: localQuery(name, args) } : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ready],
+  );
+  useEffect(() => {
+    if (!ready) return;
+    const ticket = ++latest.current;
+    let cancelled = false;
+    const local = () => {
+      if (cancelled || ticket !== latest.current) return;
+      setState({ value: perf.time('query', `local:${name}`, () => localQuery(name, args)) });
+    };
+    if (!replicaAvailable()) {
+      local();
+      return () => {
+        cancelled = true;
+      };
+    }
+    replicaQuery(name, args).then(
+      ({ value }) => {
+        if (!cancelled && ticket === latest.current) setState({ value });
+      },
+      local,
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, rev, ...deps]);
+  return (state ?? initial)?.value ?? null;
 }

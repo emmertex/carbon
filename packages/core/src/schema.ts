@@ -1,3 +1,6 @@
+import type { Db } from "./db";
+import { recodeLegacyClocks } from "./crdt";
+
 // Schema is applied by the migration runner (see migrate.ts). Each migration is
 // additive and idempotent where practical; the runner tracks the applied version
 // in the `meta` table so upgrades never silently wipe data.
@@ -5,6 +8,8 @@
 export interface Migration {
   version: number;
   up: string;
+  /** Data rewrite run after `up`, inside the same transaction. */
+  run?: (db: Db) => void;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -572,6 +577,14 @@ MIGRATIONS.push({
     CREATE INDEX IF NOT EXISTS idx_items_parent_live ON items(parent_id, deleted, sort_order, created_at);
     CREATE INDEX IF NOT EXISTS idx_items_folder_live ON items(folder_id, deleted);
   `,
+});
+
+MIGRATIONS.push({
+  version: 27,
+  // Compact `items.clocks` encoding (crdt.ts encodeClocks): ~1.75 KB -> ~0.1 KB
+  // per item, which shrinks `items` by more than half and every scan of it.
+  up: "",
+  run: recodeLegacyClocks,
 });
 
 export const LATEST_SCHEMA_VERSION =MIGRATIONS[MIGRATIONS.length - 1]!.version;

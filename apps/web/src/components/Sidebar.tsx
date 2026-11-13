@@ -43,39 +43,23 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  getProjects,
-  getFolders,
-  needsReview,
   createItem,
-  trashCount,
   updateItem,
   reorderItem,
   moveProjectToFolder,
   deleteFolder,
-  openCountsByContainer,
-  sharedRoots,
-  tasksNearLocation,
-  listTags,
-  tagCounts,
-  effectiveTagColor,
   createTag,
   moveTag,
   reorderTag,
   tagId,
-  listPlan,
-  getItem,
   type Item,
   type OrderMode,
 } from '@carbon/core';
-import { countOverdueTasks } from '@/lib/sidebarCounts';
-import { queryRoots } from '@/lib/listQuery';
-import { DEFAULT_PREFS, baseDefaultFilters } from '@/lib/views';
-import { buildTagTree, flattenTagTree, type TagNode } from '@/lib/tagTree';
+import { flattenTagTree, type TagNode } from '@/lib/tagTree';
 import { useReorderSensors } from '@/hooks/useReorderSensors';
 import { useSuppressClickAfterDrag } from '@/hooks/useSuppressClickAfterDrag';
 import { TagMark } from './TagMark';
-import { useDeferredQuery } from '@/hooks/useQuery';
-import { childrenIndex, cachedSubtaskProgress } from '@/lib/childrenIndex';
+import { useReplicaQuery } from '@/hooks/useQuery';
 import { useWhere } from '@/hooks/useWhere';
 import { useFeature } from '@/hooks/useFeature';
 import { undo, redo } from '@/lib/undo';
@@ -309,21 +293,7 @@ function ProjectsSection() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
-  const data = useDeferredQuery(
-    (db) => {
-      const allProjects = getProjects(db);
-      const projects = allProjects.filter((project) => project.status !== 'done');
-      const archivedProjects = allProjects.filter((project) => project.status === 'done');
-      const folders = getFolders(db);
-      // One pass for every project's open count, instead of a recursive
-      // subtaskProgress walk per project on each (deferred) sidebar render.
-      const counts = openCountsByContainer(db, projects.map((p) => p.id), countScope, childrenIndex(db));
-      const openById: Record<string, number> = {};
-      for (const p of projects) openById[p.id] = counts.get(p.id) ?? 0;
-      return { projects, archivedProjects, folders, openById };
-    },
-    [countScope],
-  );
+  const data = useReplicaQuery('projectsSection', { countScope }, [countScope]);
 
   // Memoized so SidebarRow (React.memo) only re-renders rows whose own data
   // actually changed, instead of every row whenever this section re-renders
@@ -681,12 +651,7 @@ function TagsSection() {
   const collapsed = useStore((s) => s.collapsed);
   const close = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
 
-  const data = useDeferredQuery((db) => {
-    const tags = listTags(db);
-    // Resolve display colour (own or inherited) so nested tags show their parent's hue.
-    const resolved = tags.map((t) => ({ ...t, color: effectiveTagColor(db, t.name) }));
-    return { roots: buildTagTree(resolved, tagCounts(db)) };
-  }, []);
+  const data = useReplicaQuery('tagsSection', undefined, []);
 
   // Memoized so TagRow (React.memo) doesn't get a fresh `node` on every render
   // of this section unrelated to tag data/collapse state.
@@ -930,13 +895,7 @@ function PerspectivesSection() {
 
   // Task quantity per saved perspective, computed the same way the view page
   // itself would (see ListView) so the sidebar badge matches what you'd see on open.
-  const counts = useDeferredQuery(
-    (db) =>
-      Object.fromEntries(
-        perspectives.map((p) => [p.id, queryRoots(db, p.base, p.prefs).length]),
-      ),
-    [perspectives],
-  );
+  const counts = useReplicaQuery('perspectiveCounts', { perspectives }, [perspectives]);
 
   // Stable identity (only depends on the current route) so PerspectiveRow's
   // memo isn't defeated by a fresh per-row closure every render.
@@ -1010,46 +969,15 @@ export function Sidebar() {
   const showPerspectives = useFeature('perspectives');
   const showTags = useFeature('tags');
   const countScope = useStore((s) => s.uiPrefs.countScope);
-  const data = useDeferredQuery(
-    (db) => {
-      // Use queryRoots for each count — it applies SQL prefetch and caches
-      // the result by revision, so repeated sidebar re-renders at the same
-      // revision (or view switches) hit the cache instead of re-querying.
-      // At large workspace sizes (10k+ active), this avoids loading every
-      // row into memory on every mutation.
-      const todayItems = queryRoots(db, 'today', { ...DEFAULT_PREFS, filters: baseDefaultFilters('today') });
-      const inboxItems = queryRoots(db, 'inbox', { ...DEFAULT_PREFS, filters: baseDefaultFilters('inbox') });
-      const flaggedItems = queryRoots(db, 'flagged', { ...DEFAULT_PREFS, filters: baseDefaultFilters('flagged') });
-      const projects = getProjects(db);
-      const me = getCurrentUserId();
-
-      // Remaining work in scope (recursive for 'all'), kept consistent with the pie.
-      const remaining = (id: string) => {
-        const { done, total } = cachedSubtaskProgress(db, id, countScope);
-        return total - done;
-      };
-      const planCount = listPlan(db, me)
-        .map((p) => getItem(db, p.item_id))
-        .filter((i): i is Item => !!i && !i.deleted && i.status === 'active').length;
-      return {
-        todayCount: todayItems.length,
-        inboxCount: inboxItems.length,
-        flaggedCount: flaggedItems.length,
-        overdueCount: countOverdueTasks(db),
-        nearbyCount:
-          where.hasLocation
-            ? tasksNearLocation(db, { zone: where.zone, point: where.point }).length
-            : 0,
-        planCount,
-        reviewCount: projects.filter((p) => needsReview(p)).length,
-        trashCount: trashCount(db),
-        shared: (me ? sharedRoots(db, me) : []).map((it) => ({
-          item: it,
-          open: remaining(it.id),
-        })),
-      };
+  const me = getCurrentUserId();
+  const data = useReplicaQuery(
+    'navCounts',
+    {
+      countScope,
+      me,
+      where: { hasLocation: where.hasLocation, zone: where.zone, point: where.point },
     },
-    [countScope, where.hasLocation, where.zone, where.point?.lat, where.point?.lng],
+    [countScope, me, where.hasLocation, where.zone, where.point?.lat, where.point?.lng],
   );
 
   const close = () => setSidebarOpen(false);

@@ -22,7 +22,7 @@ import type {
   Plan,
   Permission,
 } from "./types";
-import { recordOp, createPatch, nextTs, observeTs, causalNowIso } from "./crdt";
+import { recordOp, createPatch, nextTs, observeTs, causalNowIso, decodeClocks } from "./crdt";
 import { nextDueDate } from "./recurrence";
 import { insertRecordOp, recordOpExists, type RecordOp } from "./records";
 
@@ -1034,11 +1034,7 @@ export interface DeletedEntry {
  *  unrestorable just because its clock map is unexpected. */
 function deletedAtMs(clocksJson: string | null, updatedAt: string): number {
   try {
-    const clocks = JSON.parse(clocksJson || "{}") as Record<
-      string,
-      { ts?: number }
-    >;
-    const ts = clocks.deleted?.ts;
+    const ts = decodeClocks(clocksJson).deleted?.ts;
     if (typeof ts === "number" && Number.isFinite(ts)) return ts;
   } catch {
     /* fall through to updated_at */

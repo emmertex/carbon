@@ -16,3 +16,10 @@ export function currentRevision(): number {
 export function bumpRevision(): number {
   return (revision += 1);
 }
+
+/** Read-replica worker only: adopt the main thread's revision for the state it
+ *  just applied, so revision-keyed caches (listQuery, childrenIndex) invalidate
+ *  exactly when the main thread's do. */
+export function adoptRevision(rev: number): void {
+  if (rev > revision) revision = rev;
+}

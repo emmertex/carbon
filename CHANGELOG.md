@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.6
+**Smoother in large workspaces**
+
+- Saving after an edit is nearly instant, no matter how big your workspace is.
+- The sidebar counts update in the background, so typing and clicking no longer stall while they recount.
+- The local database shrinks noticeably on the first launch of this version, which speeds up loading and searching it.
+
 ## v1.3.5
 **Faster**
 
